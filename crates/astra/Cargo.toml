@@ -1,0 +1,35 @@
+[package]
+name = "astra"
+description = "Binario principal del servidor de chat Astra (CLI con clap)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "astra"
+path = "src/main.rs"
+
+[dependencies]
+proto-ares = { path = "../proto-ares" }
+iconnect = { path = "../iconnect" }
+server-core = { path = "../server-core" }
+astra-udp = { path = "../udp" }
+astra-captcha = { path = "../captcha" }
+astra-commands = { path = "../commands" }
+astra-scripting = { path = "../scripting" }
+astra-web = { path = "../web" }
+astra-link = { path = "../link" }
+
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+config = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+scopeguard = { workspace = true }
+bytes = { workspace = true }

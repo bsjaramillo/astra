@@ -1,0 +1,256 @@
+# =============================================================================
+# Astra Chat Server - Release workflow
+# =============================================================================
+# Se ejecuta cuando se pushea un tag con formato v* (ej: v0.1.0).
+# Construye y publica:
+#   1. Imágenes Docker multi-arch (linux/amd64, linux/arm64) → ghcr.io
+#   2. Binarios estáticos para linux, windows, macos → GitHub Release
+# =============================================================================
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Build + push Docker images multi-arch
+  # ---------------------------------------------------------------------------
+  docker:
+    name: docker (linux/${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}-${{ matrix.arch }}
+            ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/astra:latest-${{ matrix.arch }}
+            ghcr.io/${{ github.repository_owner }}/astra:latest
+          labels: |
+            org.opencontainers.image.title=astra
+            org.opencontainers.image.description=Ares Galaxy compatible chat server
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # 2. Build binaries (static + cross-platform)
+  # ---------------------------------------------------------------------------
+  binaries:
+    name: binary (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux musl: binario estático, corre en cualquier Linux
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: linux-aarch64
+          # Windows
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            archive: windows-x86_64.exe
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: macos-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      # Instalar target si no está
+      - name: Install Rust target
+        run: |
+          rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: >
+            --release
+            --target ${{ matrix.target }}
+            --bin astra
+            --locked
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          mv astra astra-${{ matrix.archive }}
+          ls -la astra-${{ matrix.archive }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: astra-${{ matrix.archive }}
+          path: target/${{ matrix.target }}/release/astra-${{ matrix.archive }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3. Crear el GitHub Release con todos los binarios
+  # ---------------------------------------------------------------------------
+  release:
+    name: release
+    needs: [docker, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: astra-*
+          merge-multiple: true
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          cd dist
+          for f in *; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -la
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: Astra ${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Astra Chat Server ${{ steps.version.outputs.VERSION }}
+
+            ### Instalación
+
+            #### Opción 1: Docker (recomendado)
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}
+
+            docker run -d \
+              --name astra \
+              -p 5009:5009 \
+              -p 5010:5010 \
+              -p 5011:5011 \
+              -p 5012:5012/udp \
+              -v astra-data:/app/data \
+              ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}
+            ```
+
+            O usando docker compose:
+
+            ```bash
+            curl -O https://raw.githubusercontent.com/${{ github.repository_owner }}/astra/${{ steps.version.outputs.VERSION }}/docker-compose.yml
+            docker compose up -d
+            ```
+
+            #### Opción 2: Binario estático
+
+            Descarga el binario para tu plataforma:
+
+            - **Linux x86_64**: `astra-linux-x86_64` (musl, static)
+            - **Linux aarch64**: `astra-linux-aarch64` (musl, static)
+            - **macOS x86_64**: `astra-macos-x86_64`
+            - **macOS aarch64 (Apple Silicon)**: `astra-macos-aarch64`
+            - **Windows x86_64**: `astra-windows-x86_64.exe`
+
+            ```bash
+            # Linux
+            chmod +x astra-linux-x86_64
+            ./astra-linux-x86_64 --port 5009 --data-dir ./data
+            ```
+
+            Verifica los checksums con los archivos `.sha256` adjuntos.
+
+            ### Verificar la imagen Docker
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ steps.version.outputs.VERSION }}
+            docker images --digests ghcr.io/${{ github.repository_owner }}/astra
+            ```
+          files: |
+            dist/astra-*
+
+      - name: Generate Docker pull instructions
+        run: |
+          cat > dist/DOCKER.md <<'EOF'
+          # Pull la imagen
+
+          ```bash
+          docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}
+          docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ steps.version.outputs.VERSION }}-amd64
+          docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ steps.version.outputs.VERSION }}-arm64
+          ```
+
+          # Verificar
+
+          ```bash
+          docker images --digests ghcr.io/${{ github.repository_owner }}/astra
+          ```
+          EOF
+          cat dist/DOCKER.md >> dist/README.md || true

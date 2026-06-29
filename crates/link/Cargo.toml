@@ -1,0 +1,25 @@
+[package]
+name = "astra-link"
+description = "Link Hub/Leaf: conecta dos Astra servers para compartir usuarios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+proto-ares = { path = "../proto-ares" }
+iconnect = { path = "../iconnect" }
+server-core = { path = "../server-core" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+sha1 = { workspace = true }

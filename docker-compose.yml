@@ -1,0 +1,33 @@
+# docker-compose.yml - Para testing local
+# Uso: docker compose up
+version: "3.8"
+
+services:
+  astra:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: astra:dev
+    container_name: astra-server
+    restart: unless-stopped
+    ports:
+      - "5009:5009"   # TCP clientes Ares
+      - "5010:5010"   # TCP clientes web (WS)
+      - "5011:5011"   # TCP link hub/leaf
+      - "5012:5012/udp"  # UDP room search
+    volumes:
+      - astra-data:/app/data
+    environment:
+      # Configurar aquí las opciones de Astra (alternativa al config file)
+      RUST_LOG: info
+      ASTRA_PORT: "5009"
+      ASTRA_ROOM_NAME: "Astra Chat"
+      ASTRA_ROOM_TOPIC: "Welcome to Astra"
+    # Si quieres usar un config file:
+    # volumes:
+    #   - ./astra.toml:/app/astra.toml:ro
+    # command: ["/app/astra", "--config", "/app/astra.toml"]
+
+volumes:
+  astra-data:
+    name: astra-data

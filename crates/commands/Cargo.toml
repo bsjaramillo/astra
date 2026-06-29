@@ -1,0 +1,20 @@
+[package]
+name = "astra-commands"
+description = "Comandos de chat migrados del sb0t original (~50 commands: bans, motd, greets, etc.)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+server-core = { path = "../server-core" }
+iconnect = { path = "../iconnect" }
+astra-scripting = { path = "../scripting" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }

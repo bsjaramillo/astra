@@ -1,0 +1,54 @@
+# Archivos que NO se copian al contexto de Docker
+# (reduce el tamaño del contexto y mejora el cache de layers)
+
+# Build artifacts
+target/
+Cargo.lock.bak
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# CI
+.github/
+
+# Docker
+Dockerfile.bak
+.dockerignore
+
+# Documentación
+*.md
+docs/
+LICENSE
+
+# Tests
+tests/
+**/*.test.rs
+**/test_*.rs
+
+# Datos locales del dev (se monta como volume en runtime)
+data/seed_rooms.json
+data/astra.db
+data/astra.db-journal
+data/astra.db-wal
+data/astra.db-shm
+data/scripts/*.js.bak
+
+# Logs
+*.log
+
+# Backups
+*.bak
+*.swp
+*.tmp
