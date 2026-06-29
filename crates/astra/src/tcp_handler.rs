@@ -322,7 +322,7 @@ async fn send_initial_state(ctx: &AppContext, user: &Arc<server_core::user_pool:
     let user_id = user.id;
 
     // Topic
-    let _ = user.send(outbound::build_topic_first(&ctx.settings.room_topic));
+    let _ = user.send(outbound::build_topic_first(&ctx.current_room_topic()));
 
     // Bot fantasma
     let _ = user.send(outbound::build_userlist_bot(&ctx.settings.bot_name));
@@ -413,6 +413,10 @@ async fn handle_public(
 
     // Si el mensaje empieza con '/', es un comando slash
     if let Some((cmd, args)) = astra_commands::parse_command(&text) {
+        if astra_commands::dispatch_builtin(ctx, user, cmd, args) {
+            debug!("comando built-in de '{}': /{} {}", name, cmd, args);
+            return;
+        }
         astra_commands::dispatch(ctx, scripting, &name, cmd, args);
         debug!("comando slash de '{}': /{} {}", name, cmd, args);
         return;

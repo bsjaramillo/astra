@@ -92,7 +92,6 @@ async fn main() -> anyhow::Result<()> {
         settings.data_dir = d.clone();
     }
     let web_enabled = settings.web_enabled && !cli.no_web;
-    let web_port = settings.web_port;
 
     info!("configuración cargada: puerto={}, sala='{}'", settings.port, settings.room_name);
     info!("data dir: {}", settings.data_dir);
@@ -177,30 +176,14 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("TCP listener escuchando en {}", bind_addr);
 
-    // Iniciar WebSocket server (clientes ib0t/HTML5)
     if web_enabled {
-        let web_ctx = ctx.clone();
-        tokio::spawn(async move {
-            let server = astra_web::WsServer::new(web_ctx, web_port);
-            if let Err(e) = server.serve().await {
-                error!("WS server crashed: {}", e);
-            }
-        });
+        info!("WebSocket habilitado en el mismo puerto TCP principal: {}", settings.port);
     } else {
-        warn!("WebSocket server desactivado");
+        warn!("WebSocket desactivado");
     }
 
-    // Iniciar Link Server (hub) si está habilitado
     if cli.link_server {
-        let link_ctx = ctx.clone();
-        let link_port = settings.link_hub_port;
-        tokio::spawn(async move {
-            let server = std::sync::Arc::new(astra_link::LinkServer::new(link_ctx));
-            if let Err(e) = server.start(link_port).await {
-                error!("link server crashed: {}", e);
-            }
-        });
-        info!("link server: iniciado en puerto {}", settings.link_hub_port);
+        info!("Link habilitado en el mismo puerto TCP principal: {}", settings.port);
     }
 
     // Iniciar Link Client (leaf) si se especificó --link-client
@@ -256,8 +239,10 @@ async fn main() -> anyhow::Result<()> {
             Ok((stream, peer)) => {
                 let ctx = ctx.clone();
                 let scripting = scripting.clone();
+                let web_enabled = web_enabled;
+                let link_enabled = cli.link_server;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_tcp_client(ctx, stream, peer, scripting).await {
+                    if let Err(e) = handle_muxed_connection(ctx, stream, peer, scripting, web_enabled, link_enabled).await {
                         warn!("cliente {} error: {}", peer, e);
                     }
                 });
@@ -267,4 +252,63 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+async fn handle_muxed_connection(
+    ctx: Arc<AppContext>,
+    mut stream: tokio::net::TcpStream,
+    peer: SocketAddr,
+    scripting: astra_scripting::ScriptHandle,
+    web_enabled: bool,
+    link_enabled: bool,
+) -> anyhow::Result<()> {
+    let mut peek = [0u8; 16];
+    let n = stream.peek(&mut peek).await.unwrap_or(0);
+    let route = classify_connection(&peek[..n]);
+
+    match route {
+        ConnectionKind::Web if web_enabled => {
+            astra_web::handle_stream(ctx, stream, peer).await?;
+        }
+        ConnectionKind::Link if link_enabled => {
+            astra_link::handle_stream(ctx, stream).await.map_err(|e| anyhow::anyhow!(e))?;
+        }
+        _ => {
+            handle_tcp_client(ctx, stream, peer, scripting).await?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionKind {
+    Web,
+    Link,
+    Ares,
+}
+
+fn classify_connection(buf: &[u8]) -> ConnectionKind {
+    if looks_like_http(buf) {
+        return ConnectionKind::Web;
+    }
+    if looks_like_link(buf) {
+        return ConnectionKind::Link;
+    }
+    ConnectionKind::Ares
+}
+
+fn looks_like_http(buf: &[u8]) -> bool {
+    matches!(
+        buf,
+        [b'G', b'E', b'T', b' ', ..]
+            | [b'P', b'O', b'S', b'T', ..]
+            | [b'H', b'E', b'A', b'D', ..]
+            | [b'O', b'P', b'T', b'I', ..]
+            | [b'C', b'O', b'N', b'N', ..]
+    )
+}
+
+fn looks_like_link(buf: &[u8]) -> bool {
+    buf.len() >= 3 && buf[2] == astra_link::protocol::MSG_LINK_PROTO
 }

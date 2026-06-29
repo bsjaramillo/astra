@@ -32,4 +32,4 @@ pub mod ws_outbound;
 
 pub use handler::handle_connection;
 pub use protocol::{build, build_with_lens, parse_incoming, parse_lens_args, LoginArgs};
-pub use ws::WsServer;
+pub use ws::{handle_stream, WsServer};

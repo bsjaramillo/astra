@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use parking_lot::RwLock;
+
 use super::accounts::AccountManager;
 use super::bans::BanSystem;
 use super::db::Database;
@@ -35,11 +37,14 @@ pub struct AppContext {
     pub security: Arc<SecurityManager>,
     /// Instante de arranque (para calcular uptime).
     pub start_time: Instant,
+    /// Topic actual de la sala (mutable en runtime).
+    pub room_topic: RwLock<String>,
 }
 
 impl AppContext {
     /// Crea un nuevo contexto con la configuración y base de datos dadas.
     pub fn new(settings: Settings, db: Arc<Database>) -> Self {
+        let initial_room_topic = settings.room_topic.clone();
         let stats = Arc::new(Stats::new());
         let user_pool = Arc::new(UserPool::new());
         let bans = Arc::new(BanSystem::new(db.clone()));
@@ -56,11 +61,22 @@ impl AppContext {
             accounts,
             security,
             start_time: Instant::now(),
+            room_topic: RwLock::new(initial_room_topic),
         }
     }
 
     /// Uptime en segundos.
     pub fn uptime_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
+    }
+
+    /// Retorna una copia del topic actual.
+    pub fn current_room_topic(&self) -> String {
+        self.room_topic.read().clone()
+    }
+
+    /// Actualiza el topic actual en memoria.
+    pub fn set_room_topic(&self, topic: impl Into<String>) {
+        *self.room_topic.write() = topic.into();
     }
 }

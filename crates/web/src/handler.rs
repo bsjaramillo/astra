@@ -356,7 +356,7 @@ async fn send_initial_state_ws(
     tx: &mpsc::UnboundedSender<String>,
 ) {
     let room_name = ctx.settings.room_name.clone();
-    let room_topic = ctx.settings.room_topic.clone();
+    let room_topic = ctx.current_room_topic();
     let bot_name = ctx.settings.bot_name.clone();
 
     // ACK

@@ -11,10 +11,8 @@ services:
     container_name: astra-server
     restart: unless-stopped
     ports:
-      - "5009:5009"   # TCP clientes Ares
-      - "5010:5010"   # TCP clientes web (WS)
-      - "5011:5011"   # TCP link hub/leaf
-      - "5012:5012/udp"  # UDP room search
+      - "5009:5009" # TCP clientes Ares
+      - "5009:5009/udp" # UDP room search
     volumes:
       - astra-data:/app/data
     environment:

@@ -44,4 +44,4 @@ pub mod server;
 
 pub use client::LinkClient;
 pub use protocol::{LinkMsg, LinkPacketBuilder, LinkPacketReader, LinkUser};
-pub use server::LinkServer;
+pub use server::{handle_stream, LinkServer};

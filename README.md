@@ -8,13 +8,13 @@ Astra es un servidor de chat multiplataforma que implementa el protocolo binario
 - **Multiplataforma real**: Linux, Windows, macOS, FreeBSD, Raspberry Pi (ARM).
 - **Seguridad por construcción**: memory safety garantizada por el compilador.
 - **Rendimiento**: un solo binario estático con miles de conexiones concurrentes.
-- **Despliegue simple**: cero dependencias en runtime.
+- **Despliegue simple**: un solo puerto lógico para TCP, WS, Link y UDP.
 
 ## Estado del proyecto
 
 🚧 **En desarrollo activo** — ver [ROADMAP.md](./ROADMAP.md) para el plan completo.
 
-**Fase actual**: setup inicial completo, primer binario funcional (escucha TCP/UDP y responde logins básicos).
+**Fase actual**: setup inicial completo, primer binario funcional (un puerto TCP/UDP/WS/Link y logins básicos).
 
 ## Compilar y ejecutar
 
@@ -54,7 +54,7 @@ astra/
 │   ├── astra-captcha/ # Generación de captchas
 │   ├── astra-commands/# 50+ comandos slash
 │   ├── astra-scripting/ # Motor JS (boa_engine)
-│   ├── astra-web/     # WebSockets + panel admin
+│   ├── astra-web/     # WebSockets + panel admin (mismo puerto que TCP)
 │   └── astra/         # Binario principal (CLI)
 ├── docs/
 ├── Cargo.toml         # Workspace

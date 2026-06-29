@@ -26,6 +26,15 @@ pub struct WsServer {
     port: u16,
 }
 
+/// Maneja una conexión TCP potencialmente WebSocket: handshake HTTP y luego frames WS.
+pub async fn handle_stream(
+    ctx: Arc<AppContext>,
+    stream: TcpStream,
+    peer: SocketAddr,
+) -> anyhow::Result<()> {
+    handle_ws_connection(ctx, stream, peer).await
+}
+
 impl WsServer {
     /// Crea un nuevo WebSocket server.
     pub fn new(ctx: Arc<AppContext>, port: u16) -> Self {

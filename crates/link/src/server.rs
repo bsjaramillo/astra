@@ -76,7 +76,11 @@ impl LinkServer {
     }
 }
 
-    /// Maneja una conexión entrante de un leaf.
+/// Maneja una conexión TCP entrante del protocolo Link sobre el listener compartido.
+pub async fn handle_stream(app: Arc<AppContext>, stream: TcpStream) -> Result<(), String> {
+    handle_leaf_connection(app, stream).await
+}
+
 async fn handle_leaf_connection(
     app: Arc<AppContext>,
     mut stream: TcpStream,
