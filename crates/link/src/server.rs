@@ -26,6 +26,8 @@ use crate::protocol::{
     LinkUser,
 };
 
+const UNSPECIFIED_IPV4: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
+
 /// Estado del LinkServer.
 pub struct LinkServer {
     /// Contexto de la app
@@ -312,12 +314,12 @@ fn parse_link_chat_payload(payload: &[u8]) -> Option<(String, String)> {
 fn build_server_join_from_link_user(user: &LinkUser) -> Bytes {
     let mut w = PacketWriter::with_msg(TcpMsg::ServerJoin);
     w.write_u16_le(user.file_count).ok();
-    w.write_u32_le(0).ok();
+    w.write_u32_le(0).ok(); // reservado
     write_ip(&mut w, user.external_ip);
     w.write_u16_le(user.port).ok();
-    w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
-    w.write_u16_le(0).ok();
-    w.write_u8(0).ok();
+    w.write_ipv4(UNSPECIFIED_IPV4).ok(); // node_ip desconocida para usuarios remotos
+    w.write_u16_le(0).ok(); // node_port desconocido
+    w.write_u8(0).ok(); // reservado
     w.write_string(&user.name).ok();
     write_ip(&mut w, user.local_ip);
     w.write_u8(user.browsable as u8).ok();
@@ -342,7 +344,7 @@ fn write_ip(w: &mut PacketWriter, ip: IpAddr) {
             w.write_ipv4(v4).ok();
         }
         IpAddr::V6(_) => {
-            w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
+            w.write_ipv4(UNSPECIFIED_IPV4).ok();
         }
     }
 }

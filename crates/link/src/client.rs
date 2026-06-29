@@ -26,6 +26,8 @@ use crate::protocol::{
     MSG_LINK_PROTO,
 };
 
+const LINK_PACKET_HEADER_LEN: usize = 3;
+
 /// Estado de un LinkClient.
 pub struct LinkClient {
     /// Contexto de la app
@@ -140,7 +142,7 @@ impl LinkClient {
             let packet = b.build_link_packet(LinkMsg::LeafLogin);
             // El packet tiene: u16 len + u8 op + args
             // Necesitamos solo los args (sin u16 len + u8 op)
-            tmp.extend_from_slice(&packet[3..]);
+            tmp.extend_from_slice(&packet[LINK_PACKET_HEADER_LEN..]);
             tmp
         };
 
@@ -190,9 +192,8 @@ impl LinkClient {
 
         // Loop de keep-alive: enviar ping cada 30s, esperar pong
         let mut ping_timer = interval(Duration::from_secs(30));
-        let mut sync_timer = interval(Duration::from_secs(30));
+        let mut sync_timer = interval(Duration::from_secs(60));
         ping_timer.tick().await; // primer tick inmediato
-        sync_timer.tick().await; // primer tick inmediato
         let mut synced_users: HashMap<u16, String> = HashMap::new();
         sync_local_users_to_hub(&self.app, &mut stream, &mut synced_users).await?;
 
@@ -200,7 +201,7 @@ impl LinkClient {
             tokio::select! {
                 _ = ping_timer.tick() => {
                     let ping = LinkPacketBuilder::new().build_link_packet(LinkMsg::LeafPing);
-                    let ping_payload = ping[3..].to_vec();
+                    let ping_payload = ping[LINK_PACKET_HEADER_LEN..].to_vec();
                     if write_link_to_stream(&mut stream, LinkMsg::LeafPing, &ping_payload).await.is_err() {
                         info!("link client: conexión cerrada");
                         return Ok(());
@@ -251,14 +252,14 @@ fn build_leaf_join_payload(user: &server_core::user_pool::AresUser) -> Vec<u8> {
     b.write_string(&user.region);
     b.write_u8(*user.level.read() as u8);
     b.write_u16(user.vroom);
-    b.write_u8(1); // custom_client (simplificado)
+    b.write_u8(u8::from(user.custom_client));
     b.write_u8(u8::from(user.muzzled));
     b.write_u8(u8::from(user.web_client));
     b.write_u8(0); // encrypted
     b.write_u8(u8::from(user.registered));
     b.write_u8(u8::from(user.idle));
     let packet = b.build_link_packet(LinkMsg::LeafJoin);
-    packet[3..].to_vec()
+    packet[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
 async fn sync_local_users_to_hub(
@@ -297,7 +298,7 @@ async fn sync_local_users_to_hub(
             let mut b = LinkPacketBuilder::new();
             b.write_string(&name);
             let packet = b.build_link_packet(LinkMsg::Part);
-            write_link_to_stream(&mut *stream, LinkMsg::Part, &packet[3..])
+            write_link_to_stream(&mut *stream, LinkMsg::Part, &packet[LINK_PACKET_HEADER_LEN..])
                 .await
                 .map_err(|e| format!("error enviando Part: {}", e))?;
         }
