@@ -315,7 +315,7 @@ fn build_server_join_from_link_user(user: &LinkUser) -> Bytes {
     w.write_u32_le(0).ok();
     write_ip(&mut w, user.external_ip);
     w.write_u16_le(user.port).ok();
-    write_ip(&mut w, user.external_ip);
+    w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
     w.write_u16_le(0).ok();
     w.write_u8(0).ok();
     w.write_string(&user.name).ok();

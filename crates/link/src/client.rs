@@ -190,7 +190,7 @@ impl LinkClient {
 
         // Loop de keep-alive: enviar ping cada 30s, esperar pong
         let mut ping_timer = interval(Duration::from_secs(30));
-        let mut sync_timer = interval(Duration::from_secs(5));
+        let mut sync_timer = interval(Duration::from_secs(30));
         ping_timer.tick().await; // primer tick inmediato
         sync_timer.tick().await; // primer tick inmediato
         let mut synced_users: HashMap<u16, String> = HashMap::new();
