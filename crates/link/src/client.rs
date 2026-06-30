@@ -9,15 +9,15 @@
 //! Para esta implementación mínima, no reenvía broadcasts — solo mantiene
 //! la lista de usuarios del otro server en una estructura interna.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::interval;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use server_core::AppContext;
 
@@ -25,6 +25,8 @@ use crate::protocol::{
     read_link_from_stream, write_link_to_stream, LinkMsg, LinkPacketBuilder, LinkUser,
     MSG_LINK_PROTO,
 };
+
+const LINK_PACKET_HEADER_LEN: usize = 3;
 
 /// Estado de un LinkClient.
 pub struct LinkClient {
@@ -78,10 +80,7 @@ impl LinkClient {
                     backoff = Duration::from_secs(1);
                 }
                 Err(e) => {
-                    warn!(
-                        "link client: error: {} — reintentando en {:?}",
-                        e, backoff
-                    );
+                    warn!("link client: error: {} — reintentando en {:?}", e, backoff);
                 }
             }
             if !*self.active.lock() {
@@ -143,7 +142,7 @@ impl LinkClient {
             let packet = b.build_link_packet(LinkMsg::LeafLogin);
             // El packet tiene: u16 len + u8 op + args
             // Necesitamos solo los args (sin u16 len + u8 op)
-            tmp.extend_from_slice(&packet[3..]);
+            tmp.extend_from_slice(&packet[LINK_PACKET_HEADER_LEN..]);
             tmp
         };
 
@@ -193,12 +192,16 @@ impl LinkClient {
 
         // Loop de keep-alive: enviar ping cada 30s, esperar pong
         let mut ping_timer = interval(Duration::from_secs(30));
+        let mut sync_timer = interval(Duration::from_secs(60));
         ping_timer.tick().await; // primer tick inmediato
+        let mut synced_users: HashMap<u16, String> = HashMap::new();
+        sync_local_users_to_hub(&self.app, &mut stream, &mut synced_users).await?;
+
         loop {
             tokio::select! {
                 _ = ping_timer.tick() => {
                     let ping = LinkPacketBuilder::new().build_link_packet(LinkMsg::LeafPing);
-                    let ping_payload = ping[3..].to_vec();
+                    let ping_payload = ping[LINK_PACKET_HEADER_LEN..].to_vec();
                     if write_link_to_stream(&mut stream, LinkMsg::LeafPing, &ping_payload).await.is_err() {
                         info!("link client: conexión cerrada");
                         return Ok(());
@@ -218,6 +221,9 @@ impl LinkClient {
                         warn!("link client: opcode no manejado: {:?}", op);
                     }
                 }
+                _ = sync_timer.tick() => {
+                    sync_local_users_to_hub(&self.app, &mut stream, &mut synced_users).await?;
+                }
             }
         }
     }
@@ -226,6 +232,79 @@ impl LinkClient {
     pub fn close(&self) {
         *self.active.lock() = false;
     }
+}
+
+fn build_leaf_join_payload(user: &server_core::user_pool::AresUser) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new();
+    b.write_string(&user.name.read()); // org_name
+    b.write_string(&user.name.read()); // name
+    b.write_string(&user.version);
+    b.write_guid(&user.guid);
+    b.write_u16(user.file_count);
+    b.write_ip(user.external_ip);
+    b.write_ip(user.local_ip);
+    b.write_u16(user.data_port);
+    b.write_string(""); // dns
+    b.write_u8(u8::from(user.browsable));
+    b.write_u8(user.age);
+    b.write_u8(user.sex);
+    b.write_u8(user.country);
+    b.write_string(&user.region);
+    b.write_u8(*user.level.read() as u8);
+    b.write_u16(user.vroom);
+    b.write_u8(u8::from(user.custom_client));
+    b.write_u8(u8::from(user.muzzled));
+    b.write_u8(u8::from(user.web_client));
+    b.write_u8(0); // encrypted
+    b.write_u8(u8::from(user.registered));
+    b.write_u8(u8::from(user.idle));
+    let packet = b.build_link_packet(LinkMsg::LeafJoin);
+    packet[LINK_PACKET_HEADER_LEN..].to_vec()
+}
+
+async fn sync_local_users_to_hub(
+    app: &AppContext,
+    stream: &mut TcpStream,
+    synced_users: &mut HashMap<u16, String>,
+) -> Result<(), String> {
+    let current_users: HashMap<u16, std::sync::Arc<server_core::user_pool::AresUser>> = app
+        .user_pool
+        .users()
+        .into_iter()
+        .filter(|u| u.logged_in)
+        .map(|u| (u.id, u))
+        .collect();
+
+    // Nuevos users: enviar LeafJoin
+    for (id, user) in &current_users {
+        if !synced_users.contains_key(id) {
+            let payload = build_leaf_join_payload(user);
+            write_link_to_stream(&mut *stream, LinkMsg::LeafJoin, &payload)
+                .await
+                .map_err(|e| format!("error enviando LeafJoin: {}", e))?;
+            synced_users.insert(*id, user.name.read().clone());
+        }
+    }
+
+    // Users que salieron: enviar Part
+    let departed_ids: Vec<u16> = synced_users
+        .keys()
+        .copied()
+        .filter(|id| !current_users.contains_key(id))
+        .collect();
+
+    for id in departed_ids {
+        if let Some(name) = synced_users.remove(&id) {
+            let mut b = LinkPacketBuilder::new();
+            b.write_string(&name);
+            let packet = b.build_link_packet(LinkMsg::Part);
+            write_link_to_stream(&mut *stream, LinkMsg::Part, &packet[LINK_PACKET_HEADER_LEN..])
+                .await
+                .map_err(|e| format!("error enviando Part: {}", e))?;
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_userlist_item(payload: &[u8]) -> Option<LinkUser> {

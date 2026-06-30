@@ -8,11 +8,13 @@
 //! 5. Loop de keep-alive con `HubPong` cada 30s
 
 use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use parking_lot::Mutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use proto_ares::{PacketWriter, TcpMsg};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::interval;
 use tracing::{error, info, warn};
@@ -20,8 +22,11 @@ use tracing::{error, info, warn};
 use server_core::AppContext;
 
 use crate::protocol::{
-    read_link_from_stream, write_link_to_stream, LinkMsg, LinkPacketBuilder, MSG_LINK_PROTO,
+    read_link_from_stream, write_link_to_stream, LinkMsg, LinkPacketBuilder, LinkPacketReader,
+    LinkUser,
 };
+
+const UNSPECIFIED_IPV4: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 
 /// Estado del LinkServer.
 pub struct LinkServer {
@@ -81,10 +86,7 @@ pub async fn handle_stream(app: Arc<AppContext>, stream: TcpStream) -> Result<()
     handle_leaf_connection(app, stream).await
 }
 
-async fn handle_leaf_connection(
-    app: Arc<AppContext>,
-    mut stream: TcpStream,
-) -> Result<(), String> {
+async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> Result<(), String> {
     // 1. Leer LeafLogin
     let (op, payload) = read_link_from_stream(&mut stream)
         .await
@@ -93,9 +95,6 @@ async fn handle_leaf_connection(
         return Err(format!("esperado LeafLogin, recibí {:?}", op));
     }
 
-    let mut r = crate::protocol::LinkPacketReader::new(&payload);
-    // El payload ya NO incluye el op byte (read_link_from_stream lo
-    // extrae), por lo que usamos `from_payload` en vez de `new`.
     let mut r = crate::protocol::LinkPacketReader::from_payload(&payload);
 
     let leaf_name = r
@@ -195,7 +194,7 @@ async fn handle_leaf_connection(
                 }
             }
             read_result = read_link_from_stream(&mut stream) => {
-                let (op, _payload) = match read_result {
+                let (op, payload) = match read_result {
                     Ok(r) => r,
                     Err(_) => {
                         info!("link server: leaf '{}' desconectado", leaf_name);
@@ -203,14 +202,40 @@ async fn handle_leaf_connection(
                     }
                 };
                 match op {
-                    LinkMsg::LeafPing => {
-                        // HubPong ya se envía periódicamente arriba
-                    }
+                    LinkMsg::LeafPing => {}
                     LinkMsg::Part => {
-                        info!("link server: leaf user se fue");
+                        if let Some(name) = parse_link_part_name(&payload) {
+                            let part_pkt = build_server_part_for_name(&name);
+                            broadcast_to_local_users(&app, part_pkt);
+                            info!("link server: part recibido desde leaf: {}", name);
+                        } else {
+                            warn!("link server: Part malformado");
+                        }
                     }
                     LinkMsg::LeafJoin => {
-                        info!("link server: leaf user se unió");
+                        if let Some(user) = parse_link_user_item(&payload) {
+                            let join_pkt = build_server_join_from_link_user(&user);
+                            broadcast_to_local_users(&app, join_pkt);
+                            info!("link server: LeafJoin recibido: {}", user.name);
+                        } else {
+                            warn!("link server: LeafJoin malformado");
+                        }
+                    }
+                    LinkMsg::PublicText => {
+                        if let Some((from, text)) = parse_link_chat_payload(&payload) {
+                            let pkt = server_core::outbound::build_public(&from, &text);
+                            broadcast_to_local_users(&app, pkt);
+                        } else {
+                            warn!("link server: PublicText malformado");
+                        }
+                    }
+                    LinkMsg::EmoteText => {
+                        if let Some((from, text)) = parse_link_chat_payload(&payload) {
+                            let pkt = server_core::outbound::build_emote(&from, &text);
+                            broadcast_to_local_users(&app, pkt);
+                        } else {
+                            warn!("link server: EmoteText malformado");
+                        }
                     }
                     _ => {
                         warn!("link server: opcode no manejado: {:?}", op);
@@ -218,5 +243,164 @@ async fn handle_leaf_connection(
                 }
             }
         }
+    }
+}
+
+fn parse_link_user_item(payload: &[u8]) -> Option<LinkUser> {
+    let mut r = LinkPacketReader::from_payload(payload);
+    let org_name = r.read_string().ok()?;
+    let name = r.read_string().ok()?;
+    let version = r.read_string().ok()?;
+    let guid = r.read_guid().ok()?;
+    let file_count = r.read_u16().ok()?;
+    let external_ip = r.read_ip().ok()?;
+    let local_ip = r.read_ip().ok()?;
+    let port = r.read_u16().ok()?;
+    let dns = r.read_string().ok()?;
+    let browsable = r.read_u8().ok()? != 0;
+    let age = r.read_u8().ok()?;
+    let sex = r.read_u8().ok()?;
+    let country = r.read_u8().ok()?;
+    let region = r.read_string().ok()?;
+    let level = r.read_u8().ok()?;
+    let vroom = r.read_u16().ok()?;
+    let custom_client = r.read_u8().ok()? != 0;
+    let muzzled = r.read_u8().ok()? != 0;
+    let web_client = r.read_u8().ok()? != 0;
+    let encrypted = r.read_u8().ok()? != 0;
+    let registered = r.read_u8().ok()? != 0;
+    let idle = r.read_u8().ok()? != 0;
+
+    Some(LinkUser {
+        org_name,
+        name,
+        version,
+        guid,
+        file_count,
+        external_ip,
+        local_ip,
+        port,
+        dns,
+        browsable,
+        age,
+        sex,
+        country,
+        region,
+        level,
+        vroom,
+        custom_client,
+        muzzled,
+        web_client,
+        encrypted,
+        registered,
+        idle,
+        custom_name: None,
+        personal_message: None,
+    })
+}
+
+fn parse_link_part_name(payload: &[u8]) -> Option<String> {
+    let mut r = LinkPacketReader::from_payload(payload);
+    r.read_string().ok()
+}
+
+fn parse_link_chat_payload(payload: &[u8]) -> Option<(String, String)> {
+    let mut r = LinkPacketReader::from_payload(payload);
+    let from = r.read_string().ok()?;
+    let text = r.read_string().ok()?;
+    Some((from, text))
+}
+
+fn build_server_join_from_link_user(user: &LinkUser) -> Bytes {
+    let mut w = PacketWriter::with_msg(TcpMsg::ServerJoin);
+    w.write_u16_le(user.file_count).ok();
+    w.write_u32_le(0).ok(); // reservado
+    write_ip(&mut w, user.external_ip);
+    w.write_u16_le(user.port).ok();
+    w.write_ipv4(UNSPECIFIED_IPV4).ok(); // node_ip desconocida para usuarios remotos
+    w.write_u16_le(0).ok(); // node_port desconocido
+    w.write_u8(0).ok(); // reservado
+    w.write_string(&user.name).ok();
+    write_ip(&mut w, user.local_ip);
+    w.write_u8(user.browsable as u8).ok();
+    w.write_u8(user.level).ok();
+    w.write_u8(user.age).ok();
+    w.write_u8(user.sex).ok();
+    w.write_u8(user.country).ok();
+    w.write_string(&user.region).ok();
+    w.write_u8(0).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
+fn build_server_part_for_name(name: &str) -> Bytes {
+    let mut w = PacketWriter::with_msg(TcpMsg::ServerPart);
+    w.write_string(name).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
+fn write_ip(w: &mut PacketWriter, ip: IpAddr) {
+    match ip {
+        IpAddr::V4(v4) => {
+            w.write_ipv4(v4).ok();
+        }
+        IpAddr::V6(_) => {
+            w.write_ipv4(UNSPECIFIED_IPV4).ok();
+        }
+    }
+}
+
+fn broadcast_to_local_users(app: &AppContext, pkt: Bytes) {
+    for user in app.user_pool.users() {
+        if user.logged_in && !user.quarantined {
+            let _ = user.send(pkt.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::LinkPacketBuilder;
+
+    #[test]
+    fn parse_leaf_join_payload_roundtrip() {
+        let mut b = LinkPacketBuilder::new();
+        b.write_string("Alice");
+        b.write_string("Alice");
+        b.write_string("Ares 2.5");
+        b.write_guid(&[0xAB; 16]);
+        b.write_u16(42);
+        b.write_ip("1.2.3.4".parse().unwrap());
+        b.write_ip("10.0.0.2".parse().unwrap());
+        b.write_u16(5009);
+        b.write_string("");
+        b.write_u8(1);
+        b.write_u8(30);
+        b.write_u8(1);
+        b.write_u8(49);
+        b.write_string("US");
+        b.write_u8(1);
+        b.write_u16(0);
+        b.write_u8(1);
+        b.write_u8(0);
+        b.write_u8(0);
+        b.write_u8(0);
+        b.write_u8(1);
+        b.write_u8(0);
+        let packet = b.build_link_packet(LinkMsg::LeafJoin);
+
+        let parsed = parse_link_user_item(&packet[3..]).expect("payload válido");
+        assert_eq!(parsed.name, "Alice");
+        assert_eq!(parsed.file_count, 42);
+        assert_eq!(parsed.port, 5009);
+    }
+
+    #[test]
+    fn parse_part_payload_roundtrip() {
+        let mut b = LinkPacketBuilder::new();
+        b.write_string("Bob");
+        let packet = b.build_link_packet(LinkMsg::Part);
+        let name = parse_link_part_name(&packet[3..]).expect("part válido");
+        assert_eq!(name, "Bob");
     }
 }
