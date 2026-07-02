@@ -35,7 +35,7 @@
 
 use std::net::IpAddr;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 
 /// Opcodes del protocolo link (idéntico al sb0t original).
 ///

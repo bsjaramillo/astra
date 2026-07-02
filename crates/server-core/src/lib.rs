@@ -64,7 +64,7 @@ pub mod outbound;
 pub mod time;
 
 /// Re-exports comunes.
-pub use app::AppContext;
+pub use app::{AppContext, LinkEvent, LinkUserSnapshot};
 pub use room::Room;
 pub use stats::Stats;
 pub use user_pool::{AresUser, UserPool};

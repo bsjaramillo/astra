@@ -18,17 +18,22 @@ use bytes::Bytes;
 use proto_ares::{PacketReader, PacketWriter, TcpMsg};
 use server_core::login::parse_login;
 use server_core::outbound;
-use server_core::security::RejectReason;
-use server_core::AppContext;
+use server_core::{AppContext, LinkEvent, LinkUserSnapshot};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use astra_commands;
-use astra_scripting::{ScriptHandle, ScriptManager};
+use astra_scripting::ScriptHandle;
+
+const LINK_MSG_AVATAR: u8 = 11;
+const LINK_MSG_CUSTOM_DATA_TO: u8 = 30;
+const LINK_MSG_CUSTOM_DATA_ALL: u8 = 31;
+const LINK_MSG_SCRIBBLE_LEAF: u8 = 34;
+const LINK_MSG_BROWSE: u8 = 50;
 
 /// Server features flags (de `TCPOutbound.cs` `MyFeatures`).
 mod server_features {
@@ -37,7 +42,6 @@ mod server_features {
     pub const SERVER_SUPPORTS_COMPRESSION: u8 = 4;
     pub const SERVER_SUPPORTS_VC: u8 = 8;
     pub const SERVER_SUPPORTS_OPUS_VC: u8 = 16;
-    pub const SERVER_SUPPORTS_ROOM_SCRIBBLES: u8 = 32;
     pub const SERVER_SUPPORTS_PM_SCRIBBLES: u8 = 64;
     pub const SERVER_SUPPORTS_HTML: u8 = 128;
 }
@@ -122,6 +126,10 @@ pub async fn handle_tcp_client(
     // Broadcast del JOIN a los usuarios existentes
     let join_pkt = outbound::build_join_or_userlist(&user);
     broadcast_to_room(&ctx, &user, join_pkt);
+    ctx.publish_link_event(LinkEvent::Join {
+        origin: None,
+        user: LinkUserSnapshot::from_user(&user),
+    });
 
     // ============================================================
     // Loop de lectura de mensajes
@@ -156,6 +164,10 @@ pub async fn handle_tcp_client(
     // Broadcast del PART
     let part_pkt = outbound::build_part(&user_arc);
     broadcast_to_room(&ctx, &user_arc, part_pkt);
+    ctx.publish_link_event(LinkEvent::Part {
+        origin: None,
+        name: user_arc.name.read().clone(),
+    });
 
     // Cerrar el canal para que el writer termine
     drop(tx);
@@ -372,6 +384,16 @@ async fn dispatch_message(
             // Por ahora: reenvía el status (broadcast del join refresh)
             let join_pkt = outbound::build_join_or_userlist(user);
             broadcast_to_room(ctx, user, join_pkt);
+            ctx.publish_link_event(LinkEvent::UserUpdated {
+                origin: None,
+                user: LinkUserSnapshot::from_user(user),
+            });
+        }
+        TcpMsg::ClientIgnorelist => {
+            handle_ignore_list(user, &pkt.data[1..]);
+        }
+        TcpMsg::Avatar => {
+            publish_raw_link(ctx, LINK_MSG_AVATAR, &pkt.data[1..]);
         }
         TcpMsg::Public => {
             handle_public(ctx, user, &pkt.data[1..], &scripting).await;
@@ -385,11 +407,34 @@ async fn dispatch_message(
         TcpMsg::PersonalMessage => {
             handle_personal_message(ctx, user, &pkt.data[1..]).await;
         }
+        TcpMsg::ClientBrowse => {
+            publish_raw_link(ctx, LINK_MSG_BROWSE, &pkt.data[1..]);
+        }
+        TcpMsg::CustomData => {
+            publish_raw_link(ctx, LINK_MSG_CUSTOM_DATA_TO, &pkt.data[1..]);
+        }
+        TcpMsg::CustomDataAll => {
+            publish_raw_link(ctx, LINK_MSG_CUSTOM_DATA_ALL, &pkt.data[1..]);
+        }
+        TcpMsg::ClientScribbleRoomFirst | TcpMsg::ClientScribbleRoomChunk => {
+            publish_raw_link(ctx, LINK_MSG_SCRIBBLE_LEAF, &pkt.data[1..]);
+        }
         _ => {
             debug!("mensaje {:?} de id={} (no procesado en esta fase)", msg, user.id);
         }
     }
     Ok(())
+}
+
+fn publish_raw_link(ctx: &AppContext, msg: u8, payload: &[u8]) {
+    if ctx.link_receiver_count() == 0 {
+        return;
+    }
+    ctx.publish_link_event(LinkEvent::Raw {
+        origin: None,
+        msg,
+        payload: payload.to_vec(),
+    });
 }
 
 /// Maneja MSG_CHAT_CLIENT_PUBLIC (10).
@@ -424,6 +469,11 @@ async fn handle_public(
 
     let pkt = outbound::build_public(&name, &text);
     broadcast_to_room(ctx, user, pkt);
+    ctx.publish_link_event(LinkEvent::Public {
+        origin: None,
+        from: name.clone(),
+        text: text.clone(),
+    });
     debug!("public de '{}': {}", name, text);
 }
 
@@ -440,6 +490,11 @@ async fn handle_emote(ctx: &AppContext, user: &Arc<server_core::user_pool::AresU
     let name = user.name.read().clone();
     let pkt = outbound::build_emote(&name, &text);
     broadcast_to_room(ctx, user, pkt);
+    ctx.publish_link_event(LinkEvent::Emote {
+        origin: None,
+        from: name,
+        text,
+    });
 }
 
 /// Maneja MSG_CHAT_CLIENT_PVT (25).
@@ -461,16 +516,59 @@ async fn handle_pvt(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUse
     // Buscar al destinatario
     if let Some(target) = ctx.user_pool.get_by_name(&target_name) {
         let from = user.name.read().clone();
-        let pkt = outbound::build_pvt(&from, &text);
-        if !target.send(pkt) {
-            warn!("no se pudo enviar PM de '{}' a '{}'", from, target_name);
+        if target
+            .ignore_list
+            .read()
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(&from))
+        {
+            let mut w = PacketWriter::with_msg(TcpMsg::ServerIsIgnoringYou);
+            w.write_string(&target_name).ok();
+            let _ = user.send(Bytes::copy_from_slice(w.as_bytes()));
+            ctx.publish_link_event(LinkEvent::PrivateIgnored {
+                origin: None,
+                from,
+                to: target_name,
+            });
+        } else {
+            let pkt = outbound::build_pvt(&from, &text);
+            if !target.send(pkt) {
+                warn!("no se pudo enviar PM de '{}' a '{}'", from, target_name);
+            }
         }
+    } else if ctx.link_receiver_count() > 0 {
+        ctx.publish_link_event(LinkEvent::Private {
+            origin: None,
+            from: user.name.read().clone(),
+            to: target_name,
+            text,
+        });
     } else {
         // NoSuch
         let mut w = PacketWriter::with_msg(TcpMsg::ServerNosuch);
         w.write_string(&format!("User '{}' not found", target_name)).ok();
         user.send(Bytes::copy_from_slice(w.as_bytes()));
     }
+}
+
+/// Maneja MSG_CHAT_CLIENT_IGNORELIST (45).
+/// Formato: lista de strings Ares consecutivas.
+fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) {
+    let mut r = PacketReader::new(data);
+    let mut list = Vec::new();
+    while r.remaining() > 0 {
+        let Ok(entry) = r.read_string() else {
+            break;
+        };
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !list.iter().any(|e: &String| e.eq_ignore_ascii_case(trimmed)) {
+            list.push(trimmed.to_string());
+        }
+    }
+    *user.ignore_list.write() = list;
 }
 
 /// Maneja MSG_CHAT_CLIENT_PERSONAL_MESSAGE (13).
@@ -489,16 +587,21 @@ async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_
     w.write_string(&text).ok();
     let pkt = Bytes::copy_from_slice(w.as_bytes());
     broadcast_to_room(ctx, user, pkt);
+    ctx.publish_link_event(LinkEvent::PersonalMessage {
+        origin: None,
+        name: user.name.read().clone(),
+        text,
+    });
 }
 
 /// Broadcast a todos los usuarios en la misma vroom que `sender`.
 /// `sender` también lo recibe (compat con sb0t original).
 fn broadcast_to_room(ctx: &AppContext, sender: &server_core::user_pool::AresUser, pkt: Bytes) {
     let sender_id = sender.id;
-    let vroom = sender.vroom;
+    let vroom = *sender.vroom.read();
     let users = ctx.user_pool.users();
     for u in users {
-        if u.logged_in && u.vroom == vroom && !u.quarantined {
+        if u.logged_in && *u.vroom.read() == vroom && !u.quarantined {
             // En el sb0t original el sender también recibe el broadcast
             // (excepto en algunos casos). Aquí también.
             let _ = u.send(pkt.clone());

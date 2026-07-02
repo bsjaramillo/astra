@@ -57,7 +57,7 @@ pub struct AresUser {
     /// ¿Ghosting?
     pub ghosting: bool,
     /// Lista de ignorados.
-    pub ignore_list: Vec<String>,
+    pub ignore_list: parking_lot::RwLock<Vec<String>>,
     /// ¿Custom client?
     pub custom_client: bool,
     /// Tags custom.
@@ -71,7 +71,7 @@ pub struct AresUser {
     /// ¿Opus voice chat private?
     pub voice_opus_chat_private: bool,
     /// Vroom.
-    pub vroom: u16,
+    pub vroom: parking_lot::RwLock<u16>,
     /// ¿Owner?
     pub is_owner: bool,
     /// ¿Quarantined?
@@ -105,7 +105,7 @@ pub struct AresUser {
     /// Fuente.
     pub font: IFont,
     /// Custom name.
-    pub custom_name: Option<String>,
+    pub custom_name: parking_lot::RwLock<Option<String>>,
     /// Personal message (protegido para acceso concurrente).
     pub personal_message: parking_lot::Mutex<String>,
     /// Avatar.
@@ -156,14 +156,14 @@ impl AresUser {
             region: String::new(),
             fast_ping: false,
             ghosting: false,
-            ignore_list: Vec::new(),
+            ignore_list: parking_lot::RwLock::new(Vec::new()),
             custom_client: false,
             custom_client_tags: Vec::new(),
             voice_chat_public: false,
             voice_chat_private: false,
             voice_opus_chat_public: false,
             voice_opus_chat_private: false,
-            vroom: 0,
+            vroom: parking_lot::RwLock::new(0),
             is_owner: false,
             quarantined: false,
             supports_html: false,
@@ -180,7 +180,7 @@ impl AresUser {
             connected: true,
             encrypted: false,
             font: IFont::default(),
-            custom_name: None,
+            custom_name: parking_lot::RwLock::new(None),
             personal_message: parking_lot::Mutex::new(String::new()),
             avatar: None,
             full_avatar: None,
@@ -265,6 +265,15 @@ impl UserPool {
     /// Devuelve un usuario por nick (case-insensitive).
     pub fn get_by_name(&self, name: &str) -> Option<Arc<AresUser>> {
         self.by_name.read().get(&name.to_lowercase()).cloned()
+    }
+
+    /// Actualiza el índice por nick de un usuario ya registrado.
+    pub fn rename(&self, id: u16, old_name: &str, new_name: &str) {
+        let mut by_name = self.by_name.write();
+        by_name.remove(&old_name.to_lowercase());
+        if let Some(user) = self.users.read().get(&id).cloned() {
+            by_name.insert(new_name.to_lowercase(), user);
+        }
     }
 
     /// Cantidad de usuarios conectados.

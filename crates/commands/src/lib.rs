@@ -29,6 +29,9 @@ use astra_scripting::{ScriptEvent, ScriptHandle};
 const DEFAULT_HELP_LINES: &[&str] = &[
     "Available commands:",
     "/help - show this help",
+    "/nick <name> - change your nickname",
+    "/vroom <id> - move to another virtual room",
+    "/cname [text|-] - set or clear your custom name",
     "/users - list connected users",
     "/topic [text] - show or set room topic",
     "/motd [text] - show or set message of the day",
@@ -88,6 +91,18 @@ pub fn dispatch_builtin(ctx: &AppContext, user: &Arc<AresUser>, command: &str, a
             handle_help(ctx, user, args);
             true
         }
+        "nick" => {
+            handle_nick(ctx, user, args);
+            true
+        }
+        "vroom" => {
+            handle_vroom(ctx, user, args);
+            true
+        }
+        "cname" => {
+            handle_cname(ctx, user, args);
+            true
+        }
         "users" => {
             handle_users(ctx, user, args);
             true
@@ -123,6 +138,123 @@ pub fn dispatch_builtin(ctx: &AppContext, user: &Arc<AresUser>, command: &str, a
 fn handle_help(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     for line in DEFAULT_HELP_LINES {
         send_system_line(ctx, user, line);
+    }
+}
+
+fn handle_nick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let new_name = args.trim();
+    if new_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /nick <name>");
+        return;
+    }
+    if new_name.chars().count() > 30 {
+        send_system_line(ctx, user, "Nickname too long.");
+        return;
+    }
+
+    let old_name = user.name.read().clone();
+    if old_name.eq_ignore_ascii_case(new_name) {
+        send_system_line(ctx, user, "You already have that nickname.");
+        return;
+    }
+    if ctx.user_pool.get_by_name(new_name).is_some() {
+        send_system_line(ctx, user, "Nickname already in use.");
+        return;
+    }
+
+    *user.name.write() = new_name.to_string();
+    ctx.user_pool.rename(user.id, &old_name, new_name);
+
+    let mut part_user = AresUser::new(user.id, user.external_ip, user.guid);
+    part_user.logged_in = true;
+    *part_user.name.write() = old_name.clone();
+    let part_pkt = outbound::build_part(&part_user);
+    let join_pkt = outbound::build_join_or_userlist(user);
+    for other in ctx.user_pool.users() {
+        if other.logged_in && *other.vroom.read() == *user.vroom.read() && !other.quarantined {
+            let _ = other.send(part_pkt.clone());
+            let _ = other.send(join_pkt.clone());
+        }
+    }
+
+    ctx.publish_link_event(server_core::LinkEvent::NickChanged {
+        origin: None,
+        old_name,
+        user: server_core::LinkUserSnapshot::from_user(user),
+    });
+
+    send_system_line(ctx, user, "Nickname updated.");
+}
+
+fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let Ok(new_vroom) = args.trim().parse::<u16>() else {
+        send_system_line(ctx, user, "Usage: /vroom <id>");
+        return;
+    };
+
+    let old_vroom = *user.vroom.read();
+    if old_vroom == new_vroom {
+        send_system_line(ctx, user, "You are already in that vroom.");
+        return;
+    }
+
+    let mut part_user = AresUser::new(user.id, user.external_ip, user.guid);
+    part_user.logged_in = true;
+    *part_user.name.write() = user.name.read().clone();
+    *part_user.vroom.write() = old_vroom;
+
+    *user.vroom.write() = new_vroom;
+
+    let part_pkt = outbound::build_part(&part_user);
+    let join_pkt = outbound::build_join_or_userlist(user);
+    for other in ctx.user_pool.users() {
+        if !other.logged_in || other.quarantined {
+            continue;
+        }
+        let other_vroom = *other.vroom.read();
+        if other_vroom == old_vroom {
+            let _ = other.send(part_pkt.clone());
+        }
+        if other_vroom == new_vroom {
+            let _ = other.send(join_pkt.clone());
+        }
+    }
+
+    ctx.publish_link_event(server_core::LinkEvent::VroomChanged {
+        origin: None,
+        user: server_core::LinkUserSnapshot::from_user(user),
+    });
+
+    send_system_line(ctx, user, &format!("Moved to vroom {}.", new_vroom));
+}
+
+fn handle_cname(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        let current = user.custom_name.read().clone();
+        match current {
+            Some(value) => send_system_line(ctx, user, &format!("Custom name: {}", value)),
+            None => send_system_line(ctx, user, "Custom name is not set."),
+        }
+        return;
+    }
+
+    let next = if trimmed == "-" {
+        None
+    } else {
+        Some(trimmed.chars().take(40).collect::<String>())
+    };
+
+    *user.custom_name.write() = next.clone();
+    ctx.publish_link_event(server_core::LinkEvent::CustomName {
+        origin: None,
+        name: user.name.read().clone(),
+        custom_name: next.clone(),
+    });
+
+    match next {
+        Some(value) => send_system_line(ctx, user, &format!("Custom name set to '{}'.", value)),
+        None => send_system_line(ctx, user, "Custom name cleared."),
     }
 }
 

@@ -458,10 +458,10 @@ fn handle_ws_emote(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
 /// Broadcast a todos los usuarios en la misma vroom que `sender`.
 /// Para usuarios WS, traduce el binario a texto usando `ws_text_sender`.
 fn broadcast_to_room(ctx: &AppContext, sender: &AresUser, pkt: Bytes) {
-    let vroom = sender.vroom;
+    let vroom = *sender.vroom.read();
     let users = ctx.user_pool.users();
     for u in users {
-        if u.logged_in && u.vroom == vroom && !u.quarantined {
+        if u.logged_in && *u.vroom.read() == vroom && !u.quarantined {
             if u.web_client {
                 // WS user: traducir a texto y enviar por ws_text_sender
                 if let Some(text) = translate_broadcast(&pkt, sender) {

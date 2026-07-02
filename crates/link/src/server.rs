@@ -16,10 +16,11 @@ use bytes::Bytes;
 use parking_lot::Mutex;
 use proto_ares::{PacketWriter, TcpMsg};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::time::interval;
 use tracing::{error, info, warn};
 
-use server_core::AppContext;
+use server_core::{AppContext, LinkEvent, LinkUserSnapshot};
 
 use crate::protocol::{
     read_link_from_stream, write_link_to_stream, LinkMsg, LinkPacketBuilder, LinkPacketReader,
@@ -27,6 +28,7 @@ use crate::protocol::{
 };
 
 const UNSPECIFIED_IPV4: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
+const LINK_PACKET_HEADER_LEN: usize = 3;
 
 /// Estado del LinkServer.
 pub struct LinkServer {
@@ -148,7 +150,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
         b.write_u8(user.country);
         b.write_string(&user.region);
         b.write_u8(*user.level.read() as u8);
-        b.write_u16(user.vroom);
+        b.write_u16(*user.vroom.read());
         b.write_u8(1); // custom_client (simplificado)
         b.write_u8(u8::from(user.muzzled));
         b.write_u8(u8::from(user.web_client));
@@ -178,6 +180,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
     // 5. Loop de keep-alive: enviar HubPong cada 30s
     let mut ping_timer = interval(Duration::from_secs(30));
     ping_timer.tick().await; // skip primer tick inmediato
+    let mut link_events = app.subscribe_link_events();
 
     loop {
         tokio::select! {
@@ -193,6 +196,22 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     return Ok(());
                 }
             }
+            event = link_events.recv() => {
+                match event {
+                    Ok(event) => {
+                        if should_forward_event_to_leaf(&event, &leaf_name) {
+                            if send_link_event(&mut stream, &event).await.is_err() {
+                                info!("link server: leaf '{}' desconectado", leaf_name);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(skipped)) => {
+                        warn!("link server: leaf '{}' perdió {} eventos Link", leaf_name, skipped);
+                    }
+                    Err(RecvError::Closed) => return Ok(()),
+                }
+            }
             read_result = read_link_from_stream(&mut stream) => {
                 let (op, payload) = match read_result {
                     Ok(r) => r,
@@ -203,10 +222,45 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                 };
                 match op {
                     LinkMsg::LeafPing => {}
+                    LinkMsg::NickChanged => {
+                        if let Some((old_name, user)) = parse_link_nick_changed_payload(&payload) {
+                            let part_pkt = build_server_part_for_name(&old_name);
+                            let join_pkt = build_server_join_from_link_user(&user);
+                            broadcast_to_local_users(&app, part_pkt);
+                            broadcast_to_local_users(&app, join_pkt);
+                            app.publish_link_event(LinkEvent::NickChanged {
+                                origin: Some(leaf_name.clone()),
+                                old_name,
+                                user: snapshot_from_link_user(&user),
+                            });
+                            info!("link server: NickChanged recibido: {}", user.name);
+                        } else {
+                            warn!("link server: NickChanged malformado");
+                        }
+                    }
+                    LinkMsg::VroomChanged => {
+                        if let Some(user) = parse_link_user_item(&payload) {
+                            let part_pkt = build_server_part_for_name(&user.name);
+                            let join_pkt = build_server_join_from_link_user(&user);
+                            broadcast_to_local_users(&app, part_pkt);
+                            broadcast_to_local_users(&app, join_pkt);
+                            app.publish_link_event(LinkEvent::VroomChanged {
+                                origin: Some(leaf_name.clone()),
+                                user: snapshot_from_link_user(&user),
+                            });
+                            info!("link server: VroomChanged recibido: {}", user.name);
+                        } else {
+                            warn!("link server: VroomChanged malformado");
+                        }
+                    }
                     LinkMsg::Part => {
                         if let Some(name) = parse_link_part_name(&payload) {
                             let part_pkt = build_server_part_for_name(&name);
                             broadcast_to_local_users(&app, part_pkt);
+                            app.publish_link_event(LinkEvent::Part {
+                                origin: Some(leaf_name.clone()),
+                                name: name.clone(),
+                            });
                             info!("link server: part recibido desde leaf: {}", name);
                         } else {
                             warn!("link server: Part malformado");
@@ -216,15 +270,37 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         if let Some(user) = parse_link_user_item(&payload) {
                             let join_pkt = build_server_join_from_link_user(&user);
                             broadcast_to_local_users(&app, join_pkt);
+                            app.publish_link_event(LinkEvent::Join {
+                                origin: Some(leaf_name.clone()),
+                                user: snapshot_from_link_user(&user),
+                            });
                             info!("link server: LeafJoin recibido: {}", user.name);
                         } else {
                             warn!("link server: LeafJoin malformado");
+                        }
+                    }
+                    LinkMsg::UserUpdated => {
+                        if let Some(user) = parse_link_user_item(&payload) {
+                            let join_pkt = build_server_join_from_link_user(&user);
+                            broadcast_to_local_users(&app, join_pkt);
+                            app.publish_link_event(LinkEvent::UserUpdated {
+                                origin: Some(leaf_name.clone()),
+                                user: snapshot_from_link_user(&user),
+                            });
+                            info!("link server: UserUpdated recibido: {}", user.name);
+                        } else {
+                            warn!("link server: UserUpdated malformado");
                         }
                     }
                     LinkMsg::PublicText => {
                         if let Some((from, text)) = parse_link_chat_payload(&payload) {
                             let pkt = server_core::outbound::build_public(&from, &text);
                             broadcast_to_local_users(&app, pkt);
+                            app.publish_link_event(LinkEvent::Public {
+                                origin: Some(leaf_name.clone()),
+                                from,
+                                text,
+                            });
                         } else {
                             warn!("link server: PublicText malformado");
                         }
@@ -233,9 +309,129 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         if let Some((from, text)) = parse_link_chat_payload(&payload) {
                             let pkt = server_core::outbound::build_emote(&from, &text);
                             broadcast_to_local_users(&app, pkt);
+                            app.publish_link_event(LinkEvent::Emote {
+                                origin: Some(leaf_name.clone()),
+                                from,
+                                text,
+                            });
                         } else {
                             warn!("link server: EmoteText malformado");
                         }
+                    }
+                    LinkMsg::PrivateText => {
+                        if let Some((from, to, text)) = parse_link_private_payload(&payload) {
+                            if let Some(target) = app.user_pool.get_by_name(&to) {
+                                if target
+                                    .ignore_list
+                                    .read()
+                                    .iter()
+                                    .any(|entry| entry.eq_ignore_ascii_case(&from))
+                                {
+                                    app.publish_link_event(LinkEvent::PrivateIgnored {
+                                        origin: Some(leaf_name.clone()),
+                                        from,
+                                        to,
+                                    });
+                                } else {
+                                    let _ = target.send(server_core::outbound::build_pvt(&from, &text));
+                                    app.publish_link_event(LinkEvent::Private {
+                                        origin: Some(leaf_name.clone()),
+                                        from,
+                                        to,
+                                        text,
+                                    });
+                                }
+                            } else {
+                                app.publish_link_event(LinkEvent::Private {
+                                    origin: Some(leaf_name.clone()),
+                                    from,
+                                    to,
+                                    text,
+                                });
+                            }
+                        } else {
+                            warn!("link server: PrivateText malformado");
+                        }
+                    }
+                    LinkMsg::PrivateIgnored => {
+                        if let Some((from, to)) = parse_link_private_ignored_payload(&payload) {
+                            if let Some(local_from) = app.user_pool.get_by_name(&from) {
+                                let mut w = PacketWriter::with_msg(TcpMsg::ServerIsIgnoringYou);
+                                w.write_string(&to).ok();
+                                let _ = local_from.send(Bytes::copy_from_slice(w.as_bytes()));
+                            }
+                            app.publish_link_event(LinkEvent::PrivateIgnored {
+                                origin: Some(leaf_name.clone()),
+                                from,
+                                to,
+                            });
+                        } else {
+                            warn!("link server: PrivateIgnored malformado");
+                        }
+                    }
+                    LinkMsg::PublicToUser => {
+                        if let Some((from, to, text)) = parse_link_private_payload(&payload) {
+                            if let Some(target) = app.user_pool.get_by_name(&to) {
+                                let _ = target.send(server_core::outbound::build_public(&from, &text));
+                            }
+                            app.publish_link_event(LinkEvent::PublicToUser {
+                                origin: Some(leaf_name.clone()),
+                                from,
+                                to,
+                                text,
+                            });
+                        } else {
+                            warn!("link server: PublicToUser malformado");
+                        }
+                    }
+                    LinkMsg::EmoteToUser => {
+                        if let Some((from, to, text)) = parse_link_private_payload(&payload) {
+                            if let Some(target) = app.user_pool.get_by_name(&to) {
+                                let _ = target.send(server_core::outbound::build_emote(&from, &text));
+                            }
+                            app.publish_link_event(LinkEvent::EmoteToUser {
+                                origin: Some(leaf_name.clone()),
+                                from,
+                                to,
+                                text,
+                            });
+                        } else {
+                            warn!("link server: EmoteToUser malformado");
+                        }
+                    }
+                    LinkMsg::PersonalMessage => {
+                        if let Some((name, text)) = parse_link_chat_payload(&payload) {
+                            let mut w = PacketWriter::with_msg(TcpMsg::PersonalMessage);
+                            w.write_string(&name).ok();
+                            w.write_string(&text).ok();
+                            broadcast_to_local_users(&app, Bytes::copy_from_slice(w.as_bytes()));
+                            app.publish_link_event(LinkEvent::PersonalMessage {
+                                origin: Some(leaf_name.clone()),
+                                name,
+                                text,
+                            });
+                        } else {
+                            warn!("link server: PersonalMessage malformado");
+                        }
+                    }
+                    LinkMsg::CustomName => {
+                        if let Some((name, custom_name)) = parse_link_custom_name_payload(&payload) {
+                            app.publish_link_event(LinkEvent::CustomName {
+                                origin: Some(leaf_name.clone()),
+                                name,
+                                custom_name,
+                            });
+                        } else {
+                            warn!("link server: CustomName malformado");
+                        }
+                    }
+                    op if is_passthrough_opcode(op) => {
+                        info!("link server: passthrough recibido: {:?}", op);
+                        app.publish_link_event(LinkEvent::Raw {
+                            origin: Some(leaf_name.clone()),
+                            msg: op as u8,
+                            payload,
+                        });
                     }
                     _ => {
                         warn!("link server: opcode no manejado: {:?}", op);
@@ -309,6 +505,182 @@ fn parse_link_chat_payload(payload: &[u8]) -> Option<(String, String)> {
     let from = r.read_string().ok()?;
     let text = r.read_string().ok()?;
     Some((from, text))
+}
+
+fn parse_link_private_payload(payload: &[u8]) -> Option<(String, String, String)> {
+    let mut r = LinkPacketReader::from_payload(payload);
+    let from = r.read_string().ok()?;
+    let to = r.read_string().ok()?;
+    let text = r.read_string().ok()?;
+    Some((from, to, text))
+}
+
+fn parse_link_private_ignored_payload(payload: &[u8]) -> Option<(String, String)> {
+    let mut r = LinkPacketReader::from_payload(payload);
+    let from = r.read_string().ok()?;
+    let to = r.read_string().ok()?;
+    Some((from, to))
+}
+
+fn parse_link_nick_changed_payload(payload: &[u8]) -> Option<(String, LinkUser)> {
+    let mut r = LinkPacketReader::from_payload(payload);
+    let old_name = r.read_string().ok()?;
+    let remaining = r.read_bytes(r.remaining()).ok()?;
+    let user = parse_link_user_item(&remaining)?;
+    Some((old_name, user))
+}
+
+fn parse_link_custom_name_payload(payload: &[u8]) -> Option<(String, Option<String>)> {
+    let mut r = LinkPacketReader::from_payload(payload);
+    let name = r.read_string().ok()?;
+    let custom_name = r.read_string().ok()?;
+    let custom_name = if custom_name.is_empty() { None } else { Some(custom_name) };
+    Some((name, custom_name))
+}
+
+fn snapshot_from_link_user(user: &LinkUser) -> LinkUserSnapshot {
+    LinkUserSnapshot {
+        org_name: user.org_name.clone(),
+        name: user.name.clone(),
+        version: user.version.clone(),
+        guid: user.guid,
+        file_count: user.file_count,
+        external_ip: user.external_ip,
+        local_ip: user.local_ip,
+        port: user.port,
+        dns: user.dns.clone(),
+        browsable: user.browsable,
+        age: user.age,
+        sex: user.sex,
+        country: user.country,
+        region: user.region.clone(),
+        level: user.level,
+        vroom: user.vroom,
+        custom_client: user.custom_client,
+        muzzled: user.muzzled,
+        web_client: user.web_client,
+        encrypted: user.encrypted,
+        registered: user.registered,
+        idle: user.idle,
+    }
+}
+
+fn should_forward_event_to_leaf(event: &LinkEvent, leaf_name: &str) -> bool {
+    match event {
+        LinkEvent::Join { origin, .. }
+        | LinkEvent::UserUpdated { origin, .. }
+        | LinkEvent::NickChanged { origin, .. }
+        | LinkEvent::VroomChanged { origin, .. }
+        | LinkEvent::CustomName { origin, .. }
+        | LinkEvent::Part { origin, .. }
+        | LinkEvent::Public { origin, .. }
+        | LinkEvent::Emote { origin, .. }
+        | LinkEvent::Private { origin, .. }
+        | LinkEvent::PublicToUser { origin, .. }
+        | LinkEvent::EmoteToUser { origin, .. }
+        | LinkEvent::PrivateIgnored { origin, .. }
+        | LinkEvent::PersonalMessage { origin, .. }
+        | LinkEvent::Raw { origin, .. } => origin.as_deref() != Some(leaf_name),
+    }
+}
+
+async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent) -> Result<(), String> {
+    let (msg, payload) = match event {
+        LinkEvent::Join { user, .. } => (LinkMsg::LeafJoin, build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin)),
+        LinkEvent::UserUpdated { user, .. } => (LinkMsg::UserUpdated, build_leaf_join_payload_from_snapshot(user, LinkMsg::UserUpdated)),
+        LinkEvent::NickChanged { old_name, user, .. } => (LinkMsg::NickChanged, build_nick_changed_payload(old_name, user)),
+        LinkEvent::VroomChanged { user, .. } => (LinkMsg::VroomChanged, build_leaf_join_payload_from_snapshot(user, LinkMsg::VroomChanged)),
+        LinkEvent::CustomName { name, custom_name, .. } => (LinkMsg::CustomName, build_custom_name_payload(name, custom_name.as_deref())),
+        LinkEvent::Part { name, .. } => {
+            let mut b = LinkPacketBuilder::new();
+            b.write_string(name);
+            (LinkMsg::Part, b.build_link_packet(LinkMsg::Part)[LINK_PACKET_HEADER_LEN..].to_vec())
+        }
+        LinkEvent::Public { from, text, .. } => (LinkMsg::PublicText, build_chat_payload(from, text, LinkMsg::PublicText)),
+        LinkEvent::Emote { from, text, .. } => (LinkMsg::EmoteText, build_chat_payload(from, text, LinkMsg::EmoteText)),
+        LinkEvent::Private { from, to, text, .. } => (LinkMsg::PrivateText, build_private_payload(from, to, text)),
+        LinkEvent::PublicToUser { from, to, text, .. } => (LinkMsg::PublicToUser, build_private_payload(from, to, text)),
+        LinkEvent::EmoteToUser { from, to, text, .. } => (LinkMsg::EmoteToUser, build_private_payload(from, to, text)),
+        LinkEvent::PrivateIgnored { from, to, .. } => (LinkMsg::PrivateIgnored, build_private_ignored_payload(from, to)),
+        LinkEvent::PersonalMessage { name, text, .. } => (LinkMsg::PersonalMessage, build_chat_payload(name, text, LinkMsg::PersonalMessage)),
+        LinkEvent::Raw { msg, payload, .. } => {
+            let Some(link_msg) = LinkMsg::from_u8(*msg) else {
+                return Ok(());
+            };
+            info!("link server: reenviando passthrough {:?}", link_msg);
+            (link_msg, payload.clone())
+        }
+    };
+    write_link_to_stream(stream, msg, &payload).await.map_err(|e| e.to_string())
+}
+
+fn build_leaf_join_payload_from_snapshot(user: &LinkUserSnapshot, msg: LinkMsg) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new();
+    b.write_string(&user.org_name);
+    b.write_string(&user.name);
+    b.write_string(&user.version);
+    b.write_guid(&user.guid);
+    b.write_u16(user.file_count);
+    b.write_ip(user.external_ip);
+    b.write_ip(user.local_ip);
+    b.write_u16(user.port);
+    b.write_string(&user.dns);
+    b.write_u8(u8::from(user.browsable));
+    b.write_u8(user.age);
+    b.write_u8(user.sex);
+    b.write_u8(user.country);
+    b.write_string(&user.region);
+    b.write_u8(user.level);
+    b.write_u16(user.vroom);
+    b.write_u8(u8::from(user.custom_client));
+    b.write_u8(u8::from(user.muzzled));
+    b.write_u8(u8::from(user.web_client));
+    b.write_u8(u8::from(user.encrypted));
+    b.write_u8(u8::from(user.registered));
+    b.write_u8(u8::from(user.idle));
+    b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec()
+}
+
+fn build_nick_changed_payload(old_name: &str, user: &LinkUserSnapshot) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new();
+    b.write_string(old_name);
+    b.write_bytes(&build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin));
+    b.build_link_packet(LinkMsg::NickChanged)[LINK_PACKET_HEADER_LEN..].to_vec()
+}
+
+fn build_chat_payload(from: &str, text: &str, msg: LinkMsg) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new();
+    b.write_string(from);
+    b.write_string(text);
+    b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec()
+}
+fn build_custom_name_payload(name: &str, custom_name: Option<&str>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new();
+    b.write_string(name);
+    b.write_string(custom_name.unwrap_or(""));
+    b.build_link_packet(LinkMsg::CustomName)[3..].to_vec()
+}
+
+fn build_chat_payload(from: &str, text: &str, msg: LinkMsg) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new();
+    b.write_string(from);
+    b.write_string(text);
+    b.build_link_packet(msg)[3..].to_vec()
+}
+
+fn build_private_payload(from: &str, to: &str, text: &str) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new();
+    b.write_string(from);
+    b.write_string(to);
+    b.write_string(text);
+    b.build_link_packet(LinkMsg::PrivateText)[3..].to_vec()
+}
+
+fn build_private_ignored_payload(from: &str, to: &str) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new();
+    b.write_string(from);
+    b.write_string(to);
+    b.build_link_packet(LinkMsg::PrivateIgnored)[3..].to_vec()
 }
 
 fn build_server_join_from_link_user(user: &LinkUser) -> Bytes {
