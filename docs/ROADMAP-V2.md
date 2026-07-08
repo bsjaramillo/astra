@@ -40,13 +40,18 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
 - [x] `/revoke <nick>` — Admin+: resetea a Regular
 - [x] `AdminLevelChanged` + `MSG_CHAT_SERVER_OPCHANGE` en cada cambio de nivel
 
-## Fase C — UDP correctness 🚧
+## Fase C — UDP correctness ✅ (2026-07-07)
 
 - [x] `user_count` real en `ACKINFO`: `run_listener` recibe un `UserCountFn`
   inyectado desde `main.rs` (`user_pool.len()`). Validado E2E: login WS →
   `SENDINFO` → `ACKINFO users=1`
-- [ ] Firewall check real (Opción B): TCP probe al puerto del solicitante en
-  `PROCEEDCHECKFIREWALL`, responder `CHECKFIREWALLBUSY` si hay probe en curso
+- [x] Firewall check real (Opción B): en `PROCEEDCHECKFIREWALL` se hace un
+  TCP probe al puerto del solicitante (timeout 5s). Cookies con TTL 60s
+  emitidos en `READYTOCHECKFIREWALL` y validados contra la IP origen
+  (anti-reflection: nadie puede hacernos probar IPs de terceros); máx 4
+  probes simultáneos, por encima responde `CHECKFIREWALLBUSY` con nodos
+  alternativos. Tests E2E con sockets reales (flujo completo + cookie
+  inválido rechazado)
 
 ## Fase D — WebSocket completitud ✅ (2026-07-07)
 
@@ -58,16 +63,22 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
 - [x] Panel HTML servido: `GET /` sin `Upgrade: websocket` responde 200 con
   `panel::INDEX_HTML` (antes 400). Validado E2E con curl
 
-## Fase E — Link hardening
+## Fase E — Link hardening 🚧
 
-- [ ] Encriptación AES de mensajes link (paridad con sb0t; el original usa
-  AES-128-ECB con key derivada del password del link)
-- [ ] Reconnect automático del `LinkClient` con backoff
+- [ ] Encriptación AES de mensajes link (paridad con sb0t) — **requiere el
+  código fuente de referencia de sb0t** para replicar la derivación de key
+  y el modo exacto; no implementar a ciegas
+- [x] Reconnect automático del `LinkClient` con backoff — ya existía
+  (exponencial 1s→60s en `LinkClient::run`); corregido bug: `peer_users`/
+  `peer_name` no se limpiaban al reconectar (duplicaba usuarios del hub)
 - [ ] Autenticación de leafs (password por link)
 
-## Fase F — Tooling y limpieza
+## Fase F — Tooling y limpieza 🚧
 
-- [ ] CLI `astra seed-refresh` — re-descarga el seed de rooms
+- [x] CLI `astra seed-refresh [--url <URL>]` — descarga el rooms.json
+  (default `chatrooms.mywire.org/rooms.json`), lo valida antes de
+  sobrescribir `<data_dir>/seed_rooms.json` y fuerza la recarga en DB
+  (`load_seed_force`). Validado E2E contra un HTTP server local
 - [ ] Benchmarks (criterion) de PacketReader/Writer y broadcast
 - [ ] Decidir `iconnect`: implementar los 27 traits o reducir el crate a
   los tipos realmente usados (`ILevel`) — hoy son 730 líneas sin consumidores
