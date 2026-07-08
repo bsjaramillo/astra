@@ -94,6 +94,11 @@ impl LinkClient {
     /// Conecta, hace handshake, loop principal. Retorna cuando la
     /// conexión se cierra limpiamente.
     async fn connect_and_run(&self, addr: SocketAddr) -> Result<(), String> {
+        // Limpiar estado de la conexión anterior (en reconnect los users
+        // del hub se vuelven a recibir completos en el handshake).
+        self.peer_users.lock().clear();
+        *self.peer_name.lock() = None;
+
         let stream = TcpStream::connect(addr)
             .await
             .map_err(|e| format!("error conectando: {}", e))?;
