@@ -54,6 +54,9 @@ pub mod user_history;
 /// Manager de cuentas.
 pub mod accounts;
 
+/// Manager de vrooms (canales virtuales).
+pub mod vroom;
+
 /// Defensa en capas contra DDoS.
 pub mod security;
 
@@ -64,7 +67,8 @@ pub mod outbound;
 pub mod time;
 
 /// Re-exports comunes.
-pub use app::{AppContext, LinkEvent, LinkUserSnapshot};
+pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use room::Room;
 pub use stats::Stats;
 pub use user_pool::{AresUser, UserPool};
+pub use vroom::VroomManager;

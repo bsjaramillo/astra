@@ -13,6 +13,19 @@ use server_core::db::{Database, NodeRecord, RoomRecord};
 
 use crate::types::{NodeAddr, UdpNode, UdpStats};
 
+/// Tipo del callback que el UdpNodeManager invoca cuando la lista
+/// de nodos cambia. Se usa para sincronizar con el `AppContext.udp_nodes`
+/// snapshot que consume el scripting JS.
+pub type NodeChangeCallback = Arc<dyn Fn(&[NodeSnapshot]) + Send + Sync>;
+
+/// Snapshot de un nodo para el scripting.
+#[derive(Debug, Clone)]
+pub struct NodeSnapshot {
+    pub name: String,
+    pub port: u16,
+    pub users: u32,
+}
+
 /// Manager de nodos UDP (cache en memoria + persistencia).
 pub struct UdpNodeManager {
     /// DB compartida
@@ -25,6 +38,8 @@ pub struct UdpNodeManager {
     pub stats: UdpStats,
     /// Puerto del propio server
     pub my_port: u16,
+    /// Callback opcional para notificar cambios al AppContext
+    on_change: RwLock<Option<NodeChangeCallback>>,
 }
 
 impl UdpNodeManager {
@@ -35,6 +50,7 @@ impl UdpNodeManager {
 
     /// Crea un nuevo manager, cargando los nodos y rooms desde la DB.
     pub fn new(db: Arc<Database>, my_port: u16) -> Self {
+        let on_change: RwLock<Option<NodeChangeCallback>> = RwLock::new(None);
         let nodes: Vec<UdpNode> = db
             .list_nodes()
             .unwrap_or_default()
@@ -61,6 +77,32 @@ impl UdpNodeManager {
             rooms: RwLock::new(rooms),
             stats: UdpStats::new(),
             my_port,
+            on_change,
+        }
+    }
+
+    /// Registra un callback que se invoca cuando la lista de nodos cambia.
+    pub fn set_on_change(&self, cb: NodeChangeCallback) {
+        *self.on_change.write() = Some(cb);
+        // Disparar inmediatamente con el estado actual
+        self.notify_change();
+    }
+
+    /// Construye snapshots de los nodos actuales y notifica al callback.
+    fn notify_change(&self) {
+        if let Some(cb) = self.on_change.read().as_ref() {
+            let snapshots: Vec<NodeSnapshot> = {
+                let nodes = self.nodes.read();
+                nodes
+                    .iter()
+                    .map(|n| NodeSnapshot {
+                        name: n.ip.to_string(),
+                        port: n.port,
+                        users: 0, // UdpNode no trackea user_count; dejamos en 0 por ahora
+                    })
+                    .collect()
+            };
+            cb(&snapshots);
         }
     }
 
@@ -102,6 +144,7 @@ impl UdpNodeManager {
         if let Err(e) = self.db.upsert_node(&ip.to_string(), port) {
             tracing::error!("error persistiendo nodo: {}", e);
         }
+        self.notify_change();
         true
     }
 
@@ -114,6 +157,8 @@ impl UdpNodeManager {
         if let Err(e) = self.db.update_node_port(&ip.to_string(), port) {
             tracing::error!("error actualizando puerto: {}", e);
         }
+        drop(nodes);
+        self.notify_change();
     }
 
     /// Incrementa el ack de un nodo (respuesta exitosa).
@@ -127,6 +172,8 @@ impl UdpNodeManager {
         if let Err(e) = self.db.bump_node_ack(&ip.to_string(), 0, now_ms) {
             tracing::error!("error bump ack: {}", e);
         }
+        drop(nodes);
+        self.notify_change();
     }
 
     /// Marca un nodo como "intento fallido" (incrementa try_count).
@@ -215,6 +262,7 @@ impl UdpNodeManager {
             })
             .collect();
         *self.nodes.write() = new_cache;
+        self.notify_change();
     }
 
     // ========================================================================

@@ -1,0 +1,26 @@
+[package]
+name = "astra-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+proto-ares = { path = "../crates/proto-ares" }
+
+[lib]
+path = "fuzz_targets/_lib.rs"
+
+[[bin]]
+name = "fuzz_reader"
+path = "fuzz_targets/fuzz_reader.rs"
+
+[[bin]]
+name = "fuzz_writer"
+path = "fuzz_targets/fuzz_writer.rs"
+
+[[bin]]
+name = "fuzz_login"
+path = "fuzz_targets/fuzz_login.rs"

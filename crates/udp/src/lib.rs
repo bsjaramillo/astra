@@ -34,7 +34,7 @@ pub mod seed;
 pub mod types;
 
 pub use listener::run_listener;
-pub use manager::UdpNodeManager;
+pub use manager::{NodeChangeCallback, NodeSnapshot, UdpNodeManager};
 pub use prober::{probe_once, run_prober};
 pub use seed::load_seed;
 pub use types::{NodeAddr, UdpChannelItem, UdpNode, UdpStats};

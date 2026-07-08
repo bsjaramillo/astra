@@ -68,6 +68,14 @@ pub enum RejectReason {
     TooManyFailedLogins,
 }
 
+/// Issues detectados en un login que NO son rechazos, pero generan
+/// eventos de scripting (compatibilidad con sb0t).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectedIssue {
+    /// El user probablemente está detrás de un proxy/NAT.
+    Proxy,
+}
+
 impl RejectReason {
     /// Mensaje user-friendly para enviar al cliente.
     pub fn message(&self) -> &'static str {
@@ -267,24 +275,37 @@ impl LoginValidator {
         Self { config }
     }
 
-    /// Valida los datos de un login. Retorna `Ok(())` si es legítimo,
-    /// `Err(razón)` si debe rechazarse.
-    pub fn validate(&self, login: &LoginData) -> Result<(), RejectReason> {
+    /// Valida los datos de un login. Retorna `(resultado, issues_detectados)`.
+    /// - `resultado` es `Ok(())` si el login es legítimo, `Err(razón)` si debe rechazarse.
+    /// - `issues` es una lista de issues detectadas que NO son rechazos pero
+    ///   generan eventos de scripting (ej. `ProxyDetected`).
+    pub fn validate(
+        &self,
+        login: &LoginData,
+    ) -> (Result<(), RejectReason>, Vec<DetectedIssue>) {
+        let mut issues = Vec::new();
+
         // Nombre
         let name = &login.org_name;
         if name.len() < self.config.min_name_length || name.len() > self.config.max_name_length {
-            return Err(RejectReason::InvalidName);
+            return (Err(RejectReason::InvalidName), issues);
         }
         if Self::contains_bad_chars(name) {
-            return Err(RejectReason::InvalidName);
+            return (Err(RejectReason::InvalidName), issues);
         }
 
         // Versión
         if login.version.is_empty() {
-            return Err(RejectReason::InvalidVersion);
+            return (Err(RejectReason::InvalidVersion), issues);
         }
         if login.version.len() > 40 {
-            return Err(RejectReason::InvalidVersion);
+            return (Err(RejectReason::InvalidVersion), issues);
+        }
+
+        // Proxy/NAT detection: si la local_ip está en un rango privado
+        // (10.x, 192.168.x, 172.16-31.x), probablemente está detrás de un NAT/proxy.
+        if Self::is_likely_proxy(&login.local_ip) {
+            issues.push(DetectedIssue::Proxy);
         }
 
         // GUID no-trivial. Como el parser aplica MD5 a los 16 bytes
@@ -303,28 +324,43 @@ impl LoginValidator {
                     "spam bot detectado: local_ip={} nick='{}'",
                     login.local_ip, name
                 );
-                return Err(RejectReason::SpamBot);
+                return (Err(RejectReason::SpamBot), issues);
             }
             // 6969 files es un magic number de spammers
             if login.file_count == 6969 {
                 tracing::warn!("spam bot detectado: 6969 files nick='{}'", name);
-                return Err(RejectReason::SpamBot);
+                return (Err(RejectReason::SpamBot), issues);
             }
         }
 
         // Perfil sospechoso: country=0 con files > 0 + age=0
         if login.country == 0 && login.file_count > 0 && login.age == 0 {
-            return Err(RejectReason::SuspiciousProfile);
+            return (Err(RejectReason::SuspiciousProfile), issues);
         }
 
         // File count absurdo (> u16 max no tiene sentido, pero algunos Ares
         // envían números grandes. Chequeamos que no sea exactamente un valor
         // conocido de spammers, ej. > 60000)
         if login.file_count > 60000 {
-            return Err(RejectReason::SuspiciousProfile);
+            return (Err(RejectReason::SuspiciousProfile), issues);
         }
 
-        Ok(())
+        (Ok(()), issues)
+    }
+
+    /// Detecta si la local_ip sugiere un proxy/NAT.
+    /// Heurística: local_ip en rango RFC1918 privado.
+    fn is_likely_proxy(local_ip: &std::net::Ipv4Addr) -> bool {
+        let octets = local_ip.octets();
+        // 10.0.0.0/8
+        if octets[0] == 10 { return true; }
+        // 172.16.0.0/12
+        if octets[0] == 172 && (16..=31).contains(&octets[1]) { return true; }
+        // 192.168.0.0/16
+        if octets[0] == 192 && octets[1] == 168 { return true; }
+        // 127.0.0.0/8 (loopback) suele ser proxy o NAT
+        if octets[0] == 127 { return true; }
+        false
     }
 
     /// Detecta chars problemáticos (control, zero-width, etc).
@@ -516,6 +552,9 @@ mod tests {
             max_failed_logins: 3,
             failed_login_window_secs: 60,
             failed_login_ban_secs: 60,
+            captcha_enabled: false,
+            captcha_expiration_secs: 300,
+            captcha_max_attempts: 3,
         }
     }
 
@@ -574,6 +613,9 @@ mod tests {
             max_failed_logins: 3,
             failed_login_window_secs: 60,
             failed_login_ban_secs: 60,
+            captcha_enabled: false,
+            captcha_expiration_secs: 300,
+            captcha_max_attempts: 3,
         }
     }
 
@@ -654,14 +696,14 @@ mod tests {
     fn validator_accepts_good_login() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Alice", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert!(v.validate(&login).is_ok());
+        assert!((v.validate(&login).0).is_ok());
     }
 
     #[test]
     fn validator_rejects_empty_name() {
         let v = LoginValidator::new(test_config());
         let login = make_login("", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login), Err(RejectReason::InvalidName));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidName));
     }
 
     #[test]
@@ -669,28 +711,28 @@ mod tests {
         let v = LoginValidator::new(test_config());
         let long = "A".repeat(50);
         let login = make_login(&long, "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login), Err(RejectReason::InvalidName));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidName));
     }
 
     #[test]
     fn validator_rejects_control_chars() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Bad\x00Name", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login), Err(RejectReason::InvalidName));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidName));
     }
 
     #[test]
     fn validator_rejects_zero_width() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Bad\u{200B}Name", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login), Err(RejectReason::InvalidName));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidName));
     }
 
     #[test]
     fn validator_rejects_empty_version() {
         let v = LoginValidator::new(test_config());
         let login = make_login("X", "", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login), Err(RejectReason::InvalidVersion));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidVersion));
     }
 
     #[test]
@@ -699,7 +741,7 @@ mod tests {
         // produce un hash no-trivial y debe ser aceptado.
         let v = LoginValidator::new(test_config());
         let login = make_login("X", "Ares 2.1.0", [0; 16], Ipv4Addr::new(192, 168, 1, 1));
-        assert!(v.validate(&login).is_ok());
+        assert!((v.validate(&login).0).is_ok());
     }
 
     #[test]
@@ -707,21 +749,21 @@ mod tests {
         // Mismo caso: [0xFF;16] -> MD5 -> hash no uniforme -> OK
         let v = LoginValidator::new(test_config());
         let login = make_login("X", "Ares 2.1.0", [0xFF; 16], Ipv4Addr::new(192, 168, 1, 1));
-        assert!(v.validate(&login).is_ok());
+        assert!((v.validate(&login).0).is_ok());
     }
 
     #[test]
     fn validator_rejects_666_local_ip() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Bot", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(6, 6, 6, 6));
-        assert_eq!(v.validate(&login), Err(RejectReason::SpamBot));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::SpamBot));
     }
 
     #[test]
     fn validator_rejects_7878_local_ip() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Bot", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(7, 8, 7, 8));
-        assert_eq!(v.validate(&login), Err(RejectReason::SpamBot));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::SpamBot));
     }
 
     #[test]
@@ -729,7 +771,7 @@ mod tests {
         let v = LoginValidator::new(test_config());
         let mut login = make_login("Bot", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
         login.file_count = 6969;
-        assert_eq!(v.validate(&login), Err(RejectReason::SpamBot));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::SpamBot));
     }
 
     #[test]
@@ -739,7 +781,7 @@ mod tests {
         login.country = 0;
         login.file_count = 100;
         login.age = 0;
-        assert_eq!(v.validate(&login), Err(RejectReason::SuspiciousProfile));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::SuspiciousProfile));
     }
 
     #[test]
@@ -749,7 +791,7 @@ mod tests {
         login.country = 49;
         login.age = 25;
         login.file_count = 60001;
-        assert_eq!(v.validate(&login), Err(RejectReason::SuspiciousProfile));
+        assert_eq!(v.validate(&login).0, Err(RejectReason::SuspiciousProfile));
     }
 
     // ==================== Capa 5: FailedLoginTracker ====================

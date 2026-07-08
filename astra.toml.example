@@ -1,0 +1,102 @@
+# =============================================================================
+# Astra — Configuración de ejemplo
+# =============================================================================
+# Copia este archivo a `astra.toml` y edítalo a tu gusto.
+# Cualquier campo omitido usa el valor por defecto (ver `Settings::default()`).
+#
+# Uso:  astra --config astra.toml
+#       astra --port 6000 --config mi-sala.toml
+# =============================================================================
+
+# --- Servidor --------------------------------------------------------------
+
+# Puerto TCP principal (Ares + WS + Link comparten este puerto).
+port = 5009
+
+# Nombre del bot del servidor (aparece en la userlist como ghost).
+bot_name = "Astra"
+
+# Nombre y topic de la sala (visibles en el room search).
+room_name = "Astra Chat"
+room_topic = "Welcome to Astra"
+
+# Password del owner (hasheada con SHA-1; dejar vacío para deshabilitar).
+owner_password = ""
+
+# Permitir registro de cuentas locales.
+allow_registration = true
+
+# Habilitar room search UDP (descubrimiento de otras salas).
+roomsearch = true
+
+# Idioma por defecto (0 = English).
+language = 0
+
+# --- WebSocket (ib0t / panel web) ------------------------------------------
+
+# Habilitar el endpoint WebSocket en el mismo puerto TCP.
+# Se desactiva también con la flag CLI `--no-web`.
+web_enabled = true
+
+# (Reservado: puerto alternativo para el panel. Actualmente el WS comparte
+# el puerto TCP principal; este campo es leído pero no se usa aún.)
+web_port = 5010
+
+# --- Almacenamiento --------------------------------------------------------
+
+# Directorio donde Astra guarda la DB SQLite, logs y el seed de rooms.
+data_dir = "./data"
+
+# --- Link Hub/Leaf (multi-servidor) ---------------------------------------
+
+# Activar como hub: escucha conexiones Link de otros Astra servers.
+link_hub_enabled = false
+link_hub_port = 5011
+
+# GUID del server (16 bytes hex). Usado para autenticación con peers link.
+# Generar uno nuevo:  head -c 16 /dev/urandom | xxd -p
+guid = "astra-default-guid-12"
+
+# --- Supabase (opcional, syncing de bans con un panel central) ------------
+
+# Si están configurados, Astra sincroniza bans con un backend Supabase.
+# Dejar ambos en null para operar 100% local.
+supabase_url = null
+supabase_key = null
+
+# --- Seguridad (defensa en capas anti-DDoS) -------------------------------
+# Cada capa tiene sus propios límites. Los defaults son razonables para un
+# servidor público pequeño. Ajustar según el tráfico esperado.
+
+[security]
+
+# Capa 1: rate limit de NUEVAS conexiones por IP (sliding window).
+max_new_connections_per_ip = 10        # máx conexiones nuevas en la ventana
+connection_window_secs = 60            # tamaño de la ventana (segundos)
+connection_flood_ban_threshold = 3     # violaciones antes de auto-ban
+connection_flood_ban_secs = 300        # duración del auto-ban (5 min)
+
+# Capa 2: máx conexiones TCP simultáneas por IP (logged-in o no).
+max_concurrent_per_ip = 5
+
+# Capa 3: timeouts.
+handshake_timeout_secs = 15            # tiempo máximo para enviar login
+idle_timeout_secs = 120                # tiempo máximo entre mensajes
+
+# Capa 4: validación de campos del login.
+min_name_length = 1
+max_name_length = 30
+reject_spam_bots = true                # rechazar 6.6.6.6, 6969 files, etc.
+
+# Capa 5: auto-ban por logins fallidos.
+max_failed_logins = 5
+failed_login_window_secs = 3600        # ventana de conteo (1h)
+failed_login_ban_secs = 3600           # duración del auto-ban (1h)
+
+# --- Captcha (gate opcional para IPs nuevas) ------------------------------
+# Si está habilitado, los users que se conectan desde una IP sin historial
+# previo en la DB deben resolver un captcha antes de poder hablar en
+# público. Responder con /PM al bot.
+captcha_enabled = false                # default: deshabilitado (opt-in)
+captcha_expiration_secs = 300          # tiempo para resolver (5 min)
+captcha_max_attempts = 3               # intentos antes de kickear

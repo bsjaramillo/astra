@@ -9,12 +9,15 @@ use tokio::sync::broadcast;
 
 use super::accounts::AccountManager;
 use super::bans::BanSystem;
+use super::captcha::CaptchaManager;
 use super::db::Database;
+use super::idle::IdleManager;
 use super::security::SecurityManager;
 use super::settings::Settings;
 use super::stats::Stats;
 use super::user_history::UserHistory;
 use super::user_pool::UserPool;
+use super::vroom::VroomManager;
 
 /// Snapshot serializable de un usuario para replicación Link.
 #[derive(Debug, Clone)]
@@ -65,8 +68,18 @@ pub struct LinkUserSnapshot {
     pub idle: bool,
 }
 
+/// Request al link layer (enviado por scripting, consumido por el manager de links).
+#[derive(Debug, Clone)]
+pub enum LinkRequest {
+    /// Crear una conexión link a `server:port` con nombre `name`.
+    CreateLink { name: String, server: String, port: u16 },
+    /// Desconectar el link con ese nombre.
+    DisconnectLink { name: String },
+    /// Forzar desconexión de un hub (kick).
+    KickHub { name: String },
+}
+
 impl LinkUserSnapshot {
-    /// Construye un snapshot a partir de un usuario local conectado.
     pub fn from_user(user: &crate::user_pool::AresUser) -> Self {
         Self {
             org_name: user.org_name.read().clone(),
@@ -245,6 +258,23 @@ pub struct AppContext {
     pub accounts: Arc<AccountManager>,
     /// Manager de seguridad (5 capas anti-DDoS).
     pub security: Arc<SecurityManager>,
+    /// Manager de captchas (gate opcional para IPs nuevas).
+    pub captcha: Arc<CaptchaManager>,
+    /// Manager de vrooms (canales virtuales dentro de la sala).
+    pub vrooms: Arc<VroomManager>,
+    /// Manager de idle (detecta transitions active↔idle).
+    pub idle: Arc<IdleManager>,
+    /// Snapshot de nodos UDP conocidos (name, port, user_count).
+    /// Actualizado por `UdpNodeManager` cuando se agregan/actualizan nodos.
+    pub udp_nodes: parking_lot::RwLock<Vec<(String, u16, u32)>>,
+    /// Snapshot de links activos: (name, port, is_connected, users_count).
+    /// Actualizado por `LinkClient`/`LinkServer` cuando cambian.
+    pub link_servers: parking_lot::RwLock<Vec<(String, u16, bool)>>,
+    /// Users remotos conocidos via link: (link_name, user_name).
+    /// Cada link actualiza su lista cuando recibe userlist.
+    pub link_users: parking_lot::RwLock<Vec<(String, String)>>,
+    /// Bus de requests al link layer: `Link_createLink`, `Link_disconnect`, etc.
+    pub link_requests: broadcast::Sender<LinkRequest>,
     /// Instante de arranque (para calcular uptime).
     pub start_time: Instant,
     /// Topic actual de la sala (mutable en runtime).
@@ -263,6 +293,12 @@ impl AppContext {
         let user_history = Arc::new(UserHistory::new(db.clone()));
         let accounts = Arc::new(AccountManager::new(db.clone()));
         let security = SecurityManager::new(settings.security.clone());
+        let captcha = Arc::new(CaptchaManager::new(
+            settings.security.captcha_expiration_secs,
+            settings.security.captcha_max_attempts,
+        ));
+        let vrooms = Arc::new(VroomManager::new());
+        let idle = Arc::new(IdleManager::new());
         let (link_events, _) = broadcast::channel(1024);
         Self {
             settings: Arc::new(settings),
@@ -273,6 +309,13 @@ impl AppContext {
             user_history,
             accounts,
             security,
+            captcha,
+            vrooms,
+            idle,
+            udp_nodes: parking_lot::RwLock::new(Vec::new()),
+            link_servers: parking_lot::RwLock::new(Vec::new()),
+            link_users: parking_lot::RwLock::new(Vec::new()),
+            link_requests: broadcast::channel(256).0,
             start_time: Instant::now(),
             room_topic: RwLock::new(initial_room_topic),
             link_events,

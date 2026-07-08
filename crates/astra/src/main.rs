@@ -118,6 +118,115 @@ async fn main() -> anyhow::Result<()> {
         scripts_dir.display()
     );
 
+    // Bridge LinkEvent → ScriptEvent: reenvía TODOS los eventos del bus
+    // (Linked/Unlinked/LinkError/LeafJoin/LeafPart/Join/Part/...) a los scripts.
+    {
+        let scripting_for_bridge = scripting.clone();
+        let mut link_events_rx = ctx.subscribe_link_events();
+        let bridge_ctx = ctx.clone();
+        tokio::spawn(async move {
+            use server_core::LinkEvent;
+            use astra_scripting::ScriptEvent;
+            loop {
+                match link_events_rx.recv().await {
+                    Ok(event) => {
+                        let script_event = match &event {
+                            LinkEvent::Part { name, .. } => Some(ScriptEvent::LeafPart { name: name.clone() }),
+                            LinkEvent::Join { user, .. } => {
+                                Some(ScriptEvent::LeafJoin { name: user.name.clone() })
+                            }
+                            _ => None,
+                        };
+                        if let Some(se) = script_event {
+                            scripting_for_bridge.dispatch(se);
+                        }
+                        // Actualizar snapshot link_servers y link_users
+                        match &event {
+                            LinkEvent::Join { user, origin } => {
+                                if let Some(o) = origin {
+                                    let mut users = bridge_ctx.link_users.write();
+                                    let entry = (o.clone(), user.name.clone());
+                                    if !users.contains(&entry) {
+                                        users.push(entry);
+                                    }
+                                }
+                            }
+                            LinkEvent::Part { name, origin } => {
+                                if let Some(o) = origin {
+                                    let mut users = bridge_ctx.link_users.write();
+                                    users.retain(|(link, _)| link != o);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!("scripting bridge: se perdieron {} eventos Link", skipped);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    // Consumer de LinkRequest: procesa CreateLink/DisconnectLink/KickHub
+    {
+        let link_request_ctx = ctx.clone();
+        let mut link_req_rx = link_request_ctx.link_requests.subscribe();
+        tokio::spawn(async move {
+            use server_core::LinkRequest;
+            loop {
+                match link_req_rx.recv().await {
+                    Ok(LinkRequest::CreateLink { name, server, port }) => {
+                        // Parsear "host:port" y conectar
+                        let addr_str = format!("{}:{}", server, port);
+                        match addr_str.parse::<std::net::SocketAddr>() {
+                            Ok(addr) => {
+                                let client = std::sync::Arc::new(astra_link::LinkClient::new(link_request_ctx.clone()));
+                                // Actualizar link_servers snapshot
+                                {
+                                    let mut links = link_request_ctx.link_servers.write();
+                                    links.retain(|(n, _, _)| n != &name);
+                                    links.push((name.clone(), port, true));
+                                }
+                                tokio::spawn(async move {
+                                    client.run(addr).await;
+                                });
+                                info!("Link_createLink: {} -> {}", name, addr);
+                            }
+                            Err(e) => {
+                                warn!("Link_createLink: addr inválida {}: {}", addr_str, e);
+                            }
+                        }
+                    }
+                    Ok(LinkRequest::DisconnectLink { name }) => {
+                        // Para un disconnect real, necesitaríamos trackear el
+                        // active flag del LinkClient. Por ahora marcamos disconnected
+                        // y el thread del LinkClient se encargará.
+                        let mut links = link_request_ctx.link_servers.write();
+                        for entry in links.iter_mut() {
+                            if entry.0 == name {
+                                entry.2 = false;
+                            }
+                        }
+                        info!("Link_disconnect: {}", name);
+                    }
+                    Ok(LinkRequest::KickHub { name }) => {
+                        let mut links = link_request_ctx.link_servers.write();
+                        links.retain(|(n, _p, _c)| n != &name);
+                        let mut users = link_request_ctx.link_users.write();
+                        users.retain(|(link, _)| link != &name);
+                        info!("Link_kickHub: {}", name);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!("link request consumer: se perdieron {} requests", skipped);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     // Inicializar sistema UDP de room search
     let udp_manager = if settings.roomsearch {
         // Cargar seed ANTES de crear el manager (para que el cache esté poblado)
@@ -142,6 +251,16 @@ async fn main() -> anyhow::Result<()> {
             mgr.count_nodes(),
             mgr.count_rooms()
         );
+
+        // Wirear el callback para sincronizar con AppContext.udp_nodes
+        // (snapshot para el scripting JS).
+        let udp_nodes_ctx = ctx.clone();
+        mgr.set_on_change(std::sync::Arc::new(move |snapshots: &[astra_udp::NodeSnapshot]| {
+            *udp_nodes_ctx.udp_nodes.write() = snapshots
+                .iter()
+                .map(|s| (s.name.clone(), s.port, s.users))
+                .collect();
+        }));
 
         // El UDP listener comparte el socket con el prober
         let udp_bind = format!("0.0.0.0:{}", settings.port);
@@ -204,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
     }
     // Stats reporter (cada 30s) + cleanup periódico
     let stats_ctx = ctx.clone();
+    let stats_scripting = scripting.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
@@ -230,6 +350,36 @@ async fn main() -> anyhow::Result<()> {
             stats_ctx.user_history.prune(30 * 24 * 60 * 60);
             // Cleanup de las 5 capas de seguridad
             stats_ctx.security.cleanup();
+            // Prune de bans expirados + dispatch de BansAutoCleared
+            let pruned = stats_ctx.bans.prune_expired();
+            if pruned > 0 {
+                info!("bans: pruned {} expired bans", pruned);
+                stats_scripting.dispatch(astra_scripting::ScriptEvent::BansAutoCleared);
+            }
+        }
+    });
+
+    // Idle detector (cada 60s) — verifica users idle y dispara onIdled
+    let idle_ctx = ctx.clone();
+    let idle_scripting = scripting.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            // Chequear cada user en el pool
+            let mut to_idle = Vec::new();
+            for u in idle_ctx.user_pool.users() {
+                if !u.logged_in {
+                    continue;
+                }
+                // check_idle retorna Some(()) si pasó de active a idle
+                if idle_ctx.idle.check_idle(u.id).is_some() {
+                    to_idle.push(u.name.read().clone());
+                }
+            }
+            for name in to_idle {
+                idle_scripting.dispatch(astra_scripting::ScriptEvent::Idled { name });
+            }
         }
     });
 

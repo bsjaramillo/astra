@@ -56,6 +56,9 @@ pub async fn handle_tcp_client(
 ) -> anyhow::Result<()> {
     let ip = peer.ip();
     info!("nueva conexión TCP desde {}", peer);
+    scripting.dispatch(astra_scripting::ScriptEvent::Connect {
+        ip: peer.ip().to_string(),
+    });
 
     // ============================================================
     // CAPA 1+2+5: rate-limit, concurrent limit, failed-login ban
@@ -88,7 +91,7 @@ pub async fn handle_tcp_client(
     let mut reader = PacketReaderStream::new(read_half);
 
     let user = match timeout(handshake_timeout, async {
-        process_handshake(&ctx, &mut reader, peer, tx.clone()).await
+        process_handshake(&ctx, &mut reader, peer, tx.clone(), &scripting).await
     })
     .await
     {
@@ -121,7 +124,7 @@ pub async fn handle_tcp_client(
     // ============================================================
     // Post-login: enviar JOIN a los demás y USERLIST al nuevo
     // ============================================================
-    send_initial_state(&ctx, &user).await;
+    send_initial_state(&ctx, &user, &scripting).await;
 
     // Broadcast del JOIN a los usuarios existentes
     let join_pkt = outbound::build_join_or_userlist(&user);
@@ -129,6 +132,11 @@ pub async fn handle_tcp_client(
     ctx.publish_link_event(LinkEvent::Join {
         origin: None,
         user: LinkUserSnapshot::from_user(&user),
+    });
+    // Disparar evento de scripting
+    scripting.dispatch(astra_scripting::ScriptEvent::Join {
+        name: user.name.read().clone(),
+        ip: user.external_ip.to_string(),
     });
 
     // ============================================================
@@ -150,6 +158,13 @@ pub async fn handle_tcp_client(
         };
 
         ctx.stats.add_bytes_in(pkt.data.len() as u64);
+        // Touch idle: registrar actividad del user
+        let was_idle = ctx.idle.touch(user_arc.id).is_some();
+        if was_idle {
+            let name = user_arc.name.read().clone();
+            scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name });
+        }
+
         if let Err(e) = dispatch_message(&ctx, &scripting, &user_arc, &pkt).await {
             warn!("error procesando msg {:?} de id={}: {}", pkt.msg, user_id, e);
         }
@@ -158,22 +173,33 @@ pub async fn handle_tcp_client(
     // ============================================================
     // Cleanup
     // ============================================================
+    let user_name = user_arc.name.read().clone();
     ctx.user_pool.remove(user_id);
     ctx.stats.on_user_part();
+    // Forget idle tracking
+    ctx.idle.forget(user_id);
 
     // Broadcast del PART
     let part_pkt = outbound::build_part(&user_arc);
     broadcast_to_room(&ctx, &user_arc, part_pkt);
     ctx.publish_link_event(LinkEvent::Part {
         origin: None,
-        name: user_arc.name.read().clone(),
+        name: user_name.clone(),
     });
+    // Disparar evento de scripting
+    scripting.dispatch(astra_scripting::ScriptEvent::Part {
+        name: user_name.clone(),
+    });
+    scripting.dispatch(astra_scripting::ScriptEvent::Logout { name: user_name });
 
     // Cerrar el canal para que el writer termine
     drop(tx);
     let _ = writer_handle.await;
 
     info!("usuario id={} '{}' desconectado", user_id, user.name.read());
+    scripting.dispatch(astra_scripting::ScriptEvent::Disconnect {
+        ip: user.external_ip.to_string(),
+    });
     Ok(())
 }
 
@@ -235,6 +261,7 @@ async fn process_handshake(
     reader: &mut PacketReaderStream,
     peer: SocketAddr,
     tx: mpsc::UnboundedSender<Bytes>,
+    scripting: &astra_scripting::ScriptHandle,
 ) -> anyhow::Result<Option<Arc<server_core::user_pool::AresUser>>> {
     let pkt = reader.read_packet().await?;
     if pkt.data.is_empty() {
@@ -256,10 +283,26 @@ async fn process_handshake(
             match parse_login(&pkt.data) {
                 Ok(login) => {
                     // CAPA 4: validación
-                    if let Err(reason) = ctx.security.login_validator.validate(&login) {
+                    let (validation_result, issues) = ctx.security.login_validator.validate(&login);
+                    // Disparar eventos de scripting para issues detectados (no rechazos)
+                    for issue in &issues {
+                        match issue {
+                            server_core::security::DetectedIssue::Proxy => {
+                                scripting.dispatch(astra_scripting::ScriptEvent::ProxyDetected {
+                                    ip: peer.ip().to_string(),
+                                });
+                            }
+                        }
+                    }
+                    if let Err(reason) = validation_result {
                         warn!("REJECTED (capa 4): peer={} nick='{}' razón={:?}", peer, login.org_name, reason);
                         ctx.security.failed_logins.record_failure(peer.ip());
                         let _ = tx.send(server_error_packet(reason.message()));
+                        // Disparar evento de scripting
+                        scripting.dispatch(astra_scripting::ScriptEvent::InvalidLoginAttempt {
+                            name: login.org_name.clone(),
+                            ip: peer.ip().to_string(),
+                        });
                         return Ok(None);
                     }
 
@@ -277,6 +320,10 @@ async fn process_handshake(
                     if ctx.user_history.is_join_flooding(external_ip, now_ms) {
                         warn!("REJECTED (join-flood): peer={}", peer);
                         let _ = tx.send(server_error_packet("Joining too quickly. Please wait 15 seconds."));
+                        // Disparar evento de scripting
+                        scripting.dispatch(astra_scripting::ScriptEvent::Flood {
+                            name: login.org_name.clone(),
+                        });
                         return Ok(None);
                     }
 
@@ -286,6 +333,12 @@ async fn process_handshake(
                     user.sender = Some(tx.clone());
                     user.logged_in = true;  // marcar ANTES de envolver en Arc
                     let user_arc = Arc::new(user);
+
+                    // Captcha gate (chequear ANTES de add_user, para que la
+                    // primera conexión de una IP sea considerada "nueva").
+                    let needs_captcha_now = ctx.settings.security.captcha_enabled
+                        && !ctx.user_history.has_prior_join(external_ip);
+
                     ctx.user_pool.add(user_arc.clone());
                     ctx.stats.on_user_join(ctx.user_pool.len() as u32);
 
@@ -311,6 +364,29 @@ async fn process_handshake(
                     tx.send(build_login_ack(&user_arc, &ctx.settings.room_name))?;
                     tx.send(build_my_features(&user_arc))?;
 
+                    // Disparar evento LoginGranted al scripting
+                    scripting.dispatch(astra_scripting::ScriptEvent::LoginGranted {
+                        name: user_arc.name.read().clone(),
+                    });
+
+                    if needs_captcha_now {
+                        let user_id = user_arc.id.to_string();
+                        let challenge = ctx.captcha.create(user_id.clone());
+                        user_arc.needs_captcha.store(true, std::sync::atomic::Ordering::Relaxed);
+                        user_arc.quarantined.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let visual = obfuscate_captcha_word(&challenge.word);
+                        let prompt = format!(
+                            "Welcome! Please type this code to enter: {}  (PM it back to {})",
+                            visual, ctx.settings.bot_name
+                        );
+                        let pkt = outbound::build_pvt(&ctx.settings.bot_name, &prompt);
+                        let _ = user_arc.send(pkt);
+                        info!(
+                            "CAPTCHA issued: id={} ip={} word={}",
+                            user_arc.id, peer.ip(), challenge.word
+                        );
+                    }
+
                     Ok(Some(user_arc))
                 }
                 Err(e) => {
@@ -330,7 +406,11 @@ async fn process_handshake(
 
 /// Envía el estado inicial al usuario recién conectado:
 /// topic, userlist del bot, lista de usuarios, op change, etc.
-async fn send_initial_state(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>) {
+async fn send_initial_state(
+    ctx: &AppContext,
+    user: &Arc<server_core::user_pool::AresUser>,
+    scripting: &astra_scripting::ScriptHandle,
+) {
     let user_id = user.id;
 
     // Topic
@@ -344,11 +424,19 @@ async fn send_initial_state(ctx: &AppContext, user: &Arc<server_core::user_pool:
     for other in others {
         if other.id != user_id && other.logged_in {
             let _ = user.send(outbound::build_userlist_item(&other));
+            // Evento de scripting por cada user en la userlist
+            scripting.dispatch(astra_scripting::ScriptEvent::UserList {
+                name: other.name.read().clone(),
+                users_csv: String::new(),
+            });
         }
     }
 
     // End of userlist
     let _ = user.send(outbound::build_userlist_end());
+    scripting.dispatch(astra_scripting::ScriptEvent::UserListEnd {
+        name: user.name.read().clone(),
+    });
 
     // OpChange (este usuario)
     let level = *user.level.read();
@@ -394,21 +482,38 @@ async fn dispatch_message(
         }
         TcpMsg::Avatar => {
             publish_raw_link(ctx, LINK_MSG_AVATAR, &pkt.data[1..]);
+            // Avatar: el payload completo (sin opcode) son los bytes PNG.
+            // Guardar en user.avatar (set real, no solo notificar).
+            let png = pkt.data[1..].to_vec();
+            *user.avatar.lock() = Some(png.clone());
+            scripting.dispatch(astra_scripting::ScriptEvent::Avatar {
+                name: user.name.read().clone(),
+                png,
+            });
         }
         TcpMsg::Public => {
             handle_public(ctx, user, &pkt.data[1..], &scripting).await;
         }
         TcpMsg::Emote => {
-            handle_emote(ctx, user, &pkt.data[1..]).await;
+            handle_emote(ctx, user, &pkt.data[1..], scripting).await;
         }
         TcpMsg::Pmt => {
-            handle_pvt(ctx, user, &pkt.data[1..]).await;
+            handle_pvt(ctx, user, &pkt.data[1..], scripting).await;
         }
         TcpMsg::PersonalMessage => {
             handle_personal_message(ctx, user, &pkt.data[1..]).await;
         }
         TcpMsg::ClientBrowse => {
             publish_raw_link(ctx, LINK_MSG_BROWSE, &pkt.data[1..]);
+            // El payload de ClientBrowse es un string Ares (null-terminated) con
+            // un hashlink del archivo que se está compartiendo.
+            let mut r = PacketReader::new(&pkt.data[1..]);
+            if let Ok(hashlink) = r.read_string() {
+                scripting.dispatch(astra_scripting::ScriptEvent::FileReceived {
+                    name: user.name.read().clone(),
+                    filename: hashlink,
+                });
+            }
         }
         TcpMsg::CustomData => {
             publish_raw_link(ctx, LINK_MSG_CUSTOM_DATA_TO, &pkt.data[1..]);
@@ -416,7 +521,19 @@ async fn dispatch_message(
         TcpMsg::CustomDataAll => {
             publish_raw_link(ctx, LINK_MSG_CUSTOM_DATA_ALL, &pkt.data[1..]);
         }
-        TcpMsg::ClientScribbleRoomFirst | TcpMsg::ClientScribbleRoomChunk => {
+        TcpMsg::ClientScribbleRoomFirst => {
+            // Gate real: el script puede cancelar el scribble retornando false
+            // desde onScribbleCheck. Si cancela, no se reenvía al link ni a la sala.
+            let allow = scripting.check_scribble(&user.name.read(), false);
+            if allow {
+                publish_raw_link(ctx, LINK_MSG_SCRIBBLE_LEAF, &pkt.data[1..]);
+            } else {
+                tracing::info!("scribble de '{}' bloqueado por scripting", user.name.read());
+            }
+        }
+        TcpMsg::ClientScribbleRoomChunk => {
+            // Chunks siempre se reenvían (asumiendo que First pasó el gate).
+            // Para gate por-chunk, se necesitaría trackear el state de cada scribble.
             publish_raw_link(ctx, LINK_MSG_SCRIBBLE_LEAF, &pkt.data[1..]);
         }
         _ => {
@@ -454,16 +571,48 @@ async fn handle_public(
         return;
     }
 
+    // Si tiene captcha pendiente, no puede hablar en público.
+    // (Sí puede ejecutar /help y otros built-ins, así que permitimos esos.)
+    if user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed) && !text.trim_start().starts_with('/') {
+        let pkt = outbound::build_pvt(
+            &ctx.settings.bot_name,
+            "Please solve the captcha before chatting. Check your PMs.",
+        );
+        let _ = user.send(pkt);
+        return;
+    }
+
     let name = user.name.read().clone();
 
     // Si el mensaje empieza con '/', es un comando slash
     if let Some((cmd, args)) = astra_commands::parse_command(&text) {
-        if astra_commands::dispatch_builtin(ctx, user, cmd, args) {
+        let (handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
+        if handled {
             debug!("comando built-in de '{}': /{} {}", name, cmd, args);
+            // Disparar los side-effects de scripting que el comando generó
+            for ev in events {
+                scripting.dispatch(ev);
+            }
+            // Post-dispatch hooks: disparan eventos de scripting
+            // que commands no puede emitir (no depende de scripting).
+            if cmd.eq_ignore_ascii_case("vroom") {
+                if let Ok(new_vroom) = args.trim().parse::<u16>() {
+                    scripting.dispatch(astra_scripting::ScriptEvent::VroomJoin {
+                        name: name.clone(),
+                        vroom: new_vroom,
+                    });
+                }
+            }
             return;
         }
         astra_commands::dispatch(ctx, scripting, &name, cmd, args);
         debug!("comando slash de '{}': /{} {}", name, cmd, args);
+        return;
+    }
+
+    // Hook onTextBefore: si algún script retorna false, cancelar el broadcast
+    if !scripting.check_text_before(&name, &text) {
+        debug!("onTextBefore canceló mensaje de '{}'", name);
         return;
     }
 
@@ -474,11 +623,43 @@ async fn handle_public(
         from: name.clone(),
         text: text.clone(),
     });
+    // Disparar evento de scripting
+    scripting.dispatch(astra_scripting::ScriptEvent::Public {
+        from: name.clone(),
+        text: text.clone(),
+    });
     debug!("public de '{}': {}", name, text);
 }
 
+/// Emite una variante visual del captcha: cada letra tiene 50% de
+/// probabilidad de estar en mayúscula o minúscula, y se añaden 1-2
+/// caracteres "0Oo1l" como ruido para OCRs simples.
+fn obfuscate_captcha_word(word: &str) -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut out = String::with_capacity(word.len() + 3);
+    for c in word.chars() {
+        let mapped = if rng.gen_bool(0.5) { c.to_ascii_lowercase() } else { c };
+        out.push(mapped);
+    }
+    // Añade 0-2 caracteres de ruido
+    let noise_count = rng.gen_range(0..=2);
+    let noise_chars = ['0', 'o', '1', 'l', 'I'];
+    for _ in 0..noise_count {
+        let nc = noise_chars[rng.gen_range(0..noise_chars.len())];
+        let pos = rng.gen_range(0..=out.len());
+        out.insert(pos, nc);
+    }
+    out
+}
+
 /// Maneja MSG_CHAT_CLIENT_EMOTE (11).
-async fn handle_emote(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) {
+async fn handle_emote(
+    ctx: &AppContext,
+    user: &Arc<server_core::user_pool::AresUser>,
+    data: &[u8],
+    scripting: &astra_scripting::ScriptHandle,
+) {
     let mut r = PacketReader::new(data);
     let text = match r.read_string() {
         Ok(s) => s,
@@ -488,10 +669,19 @@ async fn handle_emote(ctx: &AppContext, user: &Arc<server_core::user_pool::AresU
         return;
     }
     let name = user.name.read().clone();
+    // Hook onEmoteBefore
+    if !scripting.check_emote_before(&name, &text) {
+        debug!("onEmoteBefore canceló emote de '{}'", name);
+        return;
+    }
     let pkt = outbound::build_emote(&name, &text);
     broadcast_to_room(ctx, user, pkt);
     ctx.publish_link_event(LinkEvent::Emote {
         origin: None,
+        from: name.clone(),
+        text: text.clone(),
+    });
+    scripting.dispatch(astra_scripting::ScriptEvent::Emote {
         from: name,
         text,
     });
@@ -499,7 +689,12 @@ async fn handle_emote(ctx: &AppContext, user: &Arc<server_core::user_pool::AresU
 
 /// Maneja MSG_CHAT_CLIENT_PVT (25).
 /// Formato: `str target_name, str text`
-async fn handle_pvt(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) {
+async fn handle_pvt(
+    ctx: &AppContext,
+    user: &Arc<server_core::user_pool::AresUser>,
+    data: &[u8],
+    scripting: &astra_scripting::ScriptHandle,
+) {
     let mut r = PacketReader::new(data);
     let target_name = match r.read_string() {
         Ok(s) => s,
@@ -516,6 +711,11 @@ async fn handle_pvt(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUse
     // Buscar al destinatario
     if let Some(target) = ctx.user_pool.get_by_name(&target_name) {
         let from = user.name.read().clone();
+        // Hook onPMBefore: si algún script retorna false, cancelar el PM
+        if !scripting.check_pm_before(&from, &target_name, &text) {
+            debug!("onPMBefore canceló PM de '{}' a '{}'", from, target_name);
+            return;
+        }
         if target
             .ignore_list
             .read()
@@ -601,7 +801,7 @@ fn broadcast_to_room(ctx: &AppContext, sender: &server_core::user_pool::AresUser
     let vroom = *sender.vroom.read();
     let users = ctx.user_pool.users();
     for u in users {
-        if u.logged_in && *u.vroom.read() == vroom && !u.quarantined {
+        if u.logged_in && *u.vroom.read() == vroom && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             // En el sb0t original el sender también recibe el broadcast
             // (excepto en algunos casos). Aquí también.
             let _ = u.send(pkt.clone());

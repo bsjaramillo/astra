@@ -33,3 +33,4 @@ toml = { workspace = true }
 chrono = { workspace = true }
 scopeguard = { workspace = true }
 bytes = { workspace = true }
+rand = { workspace = true }

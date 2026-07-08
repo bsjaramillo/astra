@@ -26,6 +26,7 @@ use crate::protocol::{
     read_link_from_stream, write_link_to_stream, LinkMsg, LinkPacketBuilder, LinkPacketReader,
     LinkUser,
 };
+use crate::client::is_passthrough_opcode;
 
 const UNSPECIFIED_IPV4: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 const LINK_PACKET_HEADER_LEN: usize = 3;
@@ -661,13 +662,6 @@ fn build_custom_name_payload(name: &str, custom_name: Option<&str>) -> Vec<u8> {
     b.build_link_packet(LinkMsg::CustomName)[3..].to_vec()
 }
 
-fn build_chat_payload(from: &str, text: &str, msg: LinkMsg) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
-    b.write_string(from);
-    b.write_string(text);
-    b.build_link_packet(msg)[3..].to_vec()
-}
-
 fn build_private_payload(from: &str, to: &str, text: &str) -> Vec<u8> {
     let mut b = LinkPacketBuilder::new();
     b.write_string(from);
@@ -723,7 +717,7 @@ fn write_ip(w: &mut PacketWriter, ip: IpAddr) {
 
 fn broadcast_to_local_users(app: &AppContext, pkt: Bytes) {
     for user in app.user_pool.users() {
-        if user.logged_in && !user.quarantined {
+        if user.logged_in && !user.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = user.send(pkt.clone());
         }
     }

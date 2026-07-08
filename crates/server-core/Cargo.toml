@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 proto-ares = { path = "../proto-ares" }
 iconnect = { path = "../iconnect" }
+astra-captcha = { path = "../captcha" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }

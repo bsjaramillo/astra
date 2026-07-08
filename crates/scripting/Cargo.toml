@@ -22,5 +22,9 @@ async-trait = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+sha1 = { workspace = true }
+md-5 = { workspace = true }
+zip = { workspace = true }
+rusqlite = { workspace = true }
 boa_engine = { workspace = true }
 boa_gc = { workspace = true }

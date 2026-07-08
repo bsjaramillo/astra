@@ -88,6 +88,15 @@ pub struct SecurityConfig {
     pub failed_login_window_secs: u64,
     /// Capa 5: duración del auto-ban por logins fallidos (segundos).
     pub failed_login_ban_secs: u64,
+
+    /// Captcha: si está habilitado, los users nuevos (IP sin historial)
+    /// deben resolver un captcha antes de poder hablar en público.
+    /// Default: false (deshabilitado; el owner debe opt-in).
+    pub captcha_enabled: bool,
+    /// Captcha: tiempo máximo para resolver el challenge (segundos).
+    pub captcha_expiration_secs: u64,
+    /// Captcha: máx intentos fallidos antes de kickear al user.
+    pub captcha_max_attempts: u32,
 }
 
 impl Default for SecurityConfig {
@@ -115,6 +124,11 @@ impl Default for SecurityConfig {
             max_failed_logins: 5,
             failed_login_window_secs: 3600, // 1 hora
             failed_login_ban_secs: 3600,    // 1 hora
+
+            // Captcha
+            captcha_enabled: false,
+            captcha_expiration_secs: 300, // 5 min
+            captcha_max_attempts: 3,
         }
     }
 }

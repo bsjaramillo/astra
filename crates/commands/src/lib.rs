@@ -84,60 +84,91 @@ pub fn dispatch(
 
 /// Ejecuta comandos built-in del servidor.
 ///
-/// Retorna `true` si el comando fue manejado aquí y no debe pasar a scripts.
-pub fn dispatch_builtin(ctx: &AppContext, user: &Arc<AresUser>, command: &str, args: &str) -> bool {
-    match command.to_ascii_lowercase().as_str() {
+/// Retorna `(handled, events)`:
+/// - `handled = true` si el comando fue manejado (no debe pasar a scripts)
+/// - `events` es una lista de eventos a disparar al scripting como side-effects
+///   (ej: `AdminLevelChanged` cuando /ban tiene éxito).
+pub fn dispatch_builtin(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    command: &str,
+    args: &str,
+) -> (bool, Vec<astra_scripting::ScriptEvent>) {
+    let cmd = command.to_ascii_lowercase();
+    match cmd.as_str() {
         "help" => {
             handle_help(ctx, user, args);
-            true
+            (true, vec![])
         }
         "nick" => {
             handle_nick(ctx, user, args);
-            true
+            (true, vec![])
         }
         "vroom" => {
             handle_vroom(ctx, user, args);
-            true
+            (true, vec![])
         }
         "cname" => {
             handle_cname(ctx, user, args);
-            true
+            (true, vec![])
         }
         "users" => {
             handle_users(ctx, user, args);
-            true
+            (true, vec![])
         }
         "topic" => {
             handle_topic(ctx, user, args);
-            true
+            (true, vec![])
         }
         "motd" => {
             handle_motd(ctx, user, args);
-            true
+            (true, vec![])
         }
         "ban" => {
-            handle_ban(ctx, user, args);
-            true
+            let target_name = args.trim().to_string();
+            let success = handle_ban(ctx, user, args);
+            let events = if success {
+                vec![astra_scripting::ScriptEvent::AdminLevelChanged {
+                    name: target_name,
+                }]
+            } else {
+                vec![]
+            };
+            (true, events)
         }
         "unban" => {
-            handle_unban(ctx, user, args);
-            true
+            let target_name = args.trim().to_string();
+            let success = handle_unban(ctx, user, args);
+            let events = if success {
+                vec![astra_scripting::ScriptEvent::AdminLevelChanged {
+                    name: target_name,
+                }]
+            } else {
+                vec![]
+            };
+            (true, events)
         }
         "banlist" => {
             handle_banlist(ctx, user, args);
-            true
+            (true, vec![])
         }
         "whois" => {
             handle_whois(ctx, user, args);
-            true
+            (true, vec![])
         }
-        _ => false,
+        _ => (false, vec![]),
     }
 }
 
 fn handle_help(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     for line in DEFAULT_HELP_LINES {
         send_system_line(ctx, user, line);
+    }
+    // Agregar líneas registradas por scripts vía `Help_addLine(cmd, line)`.
+    // Solo se muestran cuando el user hace `/help` (sin args específicos).
+    for (cmd, line) in astra_scripting::api::extra_help_lines() {
+        let formatted = format!("/{} - {}", cmd, line);
+        send_system_line(ctx, user, &formatted);
     }
 }
 
@@ -171,7 +202,7 @@ fn handle_nick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     let part_pkt = outbound::build_part(&part_user);
     let join_pkt = outbound::build_join_or_userlist(user);
     for other in ctx.user_pool.users() {
-        if other.logged_in && *other.vroom.read() == *user.vroom.read() && !other.quarantined {
+        if other.logged_in && *other.vroom.read() == *user.vroom.read() && !other.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = other.send(part_pkt.clone());
             let _ = other.send(join_pkt.clone());
         }
@@ -198,6 +229,11 @@ fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         return;
     }
 
+    // Auto-crear el vroom destino si no existe (compat con sb0t)
+    if ctx.vrooms.get(new_vroom).is_none() {
+        let _ = ctx.vrooms.create(new_vroom, None, None);
+    }
+
     let mut part_user = AresUser::new(user.id, user.external_ip, user.guid);
     part_user.logged_in = true;
     *part_user.name.write() = user.name.read().clone();
@@ -208,7 +244,7 @@ fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     let part_pkt = outbound::build_part(&part_user);
     let join_pkt = outbound::build_join_or_userlist(user);
     for other in ctx.user_pool.users() {
-        if !other.logged_in || other.quarantined {
+        if !other.logged_in || other.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
         let other_vroom = *other.vroom.read();
@@ -224,6 +260,9 @@ fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         origin: None,
         user: server_core::LinkUserSnapshot::from_user(user),
     });
+    // El evento de scripting (onVroomJoin) lo dispara tcp_handler.rs
+    // después de dispatch_builtin, porque commands no tiene acceso a
+    // ScriptHandle (commands no depende de scripting).
 
     send_system_line(ctx, user, &format!("Moved to vroom {}.", new_vroom));
 }
@@ -263,7 +302,7 @@ fn handle_users(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         .user_pool
         .users()
         .into_iter()
-        .filter(|u| u.logged_in && !u.quarantined)
+        .filter(|u| u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed))
         .map(|u| u.name.read().clone())
         .collect();
 
@@ -313,21 +352,21 @@ fn handle_motd(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     send_system_line(ctx, user, "MOTD updated.");
 }
 
-fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     if !can_edit_topic(user) {
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
-        return;
+        return false;
     }
 
     let target_name = args.trim();
     if target_name.is_empty() {
         send_system_line(ctx, user, "Usage: /ban <nick>");
-        return;
+        return false;
     }
 
     let Some(target) = ctx.user_pool.get_by_name(target_name) else {
         send_system_line(ctx, user, "User not found.");
-        return;
+        return false;
     };
 
     let ident = ctx.bans.ban(
@@ -341,7 +380,7 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 
     if ident == 0 {
         send_system_line(ctx, user, "Failed to persist ban.");
-        return;
+        return false;
     }
 
     send_system_line(
@@ -353,18 +392,19 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 
     // Expulsión inmediata del pool para reflejar el ban en runtime.
     force_part_user(ctx, &target);
+    true
 }
 
-fn handle_unban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_unban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     if !can_edit_topic(user) {
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
-        return;
+        return false;
     }
 
     let target = args.trim();
     if target.is_empty() {
         send_system_line(ctx, user, "Usage: /unban <nick|ip|ident>");
-        return;
+        return false;
     }
 
     let removed = if let Ok(ident) = target.parse::<u16>() {
@@ -388,6 +428,7 @@ fn handle_unban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     } else {
         send_system_line(ctx, user, "No matching ban found.");
     }
+    removed
 }
 
 fn handle_banlist(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
@@ -462,7 +503,7 @@ fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
     ctx.stats.on_user_part();
 
     for u in ctx.user_pool.users() {
-        if !u.logged_in || u.quarantined {
+        if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
         let _ = u.send(part_pkt.clone());
@@ -476,7 +517,7 @@ fn broadcast_topic(ctx: &AppContext, text: &str) {
     let pkt = outbound::build_topic(text);
     let ws_msg = format!("TOPIC:{}", text);
     for u in ctx.user_pool.users() {
-        if !u.logged_in || u.quarantined {
+        if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
         let _ = u.send(pkt.clone());
@@ -627,38 +668,15 @@ mod tests {
         let ctx = make_test_ctx();
         let (user, mut rx) = make_test_user(1, "Alice");
 
-        let handled = dispatch_builtin(&ctx, &user, "help", "");
+        let (handled, _) = dispatch_builtin(&ctx, &user, "help", "");
         assert!(handled);
 
-        let first = rx.try_recv().expect("line 1");
-        let second = rx.try_recv().expect("line 2");
-        let third = rx.try_recv().expect("line 3");
-        let fourth = rx.try_recv().expect("line 4");
-        let fifth = rx.try_recv().expect("line 5");
-        let sixth = rx.try_recv().expect("line 6");
-        let seventh = rx.try_recv().expect("line 7");
-        let eighth = rx.try_recv().expect("line 8");
-        let ninth = rx.try_recv().expect("line 9");
-
-        let (_from1, t1) = decode_pvt(first);
-        let (_from2, t2) = decode_pvt(second);
-        let (_from3, t3) = decode_pvt(third);
-        let (_from4, t4) = decode_pvt(fourth);
-        let (_from5, t5) = decode_pvt(fifth);
-        let (_from6, t6) = decode_pvt(sixth);
-        let (_from7, t7) = decode_pvt(seventh);
-        let (_from8, t8) = decode_pvt(eighth);
-        let (_from9, t9) = decode_pvt(ninth);
-
-        assert_eq!(t1, "Available commands:");
-        assert_eq!(t2, "/help - show this help");
-        assert_eq!(t3, "/users - list connected users");
-        assert_eq!(t4, "/topic [text] - show or set room topic");
-        assert_eq!(t5, "/motd [text] - show or set message of the day");
-        assert_eq!(t6, "/ban <nick> - ban online user");
-        assert_eq!(t7, "/unban <nick|ip|ident> - remove ban");
-        assert_eq!(t8, "/banlist - list active bans");
-        assert_eq!(t9, "/whois <nick> - show user info");
+        for expected in DEFAULT_HELP_LINES {
+            let pkt = rx.try_recv().expect("expected help line");
+            let (_from, text) = decode_pvt(pkt);
+            assert_eq!(&text, expected);
+        }
+        assert!(rx.try_recv().is_err(), "no extra lines expected");
     }
 
     #[test]
@@ -669,7 +687,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob);
 
-        let handled = dispatch_builtin(&ctx, &alice, "users", "");
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "users", "");
         assert!(handled);
 
         let line1 = alice_rx.try_recv().expect("users line 1");
@@ -685,7 +703,8 @@ mod tests {
     fn builtin_unknown_is_not_handled() {
         let ctx = make_test_ctx();
         let (user, _rx) = make_test_user(1, "Alice");
-        assert!(!dispatch_builtin(&ctx, &user, "notreal", ""));
+        let (handled, _) = dispatch_builtin(&ctx, &user, "notreal", "");
+        assert!(!handled);
     }
 
     #[test]
@@ -694,7 +713,7 @@ mod tests {
         let (user, mut rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(user.clone());
 
-        let handled = dispatch_builtin(&ctx, &user, "topic", "");
+        let (handled, _) = dispatch_builtin(&ctx, &user, "topic", "");
         assert!(handled);
 
         let msg = rx.try_recv().expect("topic response");
@@ -708,7 +727,7 @@ mod tests {
         let (user, mut rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(user.clone());
 
-        let handled = dispatch_builtin(&ctx, &user, "topic", "nuevo topic");
+        let (handled, _) = dispatch_builtin(&ctx, &user, "topic", "nuevo topic");
         assert!(handled);
 
         let msg = rx.try_recv().expect("deny response");
@@ -726,7 +745,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let handled = dispatch_builtin(&ctx, &alice, "topic", "nuevo topic");
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "topic", "nuevo topic");
         assert!(handled);
         assert_eq!(ctx.current_room_topic(), "nuevo topic");
 
@@ -747,7 +766,7 @@ mod tests {
         let (user, mut rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(user.clone());
 
-        let handled = dispatch_builtin(&ctx, &user, "motd", "");
+        let (handled, _) = dispatch_builtin(&ctx, &user, "motd", "");
         assert!(handled);
 
         let msg = rx.try_recv().expect("motd response");
@@ -763,7 +782,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let handled = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "ban", "Bob");
         assert!(handled);
 
         let msg = alice_rx.try_recv().expect("deny");
@@ -781,7 +800,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let ban_handled = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let (ban_handled, _) = dispatch_builtin(&ctx, &alice, "ban", "Bob");
         assert!(ban_handled);
         assert!(ctx.bans.is_banned(&bob.guid, bob.external_ip));
         assert!(ctx.user_pool.get_by_name("Bob").is_none());
@@ -792,7 +811,7 @@ mod tests {
         let notice = next_pvt_text(&mut bob_rx);
         assert_eq!(notice, "You have been banned from this room.");
 
-        let unban_handled = dispatch_builtin(&ctx, &alice, "unban", "Bob");
+        let (unban_handled, _) = dispatch_builtin(&ctx, &alice, "unban", "Bob");
         assert!(unban_handled);
         assert!(!ctx.bans.is_banned(&bob.guid, bob.external_ip));
 
@@ -807,7 +826,7 @@ mod tests {
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
 
-        let handled = dispatch_builtin(&ctx, &alice, "unban", "ghost");
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "unban", "ghost");
         assert!(handled);
 
         let msg = alice_rx.try_recv().expect("unban not found");
@@ -827,7 +846,7 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &alice, "ban", "Bob");
         let _ = next_pvt_text(&mut alice_rx); // ban ack
 
-        let handled = dispatch_builtin(&ctx, &alice, "banlist", "");
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "banlist", "");
         assert!(handled);
 
         let t1 = next_pvt_text(&mut alice_rx);
@@ -847,7 +866,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let handled = dispatch_builtin(&ctx, &alice, "whois", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "whois", "Bob");
         assert!(handled);
 
         let msg = alice_rx.try_recv().expect("whois");

@@ -179,8 +179,10 @@ pub enum ScriptEvent {
     IgnoredStateChanged { name: String },
 
     // --- Avatar / pmsg ---
-    /// Avatar actualizado
-    Avatar { name: String },
+    /// Avatar actualizado. `name` es el nick, `png` son los bytes PNG (posiblemente
+    /// truncados por el límite del canal — los scripts que necesiten los bytes
+    /// raw deben usar el `MessageSent` event con un wrapper custom).
+    Avatar { name: String, png: Vec<u8> },
     /// Personal message actualizado
     PersonalMessage { name: String, text: String },
 
@@ -257,8 +259,9 @@ pub enum ScriptEvent {
     VroomJoinCheck { name: String, vroom: u16 },
 
     // --- Timer ---
-    /// Timer periódico (segundos desde el epoch)
-    Timer { secs: u64 },
+    /// Timer one-shot disparado. `secs` es el id del timer (para correlación),
+    /// `name` es el nombre de la función JS a llamar (handler_name = "onTimer").
+    Timer { secs: u64, name: String },
 }
 
 impl ScriptEvent {
@@ -396,7 +399,7 @@ impl ScriptEvent {
             IgnoredStateChanged { name } => vec![name.clone()],
 
             // Avatar / pmsg
-            Avatar { name } => vec![name.clone()],
+            Avatar { name, .. } => vec![name.clone()],
             PersonalMessage { name, text } => vec![name.clone(), text.clone()],
 
             // Nick / admin
@@ -448,7 +451,7 @@ impl ScriptEvent {
             VroomJoinCheck { name, vroom } => vec![name.clone(), vroom.to_string()],
 
             // Timer
-            Timer { secs } => vec![secs.to_string()],
+            Timer { secs, name } => vec![secs.to_string(), name.clone()],
         }
     }
 }
@@ -525,7 +528,7 @@ mod tests {
             ScriptEvent::BotPM { from: "".into(), to: "".into(), text: "".into() }.handler_name(),
             ScriptEvent::Ignoring { name: "".into() }.handler_name(),
             ScriptEvent::IgnoredStateChanged { name: "".into() }.handler_name(),
-            ScriptEvent::Avatar { name: "".into() }.handler_name(),
+            ScriptEvent::Avatar { name: "".into(), png: vec![] }.handler_name(),
             ScriptEvent::PersonalMessage { name: "".into(), text: "".into() }.handler_name(),
             ScriptEvent::Nick { old: "".into(), new: "".into() }.handler_name(),
             ScriptEvent::AdminLevelChanged { name: "".into() }.handler_name(),
@@ -553,7 +556,7 @@ mod tests {
             ScriptEvent::LeafPart { name: "".into() }.handler_name(),
             ScriptEvent::VroomJoin { name: "".into(), vroom: 0 }.handler_name(),
             ScriptEvent::VroomJoinCheck { name: "".into(), vroom: 0 }.handler_name(),
-            ScriptEvent::Timer { secs: 0 }.handler_name(),
+            ScriptEvent::Timer { secs: 0, name: "".into() }.handler_name(),
         ]
         .into_iter()
         .collect();
@@ -586,8 +589,8 @@ mod tests {
         assert_eq!(ev.args(), vec!["AstraChat", "Alice,Bob"]);
 
         // Timer
-        let ev = ScriptEvent::Timer { secs: 12345 };
+        let ev = ScriptEvent::Timer { secs: 12345, name: "cb".into() };
         assert_eq!(ev.handler_name(), "onTimer");
-        assert_eq!(ev.args(), vec!["12345"]);
+        assert_eq!(ev.args(), vec!["12345", "cb"]);
     }
 }

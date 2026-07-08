@@ -101,6 +101,46 @@ impl Database {
         &self.path
     }
 
+    /// Ejecuta un statement SQL (INSERT/UPDATE/DELETE/CREATE).
+    /// Usado por BanSystem, AccountManager, etc.
+    pub fn execute<P: rusqlite::Params>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> DbResult<usize> {
+        let conn = self.conn.lock();
+        conn.execute(sql, params).map_err(Into::into)
+    }
+
+    /// Ejecuta un SELECT (read-only) y devuelve filas como Vec<Vec<Value>>.
+    /// Usado por el sistema de scripting para exponer queries de solo-lectura.
+    pub fn execute_select(
+        &self,
+        sql: &str,
+    ) -> Result<(Vec<String>, Vec<Vec<rusqlite::types::Value>>), String> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(sql).map_err(|e| format!("prepare: {}", e))?;
+        let col_count = stmt.column_count();
+        let col_names: Vec<String> = (0..col_count)
+            .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
+            .collect();
+        let rows = stmt
+            .query_map([], |row| {
+                let mut values = Vec::new();
+                for i in 0..col_count {
+                    let v: rusqlite::types::Value = row.get(i)?;
+                    values.push(v);
+                }
+                Ok(values)
+            })
+            .map_err(|e| format!("query_map: {}", e))?;
+        let mut result_rows = Vec::new();
+        for row in rows {
+            result_rows.push(row.map_err(|e| format!("row: {}", e))?);
+        }
+        Ok((col_names, result_rows))
+    }
+
     fn run_migrations(conn: &Connection) -> DbResult<()> {
         conn.execute_batch(
             r#"
@@ -111,7 +151,8 @@ impl Database {
                 externalip TEXT NOT NULL,
                 localip TEXT NOT NULL,
                 port INTEGER NOT NULL,
-                ident INTEGER NOT NULL
+                ident INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS accounts (
@@ -441,6 +482,40 @@ impl Database {
             params![threshold],
         )?;
         Ok(n)
+    }
+
+    /// Cuenta cuántos joins totales (sin filtro de tiempo) hay desde una IP.
+    /// Usado para detectar IPs "nuevas" (sin historial) para el captcha gate.
+    pub fn count_user_history_by_ip(&self, external_ip: IpAddr) -> DbResult<u32> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM user_history WHERE externalip = ?1",
+            params![external_ip.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count as u32)
+    }
+
+    /// Elimina bans expirados. Retorna la cantidad de bans eliminados.
+    /// Un ban está expirado si `expires_at > 0` y `expires_at < now`.
+    pub fn prune_expired_bans(&self, now_secs: i64) -> DbResult<usize> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "DELETE FROM bans WHERE expires_at > 0 AND expires_at < ?1",
+            params![now_secs],
+        )?;
+        Ok(n)
+    }
+
+    /// Actualiza la fecha de expiración de un ban (en segundos unix).
+    /// `expires_at = 0` significa "nunca expira".
+    pub fn set_ban_expiry(&self, ident: u16, expires_at: i64) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE bans SET expires_at = ?1 WHERE ident = ?2",
+            params![expires_at, ident as i64],
+        )?;
+        Ok(())
     }
 }
 

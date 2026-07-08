@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -75,7 +75,7 @@ pub struct AresUser {
     /// ¿Owner?
     pub is_owner: bool,
     /// ¿Quarantined?
-    pub quarantined: bool,
+    pub quarantined: AtomicBool,
     /// ¿Supports HTML?
     pub supports_html: bool,
     /// ¿Web client?
@@ -91,7 +91,7 @@ pub struct AresUser {
     /// ¿Cloaked?
     pub cloaked: bool,
     /// ¿Captcha pendiente?
-    pub needs_captcha: bool,
+    pub needs_captcha: AtomicBool,
     /// ¿Logged in?
     pub logged_in: bool,
     /// ¿Registered?
@@ -108,10 +108,10 @@ pub struct AresUser {
     pub custom_name: parking_lot::RwLock<Option<String>>,
     /// Personal message (protegido para acceso concurrente).
     pub personal_message: parking_lot::Mutex<String>,
-    /// Avatar.
-    pub avatar: Option<Vec<u8>>,
+    /// Avatar. (protegido por Mutex para asignación thread-safe vía Arc)
+    pub avatar: parking_lot::Mutex<Option<Vec<u8>>>,
     /// Full avatar.
-    pub full_avatar: Option<Vec<u8>>,
+    pub full_avatar: parking_lot::Mutex<Option<Vec<u8>>>,
     /// Link.
     pub link: ILink,
     /// Join time (ms epoch).
@@ -165,7 +165,7 @@ impl AresUser {
             voice_opus_chat_private: false,
             vroom: parking_lot::RwLock::new(0),
             is_owner: false,
-            quarantined: false,
+            quarantined: AtomicBool::new(false),
             supports_html: false,
             web_client: false,
             ares: true,
@@ -173,7 +173,7 @@ impl AresUser {
             level: parking_lot::RwLock::new(ILevel::Anonymous),
             muzzled: false,
             cloaked: false,
-            needs_captcha: false,
+            needs_captcha: AtomicBool::new(false),
             logged_in: false,
             registered: false,
             idle: false,
@@ -182,8 +182,8 @@ impl AresUser {
             font: IFont::default(),
             custom_name: parking_lot::RwLock::new(None),
             personal_message: parking_lot::Mutex::new(String::new()),
-            avatar: None,
-            full_avatar: None,
+            avatar: parking_lot::Mutex::new(None),
+            full_avatar: parking_lot::Mutex::new(None),
             link: ILink::default(),
             join_time: now,
             last_scribble: 0,

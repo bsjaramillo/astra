@@ -616,7 +616,7 @@ async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent) -> Result<()
     write_link_to_stream(stream, msg, &payload).await.map_err(|e| e.to_string())
 }
 
-fn is_passthrough_opcode(op: LinkMsg) -> bool {
+pub(crate) fn is_passthrough_opcode(op: LinkMsg) -> bool {
     matches!(
         op,
         LinkMsg::Error
@@ -786,7 +786,7 @@ fn write_ip(writer: &mut proto_ares::PacketWriter, ip: std::net::IpAddr) {
 
 fn broadcast_to_local_users(app: &AppContext, pkt: bytes::Bytes) {
     for user in app.user_pool.users() {
-        if user.logged_in && !user.quarantined {
+        if user.logged_in && !user.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = user.send(pkt.clone());
         }
     }

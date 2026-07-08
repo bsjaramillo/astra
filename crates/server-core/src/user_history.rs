@@ -90,6 +90,18 @@ impl UserHistory {
         });
     }
 
+    /// ¿Hay joins previos desde esta IP en la DB? (cualquier momento).
+    /// Útil para detectar IPs "nuevas" (para captcha o banning).
+    pub fn has_prior_join(&self, external_ip: IpAddr) -> bool {
+        match self.db.count_user_history_by_ip(external_ip) {
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!("error consultando user_history por IP: {}", e);
+                false
+            }
+        }
+    }
+
     /// Poda entradas de la DB con más de `max_age_secs`.
     pub fn prune(&self, max_age_secs: u64) {
         if let Err(e) = self.db.prune_old_history(max_age_secs) {

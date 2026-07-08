@@ -211,9 +211,138 @@
     - [x] `x8664-apple-darwin` y `aarch64-apple-darwin` (macOS)
   - [x] SHA256 checksums para todos los binarios
   - [x] GitHub Release con notas auto-generadas
-- [ ] Fuzzing del protocolo binario con `cargo-fuzz`
-- [ ] Documentación de API
+- [x] Fuzzing del protocolo binario con `cargo-fuzz` (3 targets: reader, writer, login)
+- [x] `astra.toml.example` con todos los campos documentados
+- [x] Documentación: `docs/SECURITY.md`, `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`
 - [ ] Benchmarking
+
+**Fase 10 ✅ Captcha (protección anti-bot para IPs nuevas)**
+- [x] **`astra-captcha` crate**: genera palabras de 4 letras (wordlist 256) + imagen PNG (font 5x7 bitmap)
+- [x] **`CaptchaManager`** en server-core: tracking por user_id, expiración, máx intentos
+- [x] **Config en `SecurityConfig`**: `captcha_enabled`, `captcha_expiration_secs`, `captcha_max_attempts`
+- [x] **Integración en `process_handshake`**: si `captcha_enabled` y la IP no tiene historial previo, generar challenge
+- [x] **Prompt**: PM del bot con código obfuscado (case-mix + ruido)
+- [x] **Verificación**: PM al bot con la respuesta correcta → un-quarantine
+- [x] **Gate en `handle_public`**: users con captcha pendiente no pueden hablar en público
+- [x] **`UserHistory::has_prior_join`**: query a DB para detectar IPs nuevas
+- [x] Tests: 14 en `astra-captcha` + 11 en `server-core::captcha`
+
+**Fase 11 ✅ Scripting API completa (expuesta a JS)**
+- [x] **Refactor del registry**: `Context*` → `Arc<AppContext>` reemplazado por **thread-local** (Context no-Send vive en un thread dedicado, evita invalidación de punteros)
+- [x] **Mensajería**: `sendPublic(from, text)`, `sendEmote(from, text)`, `sendPM(from, to, text)`
+- [x] **Usuarios**: `userCount()`, `userNames()`, `userExists(name)`, `getUserIp(name)`, `getUserLevel(name)`, `getUserVroom(name)`, `kickUser(name)`
+- [x] **Sala**: `getTopic()`, `setTopic(text)`
+- [x] **Hashing**: `astraHash(s)` (SHA-1), `astraMd5(s)`, `astraBase64Encode(s)`, `astraBase64Decode(s)`
+- [x] **Eventos disparados al script**: `onUserJoin`, `onUserPart`, `onPublic`, `onEmote` (wiring en `tcp_handler.rs`)
+- [x] **Demo scripts**: `greet.js` (mejorado con todas las APIs), `autokick.js` (nuevo, usa `kickUser`)
+- [x] Tests: 27 en scripting/api (5 nuevos: sha1, md5, base64 roundtrip, base64 invalid, get/set topic, full_script_flow, send_public_broadcasts, send_pm_targets_specific_user, send_pm_to_nonexistent)
+
+**Fase 12 ✅ File I/O + Zip + ScriptInclude + Spell (Fase 1 del SCRIPTING-ROADMAP)**
+- [x] **`File_exists(path)`** — `std::path::Path::exists()`
+- [x] **`File_size(path)`** — `std::fs::metadata().len()` (o -1 si no existe)
+- [x] **`File_creationTime(path)`** — `metadata.created()` como unix epoch secs
+- [x] **`Zip_compress(data)`** — `zip` crate con `CompressionMethod::Deflated`, retorna base64
+- [x] **`Zip_decompress(b64_data)`** — lee zip y extrae el primer entry
+- [x] **`ScriptInclude_run(path)`** — lee archivo JS y lo evalúa en el mismo Context (funciones quedan disponibles)
+- [x] **`Spelling_check(word)`** — verifica contra wordlist de 100 palabras comunes
+- [x] Tests: 9 nuevos (file_exists_real, file_size_real, file_size_missing_returns_negative, zip_compress_decompress_roundtrip, zip_decompress_invalid_returns_null, script_include_runs_other_file, script_include_missing_file_returns_false, spelling_check_known_word, spelling_check_unknown_word)
+- [x] **Bug fix**: `base64_decode_bytes` separado de `base64_decode` (este último asume UTF-8, el primero devuelve `Vec<u8>` para datos binarios)
+
+**Fase 13 ✅ sb0t-compat wiring (Fase 2 del SCRIPTING-ROADMAP)**
+- [x] **6 aliases** registrados con nombres sb0t originales (delegan a las funciones modernas):
+  - `Base64_encode`, `Base64_decode`, `Crypto_hashSHA1`, `Crypto_hashMD5`, `Users_count`, `Room_setTopic`
+- [x] **10 stubs honestos** (⚠️ comportamiento parcial o default):
+  - `Channels_list` → `"[0]"` (solo vroom 0 por ahora)
+  - `Hashlink_create(server, port)` → `astrahash://server:port` (formato URL real)
+  - `Users_getUserByName(name)` → `"User:name:ip:level"` o `null` (consulta el pool)
+  - `Stats_addStat(key, value)` / `Stats_getStat(key)` → thread-local HashMap
+  - `Entities_list` → `"[]"` (no hay integración con UdpNodeManager aún)
+  - `Link_createLink(server, port)` → `false` + warning (no implementado)
+  - `Registry_createKey(name)` / `Registry_deleteKey(name)` → HKLM virtual thread-local
+  - `Room_broadcast(text)` → alias de `sendPublic("Bot", text)` (broadcast real)
+- [x] Tests: 16 nuevos (cubren cada alias con vector conocido + cada stub con su default esperado)
+
+**Fase 14 ✅ Hooks *Before con cancelación (Fase 3 del SCRIPTING-ROADMAP)**
+- [x] **Nuevo módulo `ScriptRequest`**: enum con 3 variantes (`TextBefore`, `EmoteBefore`, `PMBefore`) cada una con `std::sync::mpsc::SyncSender<bool>` para reply
+- [x] **`ScriptHandle` extendido** con 3 métodos sync:
+  - `check_text_before(from, text) -> bool` (bloquea 100ms, default allow)
+  - `check_emote_before(from, text) -> bool`
+  - `check_pm_before(from, to, text) -> bool`
+- [x] **`Manager::dispatch_request`**: ejecuta la función JS en cada script activo, retorna `false` si ALGUNO retorna `false`
+- [x] **`call_handler_with_return`**: nueva helper que captura el return value de la función JS
+- [x] **Doble canal en el manager**: events (async) + requests (sync con reply)
+- [x] **Wireado en tcp_handler.rs**: los 3 hooks se llaman antes de broadcast
+- [x] Tests: 8 nuevos (cancel public, dejar pasar, return non-bool ignorado, cancel emote, cancel PM, multi-script any-cancel-wins, no-handler default allow, handle dead default)
+- [x] **Bug encontrado y aislado**: `boa_engine::Context` es `!Send`, no se puede usar desde un thread distinto al que lo creó. Los tests llaman a `dispatch_request` directamente sobre el manager (en el mismo thread) en vez de via `start_in_thread`
+
+**Fase 15 ✅ Eventos administrativos y de cuenta (Fase 4 del SCRIPTING-ROADMAP)**
+- [x] **LoginGranted** — disparado después de enviar `LoginAck` en `process_handshake`
+- [x] **Logout** — disparado antes del cleanup en `handle_tcp_client`
+- [x] **InvalidLoginAttempt** — disparado cuando falla la capa 4 de validación
+- [x] **Flood** — disparado cuando se detecta join-flood (15s window)
+- [x] Tests: 11 nuevos (login_granted, logout, invalid_login_attempt, flood, admin_level_changed, bans_auto_cleared, idled/unidled, proxy_detected, multiple_handlers, dispatch_passes_correct_args, error_in_one_script_doesnt_affect_others)
+- [ ] Pendiente: AdminLevelChanged wired a /ban, /unban (requiere refactor de `dispatch_builtin` para tomar `&ScriptHandle`)
+- [ ] Pendiente: BansAutoCleared wired a cleanup de bans (no hay `ban.prune` aún — la tabla de bans no tiene `expires_at`)
+- [ ] Pendiente: ProxyDetected wired a `LoginValidator` (capa 4)
+- [ ] Pendiente: Idled/Unidled wired a `IdleManager` (no está en uso actualmente)
+
+**Fase 16 ✅ Channels + Vroom (Fase 5 del SCRIPTING-ROADMAP)**
+- [x] **`VroomManager`** en server-core: HashMap<u16, VroomInfo> con `RwLock`
+  - Vroom 0 (Main Room) pre-creado
+  - `create/delete/get/list_ids/set_topic/count`
+  - Auto-creación de vrooms al hacer `/vroom <nuevo_id>`
+- [x] **`AppContext.vrooms: Arc<VroomManager>`**
+- [x] **`Channels_*` funciones en JS** (5 nuevas):
+  - `Channels_list()` → `"[0,1,2,...]"` (JSON array de IDs)
+  - `Channels_get(id)` → `{"id":N,"name":"...","topic":"..."}` o `"null"`
+  - `Channels_create(id, name)` → bool
+  - `Channels_setTopic(id, topic)` → bool
+  - `Channels_broadcast(id, from, text)` → envía solo a users en ese vroom
+- [x] **`onVroomJoin(name, vroom)`** — disparado en `tcp_handler.rs` después de `/vroom`
+- [x] **Auto-creación de vroom en `/vroom`** — si el ID no existe, se crea con nombre default
+- [x] Tests: 11 nuevos (vroom_0_exists_by_default, create_and_get, create_duplicate_fails, delete_vroom_0_fails, delete_existing, list_ids_includes_0, list_ids_json_format, get_json_format, get_json_nonexistent, set_topic_updates, set_topic_nonexistent_fails + channels_list, channels_create_and_list, channels_get_returns_json, channels_set_topic, channels_broadcast_only_to_vroom)
+
+**Fase 17 ✅ Hashlink + Link management (Fase 6 del SCRIPTING-ROADMAP)**
+- [x] **`Hashlink_create(server, port)`** ✅ desde Fase 13 — genera URL `astrahash://server:port`
+- [x] **`Hashlink_parse(url)`** — extrae `{"server":"x.com","port":5009}` (soporta IPv6 brackets)
+- [x] **`Link_list()`** → `"[]"` (stubs honestos — no hay LinkManager expuesto aún)
+- [x] **`Link_getUserList()`** → JSON array de users locales (los remotos requieren integración LinkClient)
+- [x] **Stubs honestos**: `Link_disconnect`, `Link_findLeaf`, `Link_findUser`, `Link_findHub`, `Link_kickHub` (log warning + return default)
+- [x] **Bridge `LinkEvent → ScriptEvent`** en `main.rs`: task tokio que escucha `link_events` y dispara `onLeafJoin`/`onLeafPart` a scripting
+- [x] Tests: 11 nuevos (hashlink_parse_valid, hashlink_parse_invalid, link_list_empty, link_get_user_list_local, link_create_link_stub, link_disconnect_stub + 5 tests de eventos Link en el manager)
+
+**Fase 18 ✅ Avatar, Scribble, File browse (Fase 7 del SCRIPTING-ROADMAP)**
+- [x] **`onAvatar(name)`** — disparado en `tcp_handler.rs` cuando se recibe `MSG_CHAT_CLIENT_AVATAR` (opcode 9)
+- [x] **`onFileReceived(name, hashlink)`** — disparado cuando se recibe `MSG_CHAT_CLIENT_BROWSE` (opcode 50), parsea el hashlink
+- [x] **`onScribbleCheck(name, is_pm)`** — disparado en `MSG_CHAT_CLIENT_SCRIBBLE_ROOM_FIRST/CHUNK` (no bloquea, solo audit)
+- [x] **`Avatar_new(b64_bytes)`** — crea avatar desde base64 en thread-local store, retorna id (índice)
+- [x] **`Avatar_getSize(id)`** — retorna tamaño en bytes del avatar (o -1 si no existe)
+- [x] Tests: 6 nuevos (avatar_event_calls_handler, file_received_event_calls_handler, scribble_check_event_calls_handler + avatar_new_returns_id, avatar_new_invalid_base64, avatar_get_size_returns_correct_value)
+
+**Fase 19 ✅ Stats, Registry, Entities, Query (Fase 8 del SCRIPTING-ROADMAP)**
+- [x] **`Stats_addStat/getStat`** ✅ desde Fase 13 (thread-local HashMap)
+- [x] **`Registry_createKey/deleteKey`** ✅ desde Fase 13 (HKLM virtual)
+- [x] **`Entities_list`** ✅ desde Fase 13 (`"[]"` stub)
+- [x] **`Spelling_suggest(word)`** — array JSON de sugerencias por prefijo de 2+ chars
+- [x] **`Query_new(sql)`** — ejecuta SELECT (solo lectura) sobre la DB SQLite, retorna id
+- [x] **`Query_getResults(id)`** — JSON array con `{col:val, col:val}` por fila
+- [x] **`Query_getColumnCount(id)`** — cantidad de columnas
+- [x] **`Query_getRowCount(id)`** — cantidad de filas
+- [x] **Validación SQL**: solo permite `SELECT`/`WITH`/`EXPLAIN` (bloquea DELETE/DROP/INSERT)
+- [x] **Nuevo método `Database::execute()`** (público) para INSERT/UPDATE/DELETE interno
+- [x] Tests: 5 nuevos (spelling_suggest_returns_array, spelling_suggest_no_match, query_new_select_works, query_new_blocks_writes, query_get_results_nonexistent_returns_null)
+
+**Fase 20 ✅ Timer, Help, Connect/Disconnect (Fase 9 del SCRIPTING-ROADMAP) — 🎯 100% PARITY**
+- [x] **`onConnect(ip)`** — disparado al abrir el socket TCP (en `handle_tcp_client`)
+- [x] **`onDisconnect(ip)`** — disparado al cerrar el socket
+- [x] **`onUserList(name, users_csv)`** — disparado por cada user en la userlist inicial
+- [x] **`onUserListEnd(name)`** — disparado al final del envío de userlist
+- [x] **`onHelp(command)`** — disparado en `/help` (puede agregar líneas)
+- [x] **`Help_addLine(cmd, line)`** — agrega línea custom al `/help` desde script
+- [x] **`setTimer(secs, fn_name)`** — agenda una función JS (one-shot) — usa `pop_due_timers` en el loop del manager
+- [x] **`clearTimer(id)`** — cancela un timer
+- [x] **`onTimer(id, fn_name)`** — handler llamado cuando el timer expira
+- [x] Tests: 10 nuevos (6 de eventos + 4 de Help_addLine/setTimer)
 
 ## Distribución e instalación
 
@@ -258,8 +387,6 @@ Plataformas soportadas: Linux x86_64, Linux aarch64, macOS x86_64, macOS aarch64
   mecanismo de eventos entre threads (el Context de boa_engine no es Send).
   Solución: usar un LocalSet o un thread dedicado con un canal. Por ahora,
   los eventos se loguean pero no se ejecutan en los scripts.
-- Comandos nativos built-in (`/help`, `/users`, `/ban`, etc.) — actualmente
-  solo se delegan a scripts JS
 - Agregar `astraVersion` y otras constantes (limitado por la API de boa_engine 0.20)
 
 ## Convenciones del proyecto

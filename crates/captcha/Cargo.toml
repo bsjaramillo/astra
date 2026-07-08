@@ -10,3 +10,4 @@ authors.workspace = true
 rand = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
