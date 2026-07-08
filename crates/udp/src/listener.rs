@@ -109,7 +109,7 @@ async fn handle_packet(
             handle_send_nodes(socket, manager, peer, now).await;
         }
         UdpMsg::ServerListWantCheckFirewall => {
-            handle_want_check_firewall(socket, peer).await;
+            handle_want_check_firewall(socket, manager, peer, now).await;
         }
         UdpMsg::ServerListReadyToCheckFirewall => {
             if let Some((cookie, their_ip)) = protocol::parse_ready_check_firewall(payload) {
@@ -121,7 +121,7 @@ async fn handle_packet(
             }
         }
         UdpMsg::ServerListProceedCheckFirewall => {
-            debug!("PROCEEDCHECKFIREWALL (ignorado - stub)");
+            handle_proceed_check_firewall(socket, manager, payload, peer, now).await;
         }
         UdpMsg::ServerListCheckFirewallBusy => {
             debug!("CHECKFIREWALLBUSY (stub)");
@@ -258,12 +258,26 @@ async fn handle_send_nodes(
     }
 }
 
-/// Responde a WANTCHECKFIREWALL con READYTOCHECKFIREWALL (stub, no hace TCP probe real).
-async fn handle_want_check_firewall(socket: &UdpSocket, peer: SocketAddr) {
-    // Generamos un cookie aleatorio. En el sb0t original usaba AccountManager.NextCookie.
-    let cookie: u32 = rand::random();
-    let my_ip: std::net::IpAddr = peer.ip(); // en el original usa la IP externa propia
-    let pkt = protocol::build_ready_check_firewall(cookie, my_ip);
+/// Máximo de TCP probes de firewall simultáneos. Por encima de esto
+/// respondemos CHECKFIREWALLBUSY con nodos alternativos.
+const MAX_FIREWALL_PROBES: usize = 4;
+
+/// Timeout del TCP probe de firewall check.
+const FIREWALL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Responde a WANTCHECKFIREWALL con READYTOCHECKFIREWALL.
+///
+/// El cookie queda registrado en el manager y se valida cuando el peer
+/// responda con PROCEEDCHECKFIREWALL.
+async fn handle_want_check_firewall(
+    socket: &UdpSocket,
+    manager: &Arc<UdpNodeManager>,
+    peer: SocketAddr,
+    now: i64,
+) {
+    let cookie = manager.issue_firewall_cookie(peer.ip(), now);
+    // El campo IP le informa al solicitante su propia IP externa.
+    let pkt = protocol::build_ready_check_firewall(cookie, peer.ip());
     if let Err(e) = socket.send_to(&pkt, peer).await {
         warn!("error enviando READYTOCHECKFIREWALL: {}", e);
     } else {
@@ -271,5 +285,137 @@ async fn handle_want_check_firewall(socket: &UdpSocket, peer: SocketAddr) {
     }
 }
 
+/// Maneja PROCEEDCHECKFIREWALL: TCP probe real al puerto del solicitante.
+///
+/// El solicitante detecta la conexión TCP entrante y concluye que no está
+/// firewalled. Solo probamos la IP origen del paquete UDP y solo si el
+/// cookie fue emitido por nosotros a esa IP (anti-reflection). Si ya hay
+/// demasiados probes en curso, respondemos CHECKFIREWALLBUSY con nodos
+/// alternativos para que pruebe con otro server.
+async fn handle_proceed_check_firewall(
+    socket: &UdpSocket,
+    manager: &Arc<UdpNodeManager>,
+    payload: &[u8],
+    peer: SocketAddr,
+    now: i64,
+) {
+    let Some((port, cookie)) = protocol::parse_proceed_check_firewall(payload) else {
+        return;
+    };
+    if port == 0 {
+        return;
+    }
+    if !manager.take_firewall_cookie(cookie, peer.ip(), now) {
+        debug!("PROCEEDCHECKFIREWALL con cookie inválido/vencido de {}", peer);
+        return;
+    }
+
+    // Reservar un slot de probe; si estamos saturados → BUSY.
+    use std::sync::atomic::Ordering;
+    let reserved = manager
+        .probes_in_flight
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            (n < MAX_FIREWALL_PROBES).then_some(n + 1)
+        })
+        .is_ok();
+    if !reserved {
+        let servers = manager.active_nodes(6, now);
+        let pkt = protocol::build_check_firewall_busy(manager.my_port, &servers);
+        let _ = socket.send_to(&pkt, peer).await;
+        debug!("CHECKFIREWALLBUSY → {} (probes saturados)", peer);
+        return;
+    }
+
+    let target = SocketAddr::new(peer.ip(), port);
+    let mgr = manager.clone();
+    tokio::spawn(async move {
+        match tokio::time::timeout(
+            FIREWALL_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect(target),
+        )
+        .await
+        {
+            Ok(Ok(_stream)) => debug!("firewall probe OK: {} alcanzable", target),
+            Ok(Err(e)) => debug!("firewall probe falló a {}: {}", target, e),
+            Err(_) => debug!("firewall probe timeout a {}", target),
+        }
+        mgr.probes_in_flight.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
 #[allow(dead_code)]
 fn _silence_unused(_: &NodeAddr) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use server_core::db::Database;
+
+    async fn spawn_test_listener() -> (Arc<UdpNodeManager>, SocketAddr) {
+        let db = Database::in_memory().unwrap();
+        let manager = Arc::new(UdpNodeManager::new(db, 0));
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr = socket.local_addr().unwrap();
+        let user_count: UserCountFn = Arc::new(|| 0);
+        let mgr = manager.clone();
+        tokio::spawn(async move {
+            let _ = run_listener(mgr, socket, user_count).await;
+        });
+        (manager, addr)
+    }
+
+    #[tokio::test]
+    async fn firewall_check_full_flow_probes_requester() {
+        let (_manager, server_addr) = spawn_test_listener().await;
+
+        // 1. Peer pide el firewall check
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        peer.send_to(&protocol::build_want_check_firewall(), server_addr)
+            .await
+            .unwrap();
+
+        // 2. Server responde READYTOCHECKFIREWALL con cookie
+        let mut buf = [0u8; 512];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut buf))
+            .await
+            .expect("timeout esperando READYTOCHECKFIREWALL")
+            .unwrap();
+        assert_eq!(buf[0], UdpMsg::ServerListReadyToCheckFirewall as u8);
+        let (cookie, echoed_ip) = protocol::parse_ready_check_firewall(&buf[1..n]).unwrap();
+        assert_eq!(echoed_ip, "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+
+        // 3. Peer abre su puerto TCP y manda PROCEEDCHECKFIREWALL
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp_port = tcp.local_addr().unwrap().port();
+        peer.send_to(
+            &protocol::build_proceed_check_firewall(tcp_port, cookie),
+            server_addr,
+        )
+        .await
+        .unwrap();
+
+        // 4. El server hace el TCP probe → conexión entrante en el peer
+        let accepted = tokio::time::timeout(Duration::from_secs(5), tcp.accept()).await;
+        assert!(accepted.is_ok(), "el server debía hacer el TCP probe");
+    }
+
+    #[tokio::test]
+    async fn firewall_check_ignores_invalid_cookie() {
+        let (_manager, server_addr) = spawn_test_listener().await;
+
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp_port = tcp.local_addr().unwrap().port();
+
+        // PROCEED sin haber hecho WANT (cookie inventado) → sin probe
+        peer.send_to(
+            &protocol::build_proceed_check_firewall(tcp_port, 0xBAD_C0DE),
+            server_addr,
+        )
+        .await
+        .unwrap();
+
+        let accepted = tokio::time::timeout(Duration::from_millis(800), tcp.accept()).await;
+        assert!(accepted.is_err(), "no debía haber probe con cookie inválido");
+    }
+}

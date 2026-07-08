@@ -26,6 +26,9 @@ pub struct NodeSnapshot {
     pub users: u32,
 }
 
+/// TTL de un cookie de firewall check (ms).
+const FIREWALL_COOKIE_TTL_MS: i64 = 60_000;
+
 /// Manager de nodos UDP (cache en memoria + persistencia).
 pub struct UdpNodeManager {
     /// DB compartida
@@ -40,6 +43,13 @@ pub struct UdpNodeManager {
     pub my_port: u16,
     /// Callback opcional para notificar cambios al AppContext
     on_change: RwLock<Option<NodeChangeCallback>>,
+    /// Cookies emitidos en READYTOCHECKFIREWALL: cookie → (ip, issued_at ms).
+    /// Solo aceptamos un PROCEEDCHECKFIREWALL cuyo cookie emitimos nosotros
+    /// a esa misma IP (anti-reflection: nadie puede hacernos probar IPs de
+    /// terceros).
+    firewall_cookies: parking_lot::Mutex<std::collections::HashMap<u32, (IpAddr, i64)>>,
+    /// Cantidad de TCP probes de firewall check en curso.
+    pub probes_in_flight: std::sync::atomic::AtomicUsize,
 }
 
 impl UdpNodeManager {
@@ -78,6 +88,42 @@ impl UdpNodeManager {
             stats: UdpStats::new(),
             my_port,
             on_change,
+            firewall_cookies: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            probes_in_flight: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Emite un cookie para un firewall check solicitado por `ip`.
+    ///
+    /// El cookie se valida (y consume) después en [`take_firewall_cookie`]
+    /// cuando llegue el `PROCEEDCHECKFIREWALL`.
+    ///
+    /// [`take_firewall_cookie`]: Self::take_firewall_cookie
+    pub fn issue_firewall_cookie(&self, ip: IpAddr, now: i64) -> u32 {
+        let mut cookies = self.firewall_cookies.lock();
+        // GC oportunista de cookies vencidos
+        cookies.retain(|_, (_, issued)| now - *issued < FIREWALL_COOKIE_TTL_MS);
+        let mut rng = rand::thread_rng();
+        loop {
+            let cookie: u32 = rng.gen();
+            if let std::collections::hash_map::Entry::Vacant(e) = cookies.entry(cookie) {
+                e.insert((ip, now));
+                return cookie;
+            }
+        }
+    }
+
+    /// Valida y consume un cookie de firewall check.
+    ///
+    /// Retorna `true` solo si el cookie fue emitido a esa misma `ip` y no
+    /// expiró (TTL 60s). El cookie se remueve en ambos casos de match.
+    pub fn take_firewall_cookie(&self, cookie: u32, ip: IpAddr, now: i64) -> bool {
+        let mut cookies = self.firewall_cookies.lock();
+        match cookies.remove(&cookie) {
+            Some((issued_ip, issued_at)) => {
+                issued_ip == ip && now - issued_at < FIREWALL_COOKIE_TTL_MS
+            }
+            None => false,
         }
     }
 
@@ -319,6 +365,45 @@ mod tests {
         let m = UdpNodeManager::new(db, 5009);
         assert_eq!(m.count_nodes(), 0);
         assert_eq!(m.count_rooms(), 0);
+    }
+
+    #[test]
+    fn firewall_cookie_valid_roundtrip() {
+        let db = Database::in_memory().unwrap();
+        let m = UdpNodeManager::new(db, 5009);
+        let ip: IpAddr = "9.9.9.9".parse().unwrap();
+        let cookie = m.issue_firewall_cookie(ip, 1_000);
+        assert!(m.take_firewall_cookie(cookie, ip, 2_000));
+        // Consumido: segundo take falla
+        assert!(!m.take_firewall_cookie(cookie, ip, 2_000));
+    }
+
+    #[test]
+    fn firewall_cookie_rejects_wrong_ip() {
+        let db = Database::in_memory().unwrap();
+        let m = UdpNodeManager::new(db, 5009);
+        let ip: IpAddr = "9.9.9.9".parse().unwrap();
+        let other: IpAddr = "8.8.8.8".parse().unwrap();
+        let cookie = m.issue_firewall_cookie(ip, 1_000);
+        assert!(!m.take_firewall_cookie(cookie, other, 2_000));
+    }
+
+    #[test]
+    fn firewall_cookie_expires() {
+        let db = Database::in_memory().unwrap();
+        let m = UdpNodeManager::new(db, 5009);
+        let ip: IpAddr = "9.9.9.9".parse().unwrap();
+        let cookie = m.issue_firewall_cookie(ip, 1_000);
+        // 61 segundos después: vencido
+        assert!(!m.take_firewall_cookie(cookie, ip, 62_000));
+    }
+
+    #[test]
+    fn firewall_cookie_unknown_rejected() {
+        let db = Database::in_memory().unwrap();
+        let m = UdpNodeManager::new(db, 5009);
+        let ip: IpAddr = "9.9.9.9".parse().unwrap();
+        assert!(!m.take_firewall_cookie(0xDEAD_BEEF, ip, 1_000));
     }
 
     #[test]
