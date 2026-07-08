@@ -79,12 +79,16 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
   (default `chatrooms.mywire.org/rooms.json`), lo valida antes de
   sobrescribir `<data_dir>/seed_rooms.json` y fuerza la recarga en DB
   (`load_seed_force`). Validado E2E contra un HTTP server local
-- [ ] Benchmarks (criterion) de PacketReader/Writer y broadcast
+- [x] Benchmarks (criterion) de PacketReader/Writer en
+  `crates/proto-ares/benches/packets.rs` (`cargo bench -p proto-ares`);
+  baseline: writer ~84ns, reader ~56ns por paquete estilo login
+- [x] ~~Reemplazar stubs de scripting~~ — ya estaban implementados:
+  `Entities_list` lee el snapshot `ctx.udp_nodes`, y `Link_createLink`/
+  `Link_disconnect`/`Link_kickHub` publican al bus `LinkRequest` que tiene
+  consumer real en `main.rs` (el item venía del audit desactualizado)
 - [ ] Decidir `iconnect`: implementar los 27 traits o reducir el crate a
-  los tipos realmente usados (`ILevel`) — hoy son 730 líneas sin consumidores
-- [ ] Reemplazar stubs de scripting que quedan (`Link_createLink`,
-  `Link_disconnect`, `Entities_list`) por implementaciones reales via
-  `LinkRequest` bus
+  los tipos realmente usados (`ILevel`) — hoy son 730 líneas sin
+  consumidores. **Decisión del dueño del proyecto**
 - [ ] Comandos restantes de sb0t de baja prioridad (greets, scribble admin,
   proxy admin, captcha admin, filter)
 
