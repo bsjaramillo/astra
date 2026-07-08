@@ -1,6 +1,9 @@
 # Astra — Roadmap
 
 > Servidor de chat compatible con Ares Galaxy, escrito en Rust.
+>
+> **Continuación**: el trabajo posterior a la Fase 20 (cierre de la
+> migración sb0t) se planifica en [docs/ROADMAP-V2.md](docs/ROADMAP-V2.md).
 
 ## Estado actual
 
