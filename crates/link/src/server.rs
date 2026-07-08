@@ -153,7 +153,9 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
         b.write_u8(*user.level.read() as u8);
         b.write_u16(*user.vroom.read());
         b.write_u8(1); // custom_client (simplificado)
-        b.write_u8(u8::from(user.muzzled));
+        b.write_u8(u8::from(
+            user.muzzled.load(std::sync::atomic::Ordering::Relaxed),
+        ));
         b.write_u8(u8::from(user.web_client));
         b.write_u8(0); // encrypted
         b.write_u8(u8::from(user.registered));

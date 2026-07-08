@@ -610,6 +610,16 @@ async fn handle_public(
         return;
     }
 
+    // Muzzled: puede ejecutar comandos pero no hablar en público.
+    if user.muzzled.load(std::sync::atomic::Ordering::Relaxed) {
+        let pkt = outbound::build_pvt(
+            &ctx.settings.bot_name,
+            "You are muzzled and cannot chat in public.",
+        );
+        let _ = user.send(pkt);
+        return;
+    }
+
     // Hook onTextBefore: si algún script retorna false, cancelar el broadcast
     if !scripting.check_text_before(&name, &text) {
         debug!("onTextBefore canceló mensaje de '{}'", name);
@@ -668,6 +678,16 @@ async fn handle_emote(
     if text.is_empty() {
         return;
     }
+    // Muzzled: sin voz en público (aplica también a emotes).
+    if user.muzzled.load(std::sync::atomic::Ordering::Relaxed) {
+        let pkt = outbound::build_pvt(
+            &ctx.settings.bot_name,
+            "You are muzzled and cannot chat in public.",
+        );
+        let _ = user.send(pkt);
+        return;
+    }
+
     let name = user.name.read().clone();
     // Hook onEmoteBefore
     if !scripting.check_emote_before(&name, &text) {

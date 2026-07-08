@@ -264,7 +264,9 @@ fn build_leaf_join_payload(user: &server_core::user_pool::AresUser) -> Vec<u8> {
     b.write_u8(*user.level.read() as u8);
     b.write_u16(*user.vroom.read());
     b.write_u8(u8::from(user.custom_client));
-    b.write_u8(u8::from(user.muzzled));
+    b.write_u8(u8::from(
+        user.muzzled.load(std::sync::atomic::Ordering::Relaxed),
+    ));
     b.write_u8(u8::from(user.web_client));
     b.write_u8(0); // encrypted
     b.write_u8(u8::from(user.registered));

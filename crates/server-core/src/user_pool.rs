@@ -86,8 +86,8 @@ pub struct AresUser {
     pub cbot: bool,
     /// Nivel.
     pub level: parking_lot::RwLock<ILevel>,
-    /// ¿Muzzled?
-    pub muzzled: bool,
+    /// ¿Muzzled? (mutable en runtime via /muzzle)
+    pub muzzled: AtomicBool,
     /// ¿Cloaked?
     pub cloaked: bool,
     /// ¿Captcha pendiente?
@@ -171,7 +171,7 @@ impl AresUser {
             ares: true,
             cbot: false,
             level: parking_lot::RwLock::new(ILevel::Anonymous),
-            muzzled: false,
+            muzzled: AtomicBool::new(false),
             cloaked: false,
             needs_captcha: AtomicBool::new(false),
             logged_in: false,

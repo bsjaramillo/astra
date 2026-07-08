@@ -99,7 +99,7 @@ impl LinkUserSnapshot {
             level: *user.level.read() as u8,
             vroom: *user.vroom.read(),
             custom_client: user.custom_client,
-            muzzled: user.muzzled,
+            muzzled: user.muzzled.load(std::sync::atomic::Ordering::Relaxed),
             web_client: user.web_client,
             encrypted: user.encrypted,
             registered: user.registered,
