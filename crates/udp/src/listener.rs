@@ -14,6 +14,10 @@ use crate::manager::UdpNodeManager;
 use crate::protocol;
 use crate::types::NodeAddr;
 
+/// Provider del user count actual (inyectado por el binario para no
+/// acoplar este crate al `UserPool` de server-core).
+pub type UserCountFn = Arc<dyn Fn() -> u16 + Send + Sync>;
+
 /// Loop principal del listener UDP.
 ///
 /// El caller debe haber bindeado el socket al puerto deseado.
@@ -25,6 +29,7 @@ use crate::types::NodeAddr;
 pub async fn run_listener(
     manager: Arc<UdpNodeManager>,
     socket: Arc<UdpSocket>,
+    user_count: UserCountFn,
 ) -> anyhow::Result<()> {
     let local = socket.local_addr().ok();
     if let Some(addr) = local {
@@ -39,7 +44,7 @@ pub async fn run_listener(
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((n, peer)) => {
-                        handle_packet(&socket, &manager, &buf[..n], peer).await;
+                        handle_packet(&socket, &manager, &buf[..n], peer, &user_count).await;
                         let _ = n;
                     }
                     Err(e) => {
@@ -65,6 +70,7 @@ async fn handle_packet(
     manager: &Arc<UdpNodeManager>,
     data: &[u8],
     peer: SocketAddr,
+    user_count: &UserCountFn,
 ) {
     if data.is_empty() {
         return;
@@ -85,7 +91,7 @@ async fn handle_packet(
     match msg {
         UdpMsg::ServerListSendInfo => {
             manager.stats.sendinfo_recv.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            handle_send_info(socket, manager, peer, now).await;
+            handle_send_info(socket, manager, peer, now, user_count()).await;
         }
         UdpMsg::ServerListAckInfo => {
             handle_ack_info(manager, payload, peer, now);
@@ -132,6 +138,7 @@ async fn handle_send_info(
     manager: &Arc<UdpNodeManager>,
     peer: SocketAddr,
     _now: i64,
+    users: u16,
 ) {
     let name = std::env::var("ASTRA_ROOM_NAME").unwrap_or_else(|_| "Astra Chat".to_string());
     let topic = std::env::var("ASTRA_ROOM_TOPIC").unwrap_or_else(|_| "Welcome to Astra".to_string());
@@ -139,7 +146,6 @@ async fn handle_send_info(
 
     // nodos activos que conocemos
     let servers = manager.active_nodes(6, unix_time() as i64);
-    let users = 0; // TODO: pasar user_count desde fuera
 
     let pkt = protocol::build_ackinfo(
         manager.my_port,

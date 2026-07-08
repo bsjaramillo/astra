@@ -271,8 +271,13 @@ async fn main() -> anyhow::Result<()> {
         // Spawn listener (comparte socket)
         let listener_mgr = mgr.clone();
         let listener_socket = udp_socket.clone();
+        let listener_pool = ctx.user_pool.clone();
+        let user_count: astra_udp::UserCountFn =
+            Arc::new(move || listener_pool.len().min(u16::MAX as usize) as u16);
         tokio::spawn(async move {
-            if let Err(e) = astra_udp::run_listener(listener_mgr, listener_socket).await {
+            if let Err(e) =
+                astra_udp::run_listener(listener_mgr, listener_socket, user_count).await
+            {
                 error!("UDP listener crashed: {}", e);
             }
         });
