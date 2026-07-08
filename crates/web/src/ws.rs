@@ -87,8 +87,15 @@ async fn handle_ws_connection(
     let key = match key {
         Some(k) => k,
         None => {
-            warn!("WS handshake sin Sec-WebSocket-Key");
-            send_http_error(&mut stream, 400, "Missing Sec-WebSocket-Key").await?;
+            // HTTP plano (sin upgrade a WebSocket): servir el panel HTML
+            // en GET /; cualquier otra cosa es un 400.
+            if request.method.eq_ignore_ascii_case("GET") {
+                debug!("HTTP GET {} de {}: sirviendo panel", request.path, peer);
+                send_http_html(&mut stream, crate::panel::INDEX_HTML).await?;
+            } else {
+                warn!("WS handshake sin Sec-WebSocket-Key");
+                send_http_error(&mut stream, 400, "Missing Sec-WebSocket-Key").await?;
+            }
             return Ok(());
         }
     };
@@ -198,6 +205,23 @@ async fn send_http_error(
         code, msg, msg.len(), msg
     );
     stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+/// Responde 200 OK con un body HTML y cierra la conexión.
+async fn send_http_html(stream: &mut TcpStream, html: &str) -> anyhow::Result<()> {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        html.len(),
+        html
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
     Ok(())
 }
 

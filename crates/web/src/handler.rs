@@ -157,11 +157,21 @@ pub async fn handle_connection(
     Ok(())
 }
 
-/// Lee un frame WebSocket (cliente→servidor, masked).
+/// Tamaño máximo de un mensaje fragmentado reensamblado (1 MiB).
+const MAX_FRAGMENTED_MSG: usize = 1 << 20;
+
+/// Lee un mensaje WebSocket (cliente→servidor, masked).
+///
+/// Soporta mensajes fragmentados (RFC 6455 §5.4): los fragmentos se
+/// acumulan y se retorna el mensaje completo con el opcode del primer
+/// fragmento. Frames de control (Ping/Pong) recibidos en medio de una
+/// fragmentación se consumen sin interrumpir el reensamblado.
 async fn read_ws_frame(
     read_half: &mut OwnedReadHalf,
     buf: &mut BytesMut,
 ) -> anyhow::Result<Option<(WsOpcode, Vec<u8>)>> {
+    // (opcode del primer fragmento, payload acumulado)
+    let mut fragmented: Option<(WsOpcode, Vec<u8>)> = None;
     loop {
         while buf.len() < 2 {
             let mut tmp = [0u8; 4096];
@@ -174,6 +184,7 @@ async fn read_ws_frame(
 
         let b1 = buf[0];
         let b2 = buf[1];
+        let fin = (b1 & 0x80) != 0;
         let opcode = WsOpcode::from_u8(b1 & 0x0F)
             .ok_or_else(|| anyhow::anyhow!("opcode WS desconocido: {}", b1 & 0x0F))?;
         let masked = (b2 & 0x80) != 0;
@@ -227,7 +238,45 @@ async fn read_ws_frame(
         }
         buf.advance(total_len);
 
-        return Ok(Some((opcode, payload)));
+        match opcode {
+            WsOpcode::Continuation => {
+                let Some((first_op, acc)) = fragmented.as_mut() else {
+                    return Err(anyhow::anyhow!("continuation sin fragmento inicial"));
+                };
+                if acc.len() + payload.len() > MAX_FRAGMENTED_MSG {
+                    return Err(anyhow::anyhow!("mensaje fragmentado demasiado grande"));
+                }
+                acc.extend_from_slice(&payload);
+                if fin {
+                    let op = *first_op;
+                    let (_, acc) = fragmented.take().expect("fragmento en curso");
+                    return Ok(Some((op, acc)));
+                }
+            }
+            WsOpcode::Text | WsOpcode::Binary => {
+                if fragmented.is_some() {
+                    return Err(anyhow::anyhow!("fragmentación anidada no permitida"));
+                }
+                if fin {
+                    return Ok(Some((opcode, payload)));
+                }
+                if payload.len() > MAX_FRAGMENTED_MSG {
+                    return Err(anyhow::anyhow!("mensaje fragmentado demasiado grande"));
+                }
+                fragmented = Some((opcode, payload));
+            }
+            // Frames de control: no pueden fragmentarse (RFC 6455 §5.5)
+            WsOpcode::Close | WsOpcode::Ping | WsOpcode::Pong => {
+                if !fin {
+                    return Err(anyhow::anyhow!("frame de control fragmentado"));
+                }
+                // En medio de una fragmentación, consumir Ping/Pong sin
+                // perder el acumulador; Close siempre se entrega.
+                if fragmented.is_none() || matches!(opcode, WsOpcode::Close) {
+                    return Ok(Some((opcode, payload)));
+                }
+            }
+        }
     }
 }
 
@@ -475,5 +524,104 @@ fn broadcast_to_room(ctx: &AppContext, sender: &AresUser, pkt: Bytes) {
                 let _ = u.send(pkt.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::tcp::OwnedWriteHalf;
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Construye un frame WS cliente→servidor (masked con key 0 = no-op).
+    fn frame(fin: bool, opcode: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(payload.len() + 8);
+        v.push(if fin { 0x80 } else { 0x00 } | opcode);
+        let len = payload.len();
+        if len < 126 {
+            v.push(0x80 | len as u8);
+        } else {
+            v.push(0x80 | 126);
+            v.extend((len as u16).to_be_bytes());
+        }
+        v.extend([0, 0, 0, 0]); // mask key = 0 → XOR no-op
+        v.extend(payload);
+        v
+    }
+
+    async fn tcp_pair() -> (OwnedReadHalf, OwnedWriteHalf, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (read_half, write_half) = server.into_split();
+        (read_half, write_half, client)
+    }
+
+    #[tokio::test]
+    async fn fragmented_text_is_reassembled() {
+        let (mut read_half, _wh, mut client) = tcp_pair().await;
+        client.write_all(&frame(false, 0x1, b"Hel")).await.unwrap();
+        client.write_all(&frame(false, 0x0, b"lo ")).await.unwrap();
+        client.write_all(&frame(true, 0x0, b"mundo")).await.unwrap();
+
+        let mut buf = BytesMut::new();
+        let (op, payload) = read_ws_frame(&mut read_half, &mut buf)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(op, WsOpcode::Text));
+        assert_eq!(payload, b"Hello mundo");
+    }
+
+    #[tokio::test]
+    async fn ping_between_fragments_is_consumed() {
+        let (mut read_half, _wh, mut client) = tcp_pair().await;
+        client.write_all(&frame(false, 0x1, b"a")).await.unwrap();
+        client.write_all(&frame(true, 0x9, b"")).await.unwrap(); // ping
+        client.write_all(&frame(true, 0x0, b"b")).await.unwrap();
+
+        let mut buf = BytesMut::new();
+        let (op, payload) = read_ws_frame(&mut read_half, &mut buf)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(op, WsOpcode::Text));
+        assert_eq!(payload, b"ab");
+    }
+
+    #[tokio::test]
+    async fn unfragmented_frame_still_works() {
+        let (mut read_half, _wh, mut client) = tcp_pair().await;
+        client.write_all(&frame(true, 0x1, b"hola")).await.unwrap();
+
+        let mut buf = BytesMut::new();
+        let (op, payload) = read_ws_frame(&mut read_half, &mut buf)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(op, WsOpcode::Text));
+        assert_eq!(payload, b"hola");
+    }
+
+    #[tokio::test]
+    async fn continuation_without_start_is_error() {
+        let (mut read_half, _wh, mut client) = tcp_pair().await;
+        client.write_all(&frame(true, 0x0, b"x")).await.unwrap();
+
+        let mut buf = BytesMut::new();
+        let result = read_ws_frame(&mut read_half, &mut buf).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn nested_fragmentation_is_error() {
+        let (mut read_half, _wh, mut client) = tcp_pair().await;
+        client.write_all(&frame(false, 0x1, b"a")).await.unwrap();
+        client.write_all(&frame(false, 0x1, b"b")).await.unwrap();
+
+        let mut buf = BytesMut::new();
+        let result = read_ws_frame(&mut read_half, &mut buf).await;
+        assert!(result.is_err());
     }
 }
