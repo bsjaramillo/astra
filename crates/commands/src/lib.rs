@@ -39,6 +39,18 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/unban <nick|ip|ident> - remove ban",
     "/banlist - list active bans",
     "/whois <nick> - show user info",
+    "/kick <nick> - kick user without banning",
+    "/muzzle <nick> - mute user in public chat",
+    "/unmuzzle <nick> - restore user's public voice",
+    "/pmall <text> - PM every connected user",
+    "/opmsg <text> - message all moderators+",
+    "/uptime - show server uptime and stats",
+    "/version - show server version",
+    "/register <password> - register your account",
+    "/unregister - delete your account",
+    "/login <password> - log into your account",
+    "/grant <nick> <level> - set user level",
+    "/revoke <nick> - reset user to regular",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -155,6 +167,71 @@ pub fn dispatch_builtin(
         "whois" => {
             handle_whois(ctx, user, args);
             (true, vec![])
+        }
+        "kick" => {
+            handle_kick(ctx, user, args);
+            (true, vec![])
+        }
+        "muzzle" => {
+            handle_muzzle(ctx, user, args, true);
+            (true, vec![])
+        }
+        "unmuzzle" => {
+            handle_muzzle(ctx, user, args, false);
+            (true, vec![])
+        }
+        "pmall" => {
+            handle_pmall(ctx, user, args);
+            (true, vec![])
+        }
+        "opmsg" => {
+            handle_opmsg(ctx, user, args);
+            (true, vec![])
+        }
+        "uptime" | "stats" => {
+            handle_uptime(ctx, user, args);
+            (true, vec![])
+        }
+        "version" => {
+            handle_version(ctx, user, args);
+            (true, vec![])
+        }
+        "register" => {
+            handle_register(ctx, user, args);
+            (true, vec![])
+        }
+        "unregister" => {
+            handle_unregister(ctx, user, args);
+            (true, vec![])
+        }
+        "login" => {
+            let changed = handle_login(ctx, user, args);
+            let events = if changed {
+                vec![astra_scripting::ScriptEvent::AdminLevelChanged {
+                    name: user.name.read().clone(),
+                }]
+            } else {
+                vec![]
+            };
+            (true, events)
+        }
+        "grant" => {
+            let events = match handle_grant(ctx, user, args) {
+                Some(target) => {
+                    vec![astra_scripting::ScriptEvent::AdminLevelChanged { name: target }]
+                }
+                None => vec![],
+            };
+            (true, events)
+        }
+        "revoke" => {
+            let events = match handle_revoke(ctx, user, args) {
+                Some(target) => {
+                    vec![astra_scripting::ScriptEvent::AdminLevelChanged { name: target }]
+                }
+                None => vec![],
+            };
+            (true, events)
         }
         _ => (false, vec![]),
     }
@@ -484,6 +561,404 @@ fn handle_whois(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
             target.version
         ),
     );
+}
+
+fn handle_kick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /kick <nick>");
+        return;
+    }
+
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot kick a user of equal or higher level.");
+        return;
+    }
+
+    send_system_line(ctx, &target, "You have been kicked from this room.");
+    force_part_user(ctx, &target);
+    send_system_line(ctx, user, &format!("Kicked '{}'.", target_name));
+}
+
+fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: bool) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        let cmd = if muzzle { "muzzle" } else { "unmuzzle" };
+        send_system_line(ctx, user, &format!("Usage: /{} <nick>", cmd));
+        return;
+    }
+
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+
+    if muzzle && !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot muzzle a user of equal or higher level.");
+        return;
+    }
+
+    let already = target
+        .muzzled
+        .swap(muzzle, std::sync::atomic::Ordering::Relaxed);
+    if already == muzzle {
+        let state = if muzzle { "already muzzled" } else { "not muzzled" };
+        send_system_line(ctx, user, &format!("'{}' is {}.", target_name, state));
+        return;
+    }
+
+    ctx.publish_link_event(server_core::LinkEvent::UserUpdated {
+        origin: None,
+        user: server_core::LinkUserSnapshot::from_user(&target),
+    });
+
+    if muzzle {
+        send_system_line(ctx, &target, "You have been muzzled.");
+        send_system_line(ctx, user, &format!("Muzzled '{}'.", target_name));
+    } else {
+        send_system_line(ctx, &target, "You have been unmuzzled.");
+        send_system_line(ctx, user, &format!("Unmuzzled '{}'.", target_name));
+    }
+}
+
+fn handle_pmall(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+
+    let text = args.trim();
+    if text.is_empty() {
+        send_system_line(ctx, user, "Usage: /pmall <text>");
+        return;
+    }
+
+    let from = user.name.read().clone();
+    let pkt = outbound::build_pvt(&from, text);
+    let mut count = 0usize;
+    for other in ctx.user_pool.users() {
+        if !other.logged_in
+            || other.id == user.id
+            || other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        let _ = other.send(pkt.clone());
+        count += 1;
+    }
+    send_system_line(ctx, user, &format!("PM sent to {} user(s).", count));
+}
+
+fn handle_opmsg(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+
+    let text = args.trim();
+    if text.is_empty() {
+        send_system_line(ctx, user, "Usage: /opmsg <text>");
+        return;
+    }
+
+    let from = user.name.read().clone();
+    let line = format!("[ops] {}: {}", from, text);
+    let pkt = outbound::build_pvt(&ctx.settings.bot_name, &line);
+    for other in ctx.user_pool.users() {
+        if !other.logged_in
+            || other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        if (*other.level.read() as u8) >= ILevel::Moderator as u8 {
+            let _ = other.send(pkt.clone());
+        }
+    }
+}
+
+fn handle_uptime(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    let secs = ctx.uptime_secs();
+    let (d, h, m, s) = (secs / 86400, (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
+    send_system_line(
+        ctx,
+        user,
+        &format!("Uptime: {}d {}h {}m {}s", d, h, m, s),
+    );
+    send_system_line(
+        ctx,
+        user,
+        &format!(
+            "Users: {} online, {} peak, {} total joins",
+            ctx.user_pool.len(),
+            ctx.stats.peak_users(),
+            ctx.stats.total_users()
+        ),
+    );
+}
+
+fn handle_version(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    send_system_line(
+        ctx,
+        user,
+        &format!("Astra v{}", env!("CARGO_PKG_VERSION")),
+    );
+}
+
+fn handle_register(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !ctx.settings.allow_registration {
+        send_system_line(ctx, user, "Registration is disabled in this room.");
+        return;
+    }
+
+    let password = args.trim();
+    if password.len() < 4 {
+        send_system_line(ctx, user, "Usage: /register <password> (4+ chars)");
+        return;
+    }
+
+    match ctx.accounts.find_by_guid(&user.guid) {
+        Ok(Some(_)) => {
+            send_system_line(ctx, user, "Already registered. Use /unregister first.");
+            return;
+        }
+        Ok(None) => {}
+        Err(_) => {
+            send_system_line(ctx, user, "Registration failed (database error).");
+            return;
+        }
+    }
+
+    let name = user.name.read().clone();
+    let live_level = (*user.level.read() as u8).max(ILevel::Regular as u8);
+    match ctx.accounts.register(&name, &user.guid, password, live_level) {
+        Ok(()) => send_system_line(ctx, user, "Account registered. Use /login <password>."),
+        Err(_) => send_system_line(ctx, user, "Registration failed (database error)."),
+    }
+}
+
+fn handle_unregister(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    match ctx.accounts.unregister(&user.guid) {
+        Ok(true) => send_system_line(ctx, user, "Account deleted."),
+        Ok(false) => send_system_line(ctx, user, "You are not registered."),
+        Err(_) => send_system_line(ctx, user, "Unregister failed (database error)."),
+    }
+}
+
+/// Retorna `true` si el nivel del usuario cambió (para AdminLevelChanged).
+fn handle_login(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
+    let password = args.trim();
+    if password.is_empty() {
+        send_system_line(ctx, user, "Usage: /login <password>");
+        return false;
+    }
+
+    // 1. Owner password del astra.toml
+    if !ctx.settings.owner_password.is_empty() && password == ctx.settings.owner_password {
+        let changed = apply_level(ctx, user, user, ILevel::Owner, "Logged in as Owner.");
+        if !changed {
+            send_system_line(ctx, user, "Logged in as Owner (level unchanged).");
+        }
+        return changed;
+    }
+
+    // 2. Cuenta registrada (strict: nick + GUID + password)
+    let name = user.name.read().clone();
+    let account = match ctx.accounts.verify_strict(&name, &user.guid, password) {
+        Ok(true) => ctx.accounts.find_by_guid(&user.guid).ok().flatten(),
+        // 3. Fallback no-strict (modo sb0t): busca cuenta solo por password
+        _ => ctx.accounts.find_by_password(password).ok().flatten(),
+    };
+
+    let Some(acc) = account else {
+        send_system_line(ctx, user, "Invalid password.");
+        return false;
+    };
+
+    let level = level_from_u8(acc.level);
+    let changed = apply_level(ctx, user, user, level, &format!("Logged in (level {}).", acc.level));
+    if !changed {
+        send_system_line(ctx, user, "Logged in (level unchanged).");
+    }
+    changed
+}
+
+/// Retorna el nick del target si el nivel cambió.
+fn handle_grant(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<String> {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return None;
+    }
+
+    // El nivel es el último token; el nick (puede tener espacios) es el resto.
+    let args = args.trim();
+    let mut parts = args.rsplitn(2, char::is_whitespace);
+    let level_str = parts.next().unwrap_or("");
+    let target_name = parts.next().unwrap_or("").trim();
+    let Some(new_level) = parse_level(level_str) else {
+        send_system_line(
+            ctx,
+            user,
+            "Usage: /grant <nick> <regular|voice|moderator|admin|owner>",
+        );
+        return None;
+    };
+    if target_name.is_empty() {
+        send_system_line(
+            ctx,
+            user,
+            "Usage: /grant <nick> <regular|voice|moderator|admin|owner>",
+        );
+        return None;
+    }
+
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return None;
+    };
+
+    let own_level = *user.level.read() as u8;
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot modify a user of equal or higher level.");
+        return None;
+    }
+    if new_level as u8 >= own_level {
+        send_system_line(ctx, user, "You cannot grant a level equal or above your own.");
+        return None;
+    }
+
+    let msg = format!("Your level is now {} ({}).", new_level as u8, level_name(new_level));
+    if apply_level(ctx, user, &target, new_level, &msg) {
+        send_system_line(
+            ctx,
+            user,
+            &format!("'{}' is now level {} ({}).", target_name, new_level as u8, level_name(new_level)),
+        );
+        Some(target.name.read().clone())
+    } else {
+        None
+    }
+}
+
+/// Retorna el nick del target si el nivel cambió.
+fn handle_revoke(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<String> {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return None;
+    }
+
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /revoke <nick>");
+        return None;
+    }
+
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return None;
+    };
+
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot modify a user of equal or higher level.");
+        return None;
+    }
+
+    if apply_level(ctx, user, &target, ILevel::Regular, "Your level has been reset to regular.") {
+        send_system_line(ctx, user, &format!("'{}' is now a regular user.", target_name));
+        Some(target.name.read().clone())
+    } else {
+        send_system_line(ctx, user, &format!("'{}' is already a regular user.", target_name));
+        None
+    }
+}
+
+/// Aplica un nivel a `target`: actualiza el nivel en vivo, persiste en la
+/// cuenta si existe, envía OpChange y notifica. Retorna `true` si cambió.
+fn apply_level(
+    ctx: &AppContext,
+    _issuer: &Arc<AresUser>,
+    target: &Arc<AresUser>,
+    new_level: ILevel,
+    notice: &str,
+) -> bool {
+    {
+        let mut level = target.level.write();
+        if *level == new_level {
+            return false;
+        }
+        *level = new_level;
+    }
+
+    // Persistir en la cuenta registrada si existe.
+    if let Ok(Some(_)) = ctx.accounts.find_by_guid(&target.guid) {
+        let _ = ctx.accounts.set_level(&target.guid, new_level as u8);
+    }
+
+    let _ = target.send(outbound::build_opchange(
+        new_level as u8 >= ILevel::Moderator as u8,
+    ));
+    send_system_line(ctx, target, notice);
+
+    ctx.publish_link_event(server_core::LinkEvent::UserUpdated {
+        origin: None,
+        user: server_core::LinkUserSnapshot::from_user(target),
+    });
+    true
+}
+
+fn parse_level(s: &str) -> Option<ILevel> {
+    match s.to_ascii_lowercase().as_str() {
+        "regular" | "user" | "1" => Some(ILevel::Regular),
+        "voice" | "2" => Some(ILevel::Voice),
+        "moderator" | "mod" | "50" => Some(ILevel::Moderator),
+        "admin" | "administrator" | "80" => Some(ILevel::Admin),
+        "owner" | "100" => Some(ILevel::Owner),
+        _ => None,
+    }
+}
+
+fn level_from_u8(level: u8) -> ILevel {
+    match level {
+        l if l >= ILevel::Owner as u8 => ILevel::Owner,
+        l if l >= ILevel::Admin as u8 => ILevel::Admin,
+        l if l >= ILevel::Moderator as u8 => ILevel::Moderator,
+        l if l >= ILevel::Voice as u8 => ILevel::Voice,
+        _ => ILevel::Regular,
+    }
+}
+
+fn level_name(level: ILevel) -> &'static str {
+    match level {
+        ILevel::Anonymous => "anonymous",
+        ILevel::Regular => "regular",
+        ILevel::Voice => "voice",
+        ILevel::Moderator => "moderator",
+        ILevel::Admin => "admin",
+        ILevel::Owner => "owner",
+        ILevel::System => "system",
+    }
+}
+
+fn has_level(user: &AresUser, min: ILevel) -> bool {
+    (*user.level.read() as u8) >= min as u8
+}
+
+fn outranks(issuer: &AresUser, target: &AresUser) -> bool {
+    (*issuer.level.read() as u8) > (*target.level.read() as u8)
 }
 
 fn can_edit_topic(user: &AresUser) -> bool {
@@ -855,6 +1330,326 @@ mod tests {
         let t2 = next_pvt_text(&mut alice_rx);
         assert!(t2.contains("name='Bob'"));
         assert!(t2.contains("ip=10.0.0.2"));
+    }
+
+    fn make_test_ctx_with(settings: Settings) -> Arc<AppContext> {
+        let db = Database::in_memory().expect("in-memory db");
+        Arc::new(AppContext::new(settings, db))
+    }
+
+    #[test]
+    fn builtin_kick_requires_moderator() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob);
+
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "kick", "Bob");
+        assert!(handled);
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Moderator+ required.");
+        assert!(ctx.user_pool.get_by_name("Bob").is_some());
+    }
+
+    #[test]
+    fn builtin_kick_removes_target() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "kick", "Bob");
+        assert!(handled);
+        assert!(ctx.user_pool.get_by_name("Bob").is_none());
+        assert!(!ctx.bans.is_banned(&bob.guid, bob.external_ip), "kick must not ban");
+        assert_eq!(next_pvt_text(&mut bob_rx), "You have been kicked from this room.");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Kicked 'Bob'.");
+    }
+
+    #[test]
+    fn builtin_kick_cannot_target_equal_level() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        *bob.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob);
+
+        let _ = dispatch_builtin(&ctx, &alice, "kick", "Bob");
+        assert_eq!(
+            next_pvt_text(&mut alice_rx),
+            "You cannot kick a user of equal or higher level."
+        );
+        assert!(ctx.user_pool.get_by_name("Bob").is_some());
+    }
+
+    #[test]
+    fn builtin_muzzle_and_unmuzzle() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "muzzle", "Bob");
+        assert!(bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut bob_rx), "You have been muzzled.");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Muzzled 'Bob'.");
+
+        // Muzzle repetido no cambia nada
+        let _ = dispatch_builtin(&ctx, &alice, "muzzle", "Bob");
+        assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' is already muzzled.");
+
+        let _ = dispatch_builtin(&ctx, &alice, "unmuzzle", "Bob");
+        assert!(!bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut bob_rx), "You have been unmuzzled.");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Unmuzzled 'Bob'.");
+    }
+
+    #[test]
+    fn builtin_muzzle_requires_outrank() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        *bob.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "muzzle", "Bob");
+        assert_eq!(
+            next_pvt_text(&mut alice_rx),
+            "You cannot muzzle a user of equal or higher level."
+        );
+        assert!(!bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn builtin_pmall_requires_admin() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "pmall", "hola");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
+    }
+
+    #[test]
+    fn builtin_pmall_sends_to_everyone_else() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        let (carol, mut carol_rx) = make_test_user(3, "Carol");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob);
+        ctx.user_pool.add(carol);
+
+        let _ = dispatch_builtin(&ctx, &alice, "pmall", "hola a todos");
+
+        let (from_bob, text_bob) = decode_pvt(bob_rx.try_recv().expect("bob pm"));
+        assert_eq!(from_bob, "Alice");
+        assert_eq!(text_bob, "hola a todos");
+        let (_, text_carol) = decode_pvt(carol_rx.try_recv().expect("carol pm"));
+        assert_eq!(text_carol, "hola a todos");
+        assert_eq!(next_pvt_text(&mut alice_rx), "PM sent to 2 user(s).");
+    }
+
+    #[test]
+    fn builtin_opmsg_reaches_only_ops() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        let (carol, mut carol_rx) = make_test_user(3, "Carol");
+        *alice.level.write() = ILevel::Moderator;
+        *carol.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob);
+        ctx.user_pool.add(carol);
+
+        let _ = dispatch_builtin(&ctx, &alice, "opmsg", "reunión ya");
+
+        assert_eq!(next_pvt_text(&mut alice_rx), "[ops] Alice: reunión ya");
+        assert_eq!(next_pvt_text(&mut carol_rx), "[ops] Alice: reunión ya");
+        assert!(bob_rx.try_recv().is_err(), "regular user must not receive opmsg");
+    }
+
+    #[test]
+    fn builtin_uptime_and_version_report() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "uptime", "");
+        assert!(next_pvt_text(&mut alice_rx).starts_with("Uptime: 0d 0h 0m"));
+        assert!(next_pvt_text(&mut alice_rx).starts_with("Users: 1 online"));
+
+        let _ = dispatch_builtin(&ctx, &alice, "version", "");
+        let v = next_pvt_text(&mut alice_rx);
+        assert!(v.starts_with("Astra v"), "got: {}", v);
+    }
+
+    #[test]
+    fn builtin_register_and_login_flow() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+
+        // Password muy corto
+        let _ = dispatch_builtin(&ctx, &alice, "register", "abc");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Usage: /register <password> (4+ chars)");
+
+        // Registro OK
+        let _ = dispatch_builtin(&ctx, &alice, "register", "secret1");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Account registered. Use /login <password>.");
+        assert!(ctx.accounts.find_by_guid(&alice.guid).unwrap().is_some());
+
+        // Doble registro rechazado
+        let _ = dispatch_builtin(&ctx, &alice, "register", "secret1");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Already registered. Use /unregister first.");
+
+        // Login con password incorrecto
+        let _ = dispatch_builtin(&ctx, &alice, "login", "wrong");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Invalid password.");
+
+        // Login correcto: sube de Anonymous a Regular (nivel de la cuenta)
+        let (_, events) = dispatch_builtin(&ctx, &alice, "login", "secret1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(*alice.level.read() as u8, ILevel::Regular as u8);
+        assert_eq!(next_pvt_text(&mut alice_rx), "Logged in (level 1).");
+
+        // Segundo login: mismo nivel → sin cambio, pero con feedback
+        let (_, events) = dispatch_builtin(&ctx, &alice, "login", "secret1");
+        assert!(events.is_empty());
+        assert_eq!(next_pvt_text(&mut alice_rx), "Logged in (level unchanged).");
+
+        // Unregister
+        let _ = dispatch_builtin(&ctx, &alice, "unregister", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Account deleted.");
+        assert!(ctx.accounts.find_by_guid(&alice.guid).unwrap().is_none());
+    }
+
+    #[test]
+    fn builtin_register_disabled_rejects() {
+        let settings = Settings {
+            allow_registration: false,
+            ..Settings::default()
+        };
+        let ctx = make_test_ctx_with(settings);
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "register", "secret1");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Registration is disabled in this room.");
+    }
+
+    #[test]
+    fn builtin_login_owner_password_grants_owner() {
+        let settings = Settings {
+            owner_password: "ownerpw".to_string(),
+            ..Settings::default()
+        };
+        let ctx = make_test_ctx_with(settings);
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+
+        let (_, events) = dispatch_builtin(&ctx, &alice, "login", "ownerpw");
+        assert_eq!(*alice.level.read() as u8, ILevel::Owner as u8);
+        assert_eq!(events.len(), 1);
+        assert_eq!(next_pvt_text(&mut alice_rx), "Logged in as Owner.");
+    }
+
+    #[test]
+    fn builtin_login_restores_account_level() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+        ctx.accounts
+            .register("Alice", &alice.guid, "secret1", ILevel::Moderator as u8)
+            .unwrap();
+
+        let (_, events) = dispatch_builtin(&ctx, &alice, "login", "secret1");
+        assert_eq!(*alice.level.read() as u8, ILevel::Moderator as u8);
+        assert_eq!(events.len(), 1);
+        assert_eq!(next_pvt_text(&mut alice_rx), "Logged in (level 50).");
+    }
+
+    #[test]
+    fn builtin_grant_sets_level_and_persists() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Owner;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+        ctx.accounts
+            .register("Bob", &bob.guid, "bobpw", ILevel::Regular as u8)
+            .unwrap();
+
+        let (_, events) = dispatch_builtin(&ctx, &alice, "grant", "Bob moderator");
+        assert_eq!(*bob.level.read() as u8, ILevel::Moderator as u8);
+        assert_eq!(events.len(), 1, "AdminLevelChanged expected");
+
+        // Persistido en la cuenta
+        let acc = ctx.accounts.find_by_guid(&bob.guid).unwrap().unwrap();
+        assert_eq!(acc.level, ILevel::Moderator as u8);
+
+        assert_eq!(next_pvt_text(&mut bob_rx), "Your level is now 50 (moderator).");
+        assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' is now level 50 (moderator).");
+    }
+
+    #[test]
+    fn builtin_grant_cannot_reach_own_level() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let (_, events) = dispatch_builtin(&ctx, &alice, "grant", "Bob admin");
+        assert!(events.is_empty());
+        assert_eq!(
+            next_pvt_text(&mut alice_rx),
+            "You cannot grant a level equal or above your own."
+        );
+        assert_eq!(*bob.level.read() as u8, ILevel::Anonymous as u8);
+    }
+
+    #[test]
+    fn builtin_grant_requires_admin() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob);
+
+        let (_, events) = dispatch_builtin(&ctx, &alice, "grant", "Bob voice");
+        assert!(events.is_empty());
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
+    }
+
+    #[test]
+    fn builtin_revoke_resets_level() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Owner;
+        *bob.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let (_, events) = dispatch_builtin(&ctx, &alice, "revoke", "Bob");
+        assert_eq!(*bob.level.read() as u8, ILevel::Regular as u8);
+        assert_eq!(events.len(), 1);
+        assert_eq!(next_pvt_text(&mut bob_rx), "Your level has been reset to regular.");
+        assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' is now a regular user.");
     }
 
     #[test]
