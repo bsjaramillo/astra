@@ -34,3 +34,4 @@ chrono = { workspace = true }
 scopeguard = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true }

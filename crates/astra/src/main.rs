@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use server_core::{db::Database, settings::Settings, AppContext};
 use tokio::net::{TcpListener, UdpSocket};
 use tracing::{error, info, warn};
@@ -59,6 +59,61 @@ struct Cli {
     /// Modo verbose (más logs).
     #[arg(short, long)]
     verbose: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Subcomandos del CLI.
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Descarga la lista de rooms y regenera el seed local + la DB de nodos.
+    SeedRefresh {
+        /// URL del rooms.json a descargar.
+        #[arg(long, default_value = "http://chatrooms.mywire.org/rooms.json")]
+        url: String,
+    },
+}
+
+/// Ejecuta `astra seed-refresh`: descarga el rooms.json, lo valida,
+/// sobrescribe `<data_dir>/seed_rooms.json` y fuerza la recarga en la DB.
+async fn seed_refresh(settings: &Settings, url: &str) -> anyhow::Result<()> {
+    info!("descargando seed desde {}", url);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let body = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    // Validar antes de sobrescribir el archivo local
+    let count = astra_udp::validate_seed(&body)
+        .map_err(|e| anyhow::anyhow!("el JSON descargado no es un seed válido: {}", e))?;
+
+    let data_dir = std::path::PathBuf::from(&settings.data_dir);
+    std::fs::create_dir_all(&data_dir)?;
+    let seed_path = data_dir.join("seed_rooms.json");
+    std::fs::write(&seed_path, &body)?;
+    info!("seed guardado en {} ({} rooms)", seed_path.display(), count);
+
+    let db_path = data_dir.join("astra.db");
+    let db = Database::open(&db_path)
+        .map_err(|e| anyhow::anyhow!("error abriendo DB en {}: {}", db_path.display(), e))?;
+    let stats = astra_udp::load_seed_force(&db, &seed_path)?;
+    info!(
+        "DB actualizada: {} nodos, {} rooms, {} errores",
+        stats.nodes_added,
+        stats.rooms_added,
+        stats.errors.len()
+    );
+    if !stats.errors.is_empty() {
+        warn!("errores del seed: {:?}", stats.errors);
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -92,6 +147,11 @@ async fn main() -> anyhow::Result<()> {
         settings.data_dir = d.clone();
     }
     let web_enabled = settings.web_enabled && !cli.no_web;
+
+    // Subcomandos: se ejecutan y terminan sin levantar el server.
+    if let Some(Command::SeedRefresh { url }) = &cli.command {
+        return seed_refresh(&settings, url).await;
+    }
 
     info!("configuración cargada: puerto={}, sala='{}'", settings.port, settings.room_name);
     info!("data dir: {}", settings.data_dir);

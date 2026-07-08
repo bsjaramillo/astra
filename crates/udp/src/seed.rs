@@ -73,6 +73,28 @@ pub struct SeedStats {
 ///
 /// `path` es la ruta al archivo JSON. Si el archivo no existe, retorna Ok con stats vacíos.
 pub fn load_seed(db: &Database, path: &Path) -> anyhow::Result<SeedStats> {
+    load_seed_inner(db, path, false)
+}
+
+/// Como [`load_seed`], pero fuerza la recarga aunque la DB ya tenga nodos
+/// (upsert: los existentes se actualizan). Usado por `astra seed-refresh`.
+pub fn load_seed_force(db: &Database, path: &Path) -> anyhow::Result<SeedStats> {
+    load_seed_inner(db, path, true)
+}
+
+/// Valida que un JSON tenga el formato de seed esperado.
+///
+/// Retorna la cantidad de items si es válido. Usado por `seed-refresh`
+/// antes de sobrescribir el archivo local con contenido descargado.
+pub fn validate_seed(json: &str) -> anyhow::Result<usize> {
+    let seed: SeedFile = serde_json::from_str(json)?;
+    if seed.items.is_empty() {
+        anyhow::bail!("el seed no contiene items");
+    }
+    Ok(seed.items.len())
+}
+
+fn load_seed_inner(db: &Database, path: &Path, force: bool) -> anyhow::Result<SeedStats> {
     if !path.exists() {
         tracing::warn!("seed no encontrado en {}", path.display());
         return Ok(SeedStats {
@@ -82,8 +104,8 @@ pub fn load_seed(db: &Database, path: &Path) -> anyhow::Result<SeedStats> {
         });
     }
 
-    // Si ya hay nodos en la DB, no hacer nada
-    if db.count_nodes()? > 0 {
+    // Si ya hay nodos en la DB, no hacer nada (salvo en modo force)
+    if !force && db.count_nodes()? > 0 {
         tracing::info!("seed: ya hay {} nodos en DB, no se carga seed", db.count_nodes()?);
         return Ok(SeedStats {
             nodes_added: 0,
@@ -162,6 +184,46 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    #[test]
+    fn validate_seed_accepts_valid_json() {
+        let json = r#"{"Count": 1, "Items": [
+            {"port": 5009, "users": 5, "name": "R", "topic": "T", "servidor": "sb0t", "externalIp": "1.1.1.1", "lastUpdate": 1000}
+        ]}"#;
+        assert_eq!(validate_seed(json).unwrap(), 1);
+    }
+
+    #[test]
+    fn validate_seed_rejects_garbage_and_empty() {
+        assert!(validate_seed("not json").is_err());
+        assert!(validate_seed(r#"{"Count": 0, "Items": []}"#).is_err());
+        assert!(validate_seed(r#"{"foo": "bar"}"#).is_err());
+    }
+
+    #[test]
+    fn load_seed_force_reloads_over_existing_nodes() {
+        let dir = std::env::temp_dir().join(format!("astra_seedforce_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_seed_file(
+            &dir,
+            r#"{"Count": 1, "Items": [
+                {"port": 5009, "users": 5, "name": "R", "topic": "T", "servidor": "sb0t", "externalIp": "3.3.3.3", "lastUpdate": 1000}
+            ]}"#,
+        );
+
+        let db = Database::in_memory().unwrap();
+        // Pre-poblar la DB con un nodo: load_seed normal no haría nada
+        db.upsert_node("9.9.9.9", 1234).unwrap();
+
+        let normal = load_seed(&db, &path).unwrap();
+        assert_eq!(normal.nodes_added, 0, "load_seed no debe recargar con DB poblada");
+
+        let forced = load_seed_force(&db, &path).unwrap();
+        assert_eq!(forced.nodes_added, 1);
+        assert_eq!(forced.rooms_added, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
