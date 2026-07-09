@@ -128,11 +128,21 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
     Tanda 7 cuentas/quarantine/filtros/misc.
   - Enforcement real: range/join filters en login, caps/scribbles/avatars en
     sus paths, muzzle temporal auto-expirante, disableadmins gate global.
-  - **Stubs honestos** (requieren infra externa que Astra no incluye, no sb0t
-    específico): `define`/`urban` (API de diccionario), `ipsend`/`logsend`/
-    `bansend` (push a hub linkeado), `trace`/`vspy` (packet spy),
-    `loadtemplate` (sistema de templates), `asnban` enforcement (GeoIP/ASN).
   - 407 tests, 0 fallos.
+- [x] **Comandos "externos" implementados (2026-07-09)**: tras revisar el
+  fuente de sb0t, casi todos los que estaban stubeados eran en realidad
+  implementables:
+  - `vspy`/`ipsend`/`logsend`/`bansend` → **feeds internos** (suscripción
+    per-admin), no push a hub. Implementados con flags en `AresUser` +
+    `AppContext::notify_subscribers`.
+  - `trace` + `asnban` enforcement → módulo `geoip` (crate `maxminddb`) que
+    lee `city.mmdb`/`asn.mmdb` **opcionales** de `data_dir` (GeoLite2 o
+    DB-IP Lite). Sin archivos, degradan a mensaje honesto.
+  - `define`/`urban` → HTTP async (reqwest) con la **misma URL + api_key
+    hardcodeada de sb0t**; el fetch corre en task tokio y PMea el resultado.
+  - Único stub restante: `loadtemplate` (necesitaría un subsistema de
+    templates/i18n; los mensajes de Astra están hardcodeados).
+  - 415 tests, 0 fallos.
 
 ## Orden de ejecución
 
