@@ -650,11 +650,110 @@ async fn dispatch_message(
             // Para gate por-chunk, se necesitaría trackear el state de cada scribble.
             publish_raw_link(ctx, LINK_MSG_SCRIBBLE_LEAF, &pkt.data[1..]);
         }
+        TcpMsg::AdvancedFeatures => {
+            handle_advanced_features(ctx, user, &pkt.data[1..]);
+        }
         _ => {
             debug!("mensaje {:?} de id={} (no procesado en esta fase)", msg, user.id);
         }
     }
     Ok(())
+}
+
+/// Desenvuelve el wrapper `MSG_CHAT_ADVANCED_FEATURES_PROTOCOL` (op 250) y
+/// procesa el paquete Ares interno. Estructura del payload:
+/// `[innerSize:u16][inner_op:u8][inner_payload]`. Se usa para voice chat.
+fn handle_advanced_features(
+    ctx: &AppContext,
+    user: &Arc<server_core::user_pool::AresUser>,
+    payload: &[u8],
+) {
+    let mut r = PacketReader::new(payload);
+    if r.read_u16_le().is_err() {
+        return;
+    }
+    let inner_op = match r.read_u8() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let inner = &payload[r.position()..];
+    // Voice chat: el emisor muzzled no transmite (paridad sb0t).
+    if user.is_muzzled() {
+        return;
+    }
+    let sender = user.name.read().clone();
+    match TcpMsg::from_u8(inner_op) {
+        // Público: retransmitir a la sala (VcFirst=206, VcChunk=208).
+        Some(op @ TcpMsg::VcFirst) | Some(op @ TcpMsg::VcChunk) => {
+            vc_relay_public(ctx, user, &sender, op, inner);
+        }
+        // Privado: VcFirstTo=207 / VcChunkTo=209 (mismos valores que los
+        // SERVER_VC_*_FROM que se reenvían al target).
+        Some(op @ TcpMsg::VcFirstFrom) | Some(op @ TcpMsg::VcChunkFrom) => {
+            vc_relay_private(ctx, user, &sender, op, inner);
+        }
+        _ => {} // VcSupported/VcIgnore/etc: no-op por ahora.
+    }
+}
+
+/// Construye un paquete de voice chat envuelto en ADVANCED_FEATURES:
+/// `[250][innerSize:u16][inner_op][sender\0][voice]` (el framing externo lo
+/// agrega la writer task).
+fn build_vc_wrapped(inner_op: TcpMsg, sender: &str, voice: &[u8]) -> Bytes {
+    let mut inner = PacketWriter::with_msg(inner_op);
+    inner.write_string_nt(sender).ok();
+    inner.write_bytes(voice).ok();
+    let inner_bytes = inner.into_bytes(); // [inner_op][sender\0][voice]
+    let inner_size = (inner_bytes.len() - 1) as u16; // = largo de sender\0+voice
+
+    let mut outer = PacketWriter::with_msg(TcpMsg::AdvancedFeatures);
+    outer.write_u16_le(inner_size).ok();
+    outer.write_bytes(&inner_bytes).ok();
+    Bytes::copy_from_slice(outer.as_bytes())
+}
+
+/// Retransmite voz pública a los usuarios de la sala con VC público activo.
+fn vc_relay_public(
+    ctx: &AppContext,
+    sender: &Arc<server_core::user_pool::AresUser>,
+    sender_name: &str,
+    op: TcpMsg,
+    voice: &[u8],
+) {
+    let vroom = *sender.vroom.read();
+    for u in ctx.user_pool.users() {
+        if u.id != sender.id
+            && u.logged_in
+            && *u.vroom.read() == vroom
+            && u.voice_chat_public
+            && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = u.send(build_vc_wrapped(op, sender_name, voice));
+        }
+    }
+}
+
+/// Retransmite voz privada a un target. `inner = [targetName\0][voice]`.
+fn vc_relay_private(
+    ctx: &AppContext,
+    _sender: &Arc<server_core::user_pool::AresUser>,
+    sender_name: &str,
+    op: TcpMsg,
+    inner: &[u8],
+) {
+    let mut r = PacketReader::new(inner);
+    let target_name = match r.read_string_nt() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let voice = &inner[r.position()..];
+    if let Some(target) = ctx.user_pool.get_by_name(&target_name) {
+        if target.voice_chat_private
+            && !target.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = target.send(build_vc_wrapped(op, sender_name, voice));
+        }
+    }
 }
 
 /// Rutea un texto de comando (con o sin '/') a los built-ins, disparando los
