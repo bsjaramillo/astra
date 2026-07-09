@@ -69,6 +69,15 @@ impl RangeBanManager {
         }
     }
 
+    /// Borra todos los range bans. Retorna cuántos había.
+    pub fn clear(&self) -> usize {
+        let mut cache = self.cache.write();
+        let n = cache.len();
+        cache.clear();
+        let _ = self.db.clear_range_bans();
+        n
+    }
+
     /// Elimina por índice visible. Retorna el prefijo borrado.
     pub fn remove_at(&self, index: usize) -> Option<String> {
         let mut cache = self.cache.write();

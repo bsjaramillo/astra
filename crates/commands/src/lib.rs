@@ -246,6 +246,53 @@ pub fn dispatch_builtin(
             };
             (true, events)
         }
+        // Comandos host* (nivel Host = Owner en Astra). Operan sobre el pool
+        // local; en un setup multi-servidor se propagarían por el link (pendiente).
+        "hostban" => {
+            if require_host(ctx, user) {
+                let name = args.trim().to_string();
+                if handle_ban(ctx, user, args) {
+                    return (true, vec![astra_scripting::ScriptEvent::AdminLevelChanged { name }]);
+                }
+            }
+            (true, vec![])
+        }
+        "hostkick" | "hostkill" => {
+            if require_host(ctx, user) {
+                handle_kick(ctx, user, args);
+            }
+            (true, vec![])
+        }
+        "hostmuzzle" => {
+            if require_host(ctx, user) {
+                handle_muzzle(ctx, user, args, true);
+            }
+            (true, vec![])
+        }
+        "hostunmuzzle" => {
+            if require_host(ctx, user) {
+                handle_muzzle(ctx, user, args, false);
+            }
+            (true, vec![])
+        }
+        "hostunban" => {
+            if require_host(ctx, user) {
+                handle_unban(ctx, user, args);
+            }
+            (true, vec![])
+        }
+        "hostcban" => {
+            if require_host(ctx, user) {
+                handle_hostcban(ctx, user);
+            }
+            (true, vec![])
+        }
+        "hostclone" => {
+            if require_host(ctx, user) {
+                handle_clone(ctx, user, args);
+            }
+            (true, vec![])
+        }
         "ban10" => {
             handle_ban_timed(ctx, user, args, 600);
             (true, vec![])
@@ -1582,6 +1629,47 @@ fn level_name(level: ILevel) -> &'static str {
 
 fn has_level(user: &AresUser, min: ILevel) -> bool {
     (*user.level.read() as u8) >= min as u8
+}
+
+/// Gate para los comandos `host*`: en sb0t es nivel Host (dueño de la red);
+/// en Astra mapea a Owner. Notifica si el usuario no califica.
+fn require_host(ctx: &AppContext, user: &Arc<AresUser>) -> bool {
+    if has_level(user, ILevel::Owner) {
+        true
+    } else {
+        send_system_line(ctx, user, "Access denied. Host (Owner) required.");
+        false
+    }
+}
+
+/// `/hostcban`: limpia TODO — bans, range bans, muzzles y efectos de texto de
+/// todos los usuarios (paridad `HostCBans` de sb0t).
+fn handle_hostcban(ctx: &AppContext, user: &Arc<AresUser>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let bans = ctx.bans.clear_all();
+    let ranges = ctx.range_bans.clear();
+    let mut cleared_users = 0usize;
+    for u in ctx.user_pool.users() {
+        let had = u.muzzled.swap(false, Relaxed)
+            | u.kiddied.swap(false, Relaxed)
+            | u.lowered.swap(false, Relaxed)
+            | u.kewl.swap(false, Relaxed)
+            | u.painted.swap(false, Relaxed);
+        if u.echo_text.read().is_some() {
+            *u.echo_text.write() = None;
+        }
+        if had {
+            cleared_users += 1;
+        }
+    }
+    send_system_line(
+        ctx,
+        user,
+        &format!(
+            "Cleared {} ban(s), {} range ban(s), and effects on {} user(s).",
+            bans, ranges, cleared_users
+        ),
+    );
 }
 
 fn outranks(issuer: &AresUser, target: &AresUser) -> bool {
@@ -3048,6 +3136,9 @@ fn handle_unavailable(ctx: &AppContext, user: &Arc<AresUser>, cmd: &str) {
         "define" | "urban" => "requires an external dictionary service",
         "ipsend" | "logsend" | "bansend" => "requires a connected link hub",
         "trace" | "vspy" => "requires packet-tracing support",
+        "loadtemplate" => {
+            "reloads sb0t's message templates; Astra uses built-in messages, so there is nothing to reload"
+        }
         _ => "is not available in this build",
     };
     send_system_line(ctx, user, &format!("/{} {}.", cmd, why));
@@ -4248,7 +4339,47 @@ mod tests {
 
         let (handled, _) = dispatch_builtin(&ctx, &alice, "loadtemplate", "");
         assert!(handled);
-        assert!(next_pvt_text(&mut alice_rx).contains("not available"));
+        assert!(next_pvt_text(&mut alice_rx).contains("built-in messages"));
+    }
+
+    #[test]
+    fn host_commands_require_owner() {
+        let ctx = make_test_ctx();
+        let (admin, mut admin_rx) = make_test_user(1, "Admin");
+        *admin.level.write() = ILevel::Admin; // Admin < Owner
+        ctx.user_pool.add(admin.clone());
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(bob.clone());
+
+        // Admin no alcanza el gate Host (Owner).
+        let (handled, _) = dispatch_builtin(&ctx, &admin, "hostban", "Bob");
+        assert!(handled);
+        assert!(next_pvt_text(&mut admin_rx).contains("Host (Owner) required"));
+
+        // Como Owner, hostban banea a Bob.
+        *admin.level.write() = ILevel::Owner;
+        let (handled, _) = dispatch_builtin(&ctx, &admin, "hostban", "Bob");
+        assert!(handled);
+        assert!(ctx.bans.len() >= 1);
+    }
+
+    #[test]
+    fn hostcban_clears_everything() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let ctx = make_test_ctx();
+        let (owner, mut owner_rx) = make_test_user(1, "Owner");
+        *owner.level.write() = ILevel::Owner;
+        ctx.user_pool.add(owner.clone());
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        bob.muzzled.store(true, Relaxed);
+        ctx.user_pool.add(bob.clone());
+        ctx.range_bans.add("10.0.0.");
+
+        let (handled, _) = dispatch_builtin(&ctx, &owner, "hostcban", "");
+        assert!(handled);
+        assert!(!bob.muzzled.load(Relaxed));
+        assert_eq!(ctx.range_bans.len(), 0);
+        assert!(next_pvt_text(&mut owner_rx).contains("Cleared"));
     }
 
     #[test]
