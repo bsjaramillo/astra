@@ -116,9 +116,23 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
   `WordFilter.cs`) y acciones `block`/`kick`/`ban`. Comandos `/addfilter
   <word> [accion]`, `/remfilter`, `/listfilters` (Admin+). Aplica a
   usuarios regulares (Moderator+ exentos) en público TCP y WS. Validado E2E
-- [ ] Otros comandos sb0t de muy baja prioridad no migrados (scribble/proxy/
-  captcha admin, url list, roominfo, whowas): requieren subsistemas que
-  Astra no tiene o son de nicho; fuera de scope salvo pedido explícito
+- [x] **Paridad TOTAL de comandos sb0t (2026-07-09)**: se migraron los ~95
+  comandos del `Eval.cs` de sb0t en 7 tandas. Cobertura verificada: **0
+  comandos de sb0t sin cubrir**. 66 built-ins base + aliases con los nombres
+  originales de sb0t. Subsistemas nuevos en server-core: `UrlManager`,
+  `GreetManager`, `WordFilterManager`, `RangeBanManager`/`AsnBanManager`,
+  `RoomFlags` (11 toggles), `NameFilterManager` (join/file), `text_effects`
+  (kiddy/lower/kewl/paint), historial de mensajes + ban-log en AppContext.
+  - Tanda 1 URLs · Tanda 2 historial/info · Tanda 3 bans avanzados ·
+    Tanda 4 moderación · Tanda 5 permisos de sala · Tanda 6 efectos de texto ·
+    Tanda 7 cuentas/quarantine/filtros/misc.
+  - Enforcement real: range/join filters en login, caps/scribbles/avatars en
+    sus paths, muzzle temporal auto-expirante, disableadmins gate global.
+  - **Stubs honestos** (requieren infra externa que Astra no incluye, no sb0t
+    específico): `define`/`urban` (API de diccionario), `ipsend`/`logsend`/
+    `bansend` (push a hub linkeado), `trace`/`vspy` (packet spy),
+    `loadtemplate` (sistema de templates), `asnban` enforcement (GeoIP/ASN).
+  - 407 tests, 0 fallos.
 
 ## Orden de ejecución
 
