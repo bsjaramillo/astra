@@ -500,6 +500,53 @@ impl Database {
         Ok(n)
     }
 
+    /// Busca en el historial por nombre o IP (LIKE) para `/whowas`.
+    /// Retorna `(name, version, externalip, last_seen)` de las coincidencias
+    /// más recientes, hasta `limit`.
+    pub fn search_user_history(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> DbResult<Vec<(String, String, String, i64)>> {
+        let conn = self.conn.lock();
+        let like_name = format!("%{}%", query);
+        let like_ip = format!("{}%", query);
+        let mut stmt = conn.prepare(
+            "SELECT name, version, externalip, MAX(last_seen) as ls \
+             FROM user_history \
+             WHERE name LIKE ?1 OR externalip LIKE ?2 \
+             GROUP BY name, externalip \
+             ORDER BY ls DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![like_name, like_ip, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Última vez vista (last_seen, epoch secs) de una IP, o `None`.
+    pub fn last_seen_by_ip(&self, external_ip: &str) -> DbResult<Option<i64>> {
+        let conn = self.conn.lock();
+        let res: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(last_seen) FROM user_history WHERE externalip = ?1",
+                params![external_ip],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        Ok(res)
+    }
+
     /// Cuenta cuántos joins totales (sin filtro de tiempo) hay desde una IP.
     /// Usado para detectar IPs "nuevas" (sin historial) para el captcha gate.
     pub fn count_user_history_by_ip(&self, external_ip: IpAddr) -> DbResult<u32> {

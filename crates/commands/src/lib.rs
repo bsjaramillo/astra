@@ -62,6 +62,14 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/addurl <address> <text> - add a rotating room URL",
     "/remurl <index> - remove a room URL",
     "/listurl - list room URLs",
+    "/history - show recent public messages",
+    "/whowas <nick|ip> - search seen-user history",
+    "/lastseen <nick|ip> - when a user was last seen",
+    "/roominfo - show room statistics",
+    "/status [text] - show or set room status",
+    "/id <nick> - show a user's session id",
+    "/info <nick> - show detailed user info",
+    "/customnames - list online users' custom names",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -286,6 +294,38 @@ pub fn dispatch_builtin(
         }
         "listurl" | "listurls" => {
             handle_listurl(ctx, user, args);
+            (true, vec![])
+        }
+        "history" => {
+            handle_history(ctx, user, args);
+            (true, vec![])
+        }
+        "whowas" => {
+            handle_whowas(ctx, user, args);
+            (true, vec![])
+        }
+        "lastseen" => {
+            handle_lastseen(ctx, user, args);
+            (true, vec![])
+        }
+        "roominfo" => {
+            handle_roominfo(ctx, user, args);
+            (true, vec![])
+        }
+        "status" => {
+            handle_status(ctx, user, args);
+            (true, vec![])
+        }
+        "id" => {
+            handle_id(ctx, user, args);
+            (true, vec![])
+        }
+        "info" => {
+            handle_info(ctx, user, args);
+            (true, vec![])
+        }
+        "customnames" => {
+            handle_customnames(ctx, user, args);
             (true, vec![])
         }
         _ => (false, vec![]),
@@ -1247,6 +1287,209 @@ fn handle_listurl(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
 }
 
+// ============================================================================
+// Historial e información de sala/usuario
+// ============================================================================
+
+fn handle_history(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let msgs = ctx.recent_messages(20);
+    if msgs.is_empty() {
+        send_system_line(ctx, user, "No message history yet.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Recent messages ({}):", msgs.len()));
+    for m in &msgs {
+        let sep = if m.is_emote { " " } else { ": " };
+        send_system_line(ctx, user, &format!("{}{}{}", m.name, sep, m.text));
+    }
+}
+
+fn handle_whowas(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let query = args.trim();
+    if query.is_empty() {
+        send_system_line(ctx, user, "Usage: /whowas <nick|ip>");
+        return;
+    }
+    let results = ctx.db.search_user_history(query, 10).unwrap_or_default();
+    if results.is_empty() {
+        send_system_line(ctx, user, "No matching history.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Whowas '{}' ({}):", query, results.len()));
+    for (name, version, ip, last_seen) in &results {
+        send_system_line(
+            ctx,
+            user,
+            &format!(
+                "{} [{}] ver='{}' seen {}",
+                name, ip, version, format_time_ago(*last_seen)
+            ),
+        );
+    }
+}
+
+fn handle_lastseen(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let query = args.trim();
+    if query.is_empty() {
+        send_system_line(ctx, user, "Usage: /lastseen <nick|ip>");
+        return;
+    }
+    // Si está online, reportar "online now".
+    if let Some(target) = ctx.user_pool.get_by_name(query) {
+        send_system_line(ctx, user, &format!("'{}' is online now.", target.name.read()));
+        return;
+    }
+    let results = ctx.db.search_user_history(query, 1).unwrap_or_default();
+    match results.first() {
+        Some((name, _, ip, last_seen)) => send_system_line(
+            ctx,
+            user,
+            &format!("'{}' [{}] last seen {}", name, ip, format_time_ago(*last_seen)),
+        ),
+        None => send_system_line(ctx, user, "No matching history."),
+    }
+}
+
+fn handle_roominfo(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    let users = ctx.user_pool.users();
+    let total = users.iter().filter(|u| u.logged_in).count();
+    let ops = users
+        .iter()
+        .filter(|u| u.logged_in && (*u.level.read() as u8) > ILevel::Regular as u8)
+        .count();
+    let owners = users
+        .iter()
+        .filter(|u| u.logged_in && (*u.level.read() as u8) >= ILevel::Owner as u8)
+        .count();
+
+    send_system_line(ctx, user, &format!("Room: {}", ctx.settings.room_name));
+    send_system_line(ctx, user, &format!("Users: {} ({} ops, {} owners)", total, ops, owners));
+    let secs = ctx.uptime_secs();
+    send_system_line(
+        ctx,
+        user,
+        &format!("Uptime: {}d {}h {}m", secs / 86400, (secs / 3600) % 24, (secs / 60) % 60),
+    );
+    let status = ctx.room_status();
+    if !status.is_empty() {
+        send_system_line(ctx, user, &format!("Status: {}", status));
+    }
+}
+
+fn handle_status(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let text = args.trim();
+    if text.is_empty() {
+        let status = ctx.room_status();
+        if status.is_empty() {
+            send_system_line(ctx, user, "Room status is not set.");
+        } else {
+            send_system_line(ctx, user, &format!("Status: {}", status));
+        }
+        return;
+    }
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let next = if text == "-" { String::new() } else { truncate_text(text, 200) };
+    ctx.set_room_status(next.clone());
+    if next.is_empty() {
+        send_system_line(ctx, user, "Room status cleared.");
+    } else {
+        send_system_line(ctx, user, &format!("Room status set to '{}'.", next));
+    }
+}
+
+fn handle_id(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, &format!("Your id is {}.", user.id));
+        return;
+    }
+    match ctx.user_pool.get_by_name(target_name) {
+        Some(t) => send_system_line(ctx, user, &format!("'{}' has id {}.", t.name.read(), t.id)),
+        None => send_system_line(ctx, user, "User not found."),
+    }
+}
+
+fn handle_info(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    // Alias detallado de whois; si no hay args, muestra info propia.
+    let target = if args.trim().is_empty() {
+        user.clone()
+    } else {
+        match ctx.user_pool.get_by_name(args.trim()) {
+            Some(t) => t,
+            None => {
+                send_system_line(ctx, user, "User not found.");
+                return;
+            }
+        }
+    };
+    let level = *target.level.read() as u8;
+    send_system_line(
+        ctx,
+        user,
+        &format!(
+            "INFO {}: id={} ip={} level={} files={} vroom={} ver='{}' region='{}'",
+            target.name.read(),
+            target.id,
+            target.external_ip,
+            level,
+            target.file_count,
+            *target.vroom.read(),
+            target.version,
+            target.region,
+        ),
+    );
+}
+
+fn handle_customnames(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let mut found = false;
+    for u in ctx.user_pool.users() {
+        if !u.logged_in {
+            continue;
+        }
+        if let Some(cname) = u.custom_name.read().clone() {
+            found = true;
+            send_system_line(ctx, user, &format!("{} → {}", u.name.read(), cname));
+        }
+    }
+    if !found {
+        send_system_line(ctx, user, "No users have a custom name set.");
+    }
+}
+
+/// Formatea un timestamp epoch-ms como tiempo relativo ("5m ago", etc.).
+fn format_time_ago(last_seen_ms: i64) -> String {
+    let now_ms = server_core::time::unix_time() as i64;
+    let secs = ((now_ms - last_seen_ms).max(0) / 1000) as u64;
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
 fn can_edit_topic(user: &AresUser) -> bool {
     let level = *user.level.read() as u8;
     level >= ILevel::Moderator as u8
@@ -2073,6 +2316,112 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &alice, "remurl", "0");
         assert_eq!(next_pvt_text(&mut alice_rx), "Removed URL: Astra site");
         assert!(ctx.urls.is_empty());
+    }
+
+    #[test]
+    fn builtin_history_shows_recent_messages() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        ctx.record_message("Bob", "hola a todos", false);
+        ctx.record_message("Carol", "waves", true);
+
+        let _ = dispatch_builtin(&ctx, &alice, "history", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Recent messages (2):");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Bob: hola a todos");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Carol waves");
+    }
+
+    #[test]
+    fn builtin_history_requires_moderator() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+        let _ = dispatch_builtin(&ctx, &alice, "history", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Moderator+ required.");
+    }
+
+    #[test]
+    fn builtin_lastseen_online_and_history() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        // Bob online
+        let _ = dispatch_builtin(&ctx, &alice, "lastseen", "Bob");
+        assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' is online now.");
+
+        // Usuario en historial (offline)
+        ctx.db
+            .add_user_history("Ghost", "Ares 2.5", &[7u8; 16],
+                "5.6.7.8".parse().unwrap(), "5.6.7.8".parse().unwrap(), 1234, 1000)
+            .unwrap();
+        let _ = dispatch_builtin(&ctx, &alice, "lastseen", "Ghost");
+        let line = next_pvt_text(&mut alice_rx);
+        assert!(line.starts_with("'Ghost' [5.6.7.8] last seen "), "got: {}", line);
+
+        // No existe
+        let _ = dispatch_builtin(&ctx, &alice, "lastseen", "nadie");
+        assert_eq!(next_pvt_text(&mut alice_rx), "No matching history.");
+    }
+
+    #[test]
+    fn builtin_whowas_searches_history() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        ctx.db
+            .add_user_history("Charlie", "Ares 2.5", &[9u8; 16],
+                "9.9.9.9".parse().unwrap(), "9.9.9.9".parse().unwrap(), 5009, 2000)
+            .unwrap();
+
+        let _ = dispatch_builtin(&ctx, &alice, "whowas", "char");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Whowas 'char' (1):");
+        let line = next_pvt_text(&mut alice_rx);
+        assert!(line.contains("Charlie [9.9.9.9]"), "got: {}", line);
+    }
+
+    #[test]
+    fn builtin_roominfo_and_status() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "roominfo", "");
+        assert!(next_pvt_text(&mut alice_rx).starts_with("Room: "));
+        assert!(next_pvt_text(&mut alice_rx).starts_with("Users: 1"));
+        assert!(next_pvt_text(&mut alice_rx).starts_with("Uptime: "));
+
+        // set status → aparece en roominfo
+        let _ = dispatch_builtin(&ctx, &alice, "status", "under maintenance");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room status set to 'under maintenance'.");
+        let _ = dispatch_builtin(&ctx, &alice, "status", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Status: under maintenance");
+    }
+
+    #[test]
+    fn builtin_id_and_customnames() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        *bob.custom_name.write() = Some("BobbyTables".to_string());
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "id", "Bob");
+        assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' has id 2.");
+
+        let _ = dispatch_builtin(&ctx, &alice, "customnames", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Bob → BobbyTables");
     }
 
     #[test]

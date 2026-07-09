@@ -639,6 +639,7 @@ async fn handle_public(
 
     let pkt = outbound::build_public(&name, &text);
     broadcast_to_room(ctx, user, pkt);
+    ctx.record_message(&name, &text, false);
     ctx.publish_link_event(LinkEvent::Public {
         origin: None,
         from: name.clone(),
@@ -707,6 +708,7 @@ async fn handle_emote(
     }
     let pkt = outbound::build_emote(&name, &text);
     broadcast_to_room(ctx, user, pkt);
+    ctx.record_message(&name, &text, true);
     ctx.publish_link_event(LinkEvent::Emote {
         origin: None,
         from: name.clone(),

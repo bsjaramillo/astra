@@ -240,6 +240,22 @@ pub enum LinkEvent {
     },
 }
 
+/// Máximo de mensajes retenidos en el historial reciente.
+const MESSAGE_HISTORY_CAP: usize = 50;
+
+/// Una entrada del historial de mensajes recientes.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    /// Nick del emisor.
+    pub name: String,
+    /// Texto del mensaje.
+    pub text: String,
+    /// ¿Es un emote?
+    pub is_emote: bool,
+    /// Momento (epoch secs).
+    pub time_secs: u64,
+}
+
 /// Estado global compartido del servidor.
 ///
 /// Se pasa por `Arc` a todos los módulos. Es la "raíz" del grafo de
@@ -288,6 +304,11 @@ pub struct AppContext {
     pub start_time: Instant,
     /// Topic actual de la sala (mutable en runtime).
     pub room_topic: RwLock<String>,
+    /// Status de la sala (mostrado en `/roominfo`, mutable via `/status`).
+    pub room_status: RwLock<String>,
+    /// Historial reciente de mensajes públicos/emotes (ring buffer para
+    /// `/history`). Entradas `(name, text, is_emote, time_secs)`.
+    pub message_history: parking_lot::Mutex<std::collections::VecDeque<HistoryEntry>>,
     /// Bus interno de eventos Link.
     pub link_events: broadcast::Sender<LinkEvent>,
 }
@@ -333,6 +354,8 @@ impl AppContext {
             link_requests: broadcast::channel(256).0,
             start_time: Instant::now(),
             room_topic: RwLock::new(initial_room_topic),
+            room_status: RwLock::new(String::new()),
+            message_history: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             link_events,
         }
     }
@@ -350,6 +373,37 @@ impl AppContext {
     /// Actualiza el topic actual en memoria.
     pub fn set_room_topic(&self, topic: impl Into<String>) {
         *self.room_topic.write() = topic.into();
+    }
+
+    /// Retorna el status actual de la sala.
+    pub fn room_status(&self) -> String {
+        self.room_status.read().clone()
+    }
+
+    /// Actualiza el status de la sala.
+    pub fn set_room_status(&self, status: impl Into<String>) {
+        *self.room_status.write() = status.into();
+    }
+
+    /// Registra un mensaje en el historial reciente (ring buffer acotado).
+    pub fn record_message(&self, name: &str, text: &str, is_emote: bool) {
+        let mut hist = self.message_history.lock();
+        if hist.len() >= MESSAGE_HISTORY_CAP {
+            hist.pop_front();
+        }
+        hist.push_back(HistoryEntry {
+            name: name.to_string(),
+            text: text.to_string(),
+            is_emote,
+            time_secs: crate::time::unix_time() / 1000,
+        });
+    }
+
+    /// Retorna las últimas `n` entradas del historial (más viejas primero).
+    pub fn recent_messages(&self, n: usize) -> Vec<HistoryEntry> {
+        let hist = self.message_history.lock();
+        let start = hist.len().saturating_sub(n);
+        hist.iter().skip(start).cloned().collect()
     }
 
     /// Publica un evento para replicación Link.

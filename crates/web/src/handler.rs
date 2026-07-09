@@ -503,6 +503,7 @@ fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     let name = user.name.read().clone();
     let pkt = outbound::build_public(&name, text);
     broadcast_to_room(ctx, user, pkt);
+    ctx.record_message(&name, text, false);
 }
 
 /// Envía el greet de bienvenida como PM del bot al usuario WS que entra.
@@ -577,6 +578,7 @@ fn handle_ws_emote(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     let name = user.name.read().clone();
     let pkt = outbound::build_emote(&name, text);
     broadcast_to_room(ctx, user, pkt);
+    ctx.record_message(&name, text, true);
 }
 
 /// Broadcast a todos los usuarios en la misma vroom que `sender`.
