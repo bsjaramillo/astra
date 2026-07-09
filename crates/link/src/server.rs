@@ -465,6 +465,20 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                             warn!("link server: CustomName malformado");
                         }
                     }
+                    LinkMsg::Admin => {
+                        if let Some((kind, target)) = parse_admin_payload(&payload, crypto) {
+                            app.apply_admin_action(kind, &target);
+                            // Re-publicar para fanout a los otros leaves.
+                            app.publish_link_event(LinkEvent::AdminAction {
+                                origin: Some(leaf_name.clone()),
+                                kind,
+                                target,
+                            });
+                            info!("link server: host action kind={} desde leaf '{}'", kind, leaf_name);
+                        } else {
+                            warn!("link server: Admin malformado");
+                        }
+                    }
                     op if is_passthrough_opcode(op) => {
                         info!("link server: passthrough recibido: {:?}", op);
                         app.publish_link_event(LinkEvent::Raw {
@@ -620,6 +634,7 @@ fn should_forward_event_to_leaf(event: &LinkEvent, leaf_name: &str) -> bool {
         | LinkEvent::EmoteToUser { origin, .. }
         | LinkEvent::PrivateIgnored { origin, .. }
         | LinkEvent::PersonalMessage { origin, .. }
+        | LinkEvent::AdminAction { origin, .. }
         | LinkEvent::Raw { origin, .. } => origin.as_deref() != Some(leaf_name),
     }
 }
@@ -647,6 +662,7 @@ async fn send_link_event(
         LinkEvent::EmoteToUser { from, to, text, .. } => (LinkMsg::EmoteToUser, build_private_payload(from, to, text, crypto)),
         LinkEvent::PrivateIgnored { from, to, .. } => (LinkMsg::PrivateIgnored, build_private_ignored_payload(from, to, crypto)),
         LinkEvent::PersonalMessage { name, text, .. } => (LinkMsg::PersonalMessage, build_chat_payload(name, text, LinkMsg::PersonalMessage, crypto)),
+        LinkEvent::AdminAction { kind, target, .. } => (LinkMsg::Admin, build_admin_payload(*kind, target, crypto)),
         LinkEvent::Raw { msg, payload, .. } => {
             let Some(link_msg) = LinkMsg::from_u8(*msg) else {
                 return Ok(());
@@ -697,6 +713,22 @@ fn build_chat_payload(from: &str, text: &str, msg: LinkMsg, crypto: Option<LinkC
     b.write_string(from);
     b.write_string(text);
     b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec()
+}
+
+/// Payload de una acción admin de red: `[kind:u8][target:str]`.
+pub(crate) fn build_admin_payload(kind: u8, target: &str, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
+    b.write_u8(kind);
+    b.write_string(target);
+    b.build_link_packet(LinkMsg::Admin)[LINK_PACKET_HEADER_LEN..].to_vec()
+}
+
+/// Parsea `[kind:u8][target:str]`.
+pub(crate) fn parse_admin_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(u8, String)> {
+    let mut r = LinkPacketReader::from_payload_with_crypto(payload, crypto);
+    let kind = r.read_u8().ok()?;
+    let target = r.read_string().ok()?;
+    Some((kind, target))
 }
 fn build_custom_name_payload(name: &str, custom_name: Option<&str>, crypto: Option<LinkCrypto>) -> Vec<u8> {
     let mut b = LinkPacketBuilder::new_with_crypto(crypto);

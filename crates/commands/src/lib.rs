@@ -251,7 +251,9 @@ pub fn dispatch_builtin(
         "hostban" => {
             if require_host(ctx, user) {
                 let name = args.trim().to_string();
-                if handle_ban(ctx, user, args) {
+                let ok = handle_ban(ctx, user, args);
+                publish_host_action(ctx, user, server_core::admin_action::BAN, &name);
+                if ok {
                     return (true, vec![astra_scripting::ScriptEvent::AdminLevelChanged { name }]);
                 }
             }
@@ -260,18 +262,21 @@ pub fn dispatch_builtin(
         "hostkick" | "hostkill" => {
             if require_host(ctx, user) {
                 handle_kick(ctx, user, args);
+                publish_host_action(ctx, user, server_core::admin_action::KICK, args.trim());
             }
             (true, vec![])
         }
         "hostmuzzle" => {
             if require_host(ctx, user) {
                 handle_muzzle(ctx, user, args, true);
+                publish_host_action(ctx, user, server_core::admin_action::MUZZLE, args.trim());
             }
             (true, vec![])
         }
         "hostunmuzzle" => {
             if require_host(ctx, user) {
                 handle_muzzle(ctx, user, args, false);
+                publish_host_action(ctx, user, server_core::admin_action::UNMUZZLE, args.trim());
             }
             (true, vec![])
         }
@@ -1629,6 +1634,22 @@ fn level_name(level: ILevel) -> &'static str {
 
 fn has_level(user: &AresUser, min: ILevel) -> bool {
     (*user.level.read() as u8) >= min as u8
+}
+
+/// Propaga una acción `host*` a los servidores enlazados (si hay link activo).
+/// Cada servidor la aplica a su pool local vía `apply_admin_action`. Notifica
+/// al emisor que la acción viaja por la red (el target puede no estar acá).
+fn publish_host_action(ctx: &AppContext, user: &Arc<AresUser>, kind: u8, target: &str) {
+    let target = target.trim();
+    if target.is_empty() || ctx.link_receiver_count() == 0 {
+        return;
+    }
+    ctx.publish_link_event(server_core::LinkEvent::AdminAction {
+        origin: None,
+        kind,
+        target: target.to_string(),
+    });
+    send_system_line(ctx, user, "Host action propagated to linked servers.");
 }
 
 /// Gate para los comandos `host*`: en sb0t es nivel Host (dueño de la red);

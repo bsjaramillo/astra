@@ -499,6 +499,16 @@ fn handle_incoming_link_message(
                 false
             }
         }
+        LinkMsg::Admin => {
+            // Acción host* propagada desde otro servidor de la red: aplicarla
+            // al pool local (ban/kick/muzzle/unmuzzle del target si está acá).
+            if let Some((kind, target)) = crate::server::parse_admin_payload(payload, crypto) {
+                app.apply_admin_action(kind, &target);
+                true
+            } else {
+                false
+            }
+        }
         op if is_passthrough_opcode(op) => {
             app.publish_link_event(LinkEvent::Raw {
                 origin: Some("hub".to_string()),
@@ -593,6 +603,12 @@ async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent, crypto: Opti
             }
             (LinkMsg::PersonalMessage, build_chat_payload(name, text, LinkMsg::PersonalMessage, crypto))
         }
+        LinkEvent::AdminAction { origin, kind, target } => {
+            if origin.is_some() {
+                return Ok(());
+            }
+            (LinkMsg::Admin, crate::server::build_admin_payload(*kind, target, crypto))
+        }
         LinkEvent::Raw { origin, msg, payload } => {
             if origin.is_some() {
                 return Ok(());
@@ -619,7 +635,6 @@ pub(crate) fn is_passthrough_opcode(op: LinkMsg) -> bool {
             | LinkMsg::ScribbleUser
             | LinkMsg::ScribbleLeaf
             | LinkMsg::IUser
-            | LinkMsg::Admin
             | LinkMsg::IUserBin
             | LinkMsg::NoAdmin
             | LinkMsg::Browse

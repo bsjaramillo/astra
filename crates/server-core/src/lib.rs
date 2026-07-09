@@ -94,7 +94,7 @@ pub mod name_filters;
 pub mod geoip;
 
 /// Re-exports comunes.
-pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
+pub use app::{admin_action, AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use greets::{GreetContext, GreetManager};
 pub use geoip::GeoIp;
 pub use ip_bans::{AsnBanManager, RangeBanManager};

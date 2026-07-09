@@ -233,6 +233,16 @@ pub enum LinkEvent {
         /// Texto.
         text: String,
     },
+    /// Acción admin de red (`host*`): ban/kick/muzzle/unmuzzle propagada a
+    /// todos los servidores enlazados. Cada servidor la aplica a su pool local.
+    AdminAction {
+        /// Nombre del leaf origen si vino desde Link.
+        origin: Option<String>,
+        /// Tipo de acción (ver [`admin_action`]).
+        kind: u8,
+        /// Nick del usuario objetivo.
+        target: String,
+    },
     /// Mensaje Link genérico para opcodes no modelados explícitamente.
     Raw {
         /// Nombre del leaf origen si vino desde Link.
@@ -242,6 +252,18 @@ pub enum LinkEvent {
         /// Payload crudo del mensaje.
         payload: Vec<u8>,
     },
+}
+
+/// Tipos de acción admin de red para [`LinkEvent::AdminAction`].
+pub mod admin_action {
+    /// Ban permanente.
+    pub const BAN: u8 = 1;
+    /// Kick (desconexión).
+    pub const KICK: u8 = 2;
+    /// Muzzle (silenciar).
+    pub const MUZZLE: u8 = 3;
+    /// Unmuzzle.
+    pub const UNMUZZLE: u8 = 4;
 }
 
 /// Máximo de mensajes retenidos en el historial reciente.
@@ -490,6 +512,58 @@ impl AppContext {
     /// Publica un evento para replicación Link.
     pub fn publish_link_event(&self, event: LinkEvent) {
         let _ = self.link_events.send(event);
+    }
+
+    /// Aplica una acción admin de red ([`LinkEvent::AdminAction`]) al pool
+    /// local: usada al recibir un `host*` desde otro servidor enlazado. Retorna
+    /// `true` si el objetivo estaba conectado localmente y se aplicó.
+    pub fn apply_admin_action(&self, kind: u8, target: &str) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(user) = self.user_pool.get_by_name(target) else {
+            return false;
+        };
+        match kind {
+            admin_action::BAN => {
+                let _ = self.bans.ban(
+                    &user.name.read(),
+                    &user.version,
+                    &user.guid,
+                    user.external_ip,
+                    user.local_ip,
+                    user.data_port,
+                );
+                self.remove_and_broadcast_part(&user);
+            }
+            admin_action::KICK => {
+                self.remove_and_broadcast_part(&user);
+            }
+            admin_action::MUZZLE => {
+                user.muzzled.store(true, Relaxed);
+            }
+            admin_action::UNMUZZLE => {
+                user.muzzled.store(false, Relaxed);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Remueve un usuario del pool y difunde su PART a la sala (cifrando por
+    /// destinatario). Helper interno para acciones admin recibidas por Link.
+    fn remove_and_broadcast_part(&self, user: &std::sync::Arc<crate::user_pool::AresUser>) {
+        let part = crate::outbound::build_part(user);
+        self.user_pool.remove(user.id);
+        self.stats.on_user_part();
+        for u in self.user_pool.users() {
+            if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            if u.ares_crypto.is_some() {
+                let _ = u.send(crate::outbound::build_part_c(user, u.ares_crypto));
+            } else {
+                let _ = u.send(part.clone());
+            }
+        }
     }
 
     /// Crea una suscripción al bus interno de Link.
