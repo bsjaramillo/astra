@@ -100,6 +100,9 @@ pub async fn handle_connection(
     let join_pkt = outbound::build_join_or_userlist(&user);
     broadcast_to_room(&ctx, &user, join_pkt);
 
+    // Greet de bienvenida (PM del bot al usuario WS que entra)
+    send_greet_ws(&ctx, &user, &ws_text_tx);
+
     // Loop principal
     let idle_timeout = Duration::from_secs(ctx.settings.security.idle_timeout_secs);
     loop {
@@ -490,9 +493,81 @@ fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     if text.is_empty() {
         return;
     }
+    // Word filter: solo aplica a usuarios regulares (Moderator+ exentos).
+    if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
+        if let Some(action) = ctx.word_filter.check(text) {
+            apply_filter_action_ws(ctx, user, action);
+            return;
+        }
+    }
     let name = user.name.read().clone();
     let pkt = outbound::build_public(&name, text);
     broadcast_to_room(ctx, user, pkt);
+}
+
+/// Envía el greet de bienvenida como PM del bot al usuario WS que entra.
+fn send_greet_ws(
+    ctx: &AppContext,
+    user: &AresUser,
+    ws_text_tx: &mpsc::UnboundedSender<String>,
+) {
+    let Some(template) = ctx.greets.next_template() else {
+        return;
+    };
+    let gctx = server_core::GreetContext {
+        name: &user.name.read(),
+        ip: &user.external_ip.to_string(),
+        id: user.id,
+        file_count: user.file_count,
+        version: &user.version,
+        user_count: ctx.user_pool.len(),
+        room_name: &ctx.settings.room_name,
+        uptime_secs: ctx.uptime_secs(),
+        region: &user.region,
+    };
+    let text = server_core::greets::render_greet(&template, &gctx);
+    let _ = ws_text_tx.send(crate::protocol::build_pm(&ctx.settings.bot_name, &text));
+}
+
+/// Aplica la acción de un word filter a un usuario WS.
+fn apply_filter_action_ws(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    action: server_core::FilterAction,
+) {
+    use server_core::FilterAction;
+    if let Some(tx) = &user.ws_text_sender {
+        let _ = tx.send(crate::protocol::build_pm(
+            &ctx.settings.bot_name,
+            "Your message was blocked by a word filter.",
+        ));
+    }
+    match action {
+        FilterAction::Block => {}
+        FilterAction::Kick => filter_remove_user_ws(ctx, user),
+        FilterAction::Ban => {
+            let _ = ctx.bans.ban(
+                &user.name.read(),
+                &user.version,
+                &user.guid,
+                user.external_ip,
+                user.local_ip,
+                user.data_port,
+            );
+            filter_remove_user_ws(ctx, user);
+        }
+    }
+}
+
+fn filter_remove_user_ws(ctx: &AppContext, user: &Arc<AresUser>) {
+    let part_pkt = outbound::build_part(user);
+    ctx.user_pool.remove(user.id);
+    ctx.stats.on_user_part();
+    for u in ctx.user_pool.users() {
+        if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = u.send(part_pkt.clone());
+        }
+    }
 }
 
 fn handle_ws_emote(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {

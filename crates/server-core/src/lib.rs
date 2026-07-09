@@ -69,10 +69,18 @@ pub mod time;
 /// Tipos de datos básicos del usuario (ILevel, IFont, ILink).
 pub mod types;
 
+/// Mensajes de bienvenida (greets).
+pub mod greets;
+
+/// Filtro de palabras del chat público.
+pub mod word_filter;
+
 /// Re-exports comunes.
 pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
+pub use greets::{GreetContext, GreetManager};
 pub use room::Room;
 pub use stats::Stats;
 pub use types::{IFont, ILevel, ILink};
 pub use user_pool::{AresUser, UserPool};
 pub use vroom::VroomManager;
+pub use word_filter::{FilterAction, WordFilterManager};

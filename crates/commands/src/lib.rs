@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::net::IpAddr;
 
 use server_core::{outbound, AppContext, AresUser};
-use server_core::ILevel;
+use server_core::{FilterAction, ILevel};
 
 use astra_scripting::{ScriptEvent, ScriptHandle};
 
@@ -51,6 +51,13 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/login <password> - log into your account",
     "/grant <nick> <level> - set user level",
     "/revoke <nick> - reset user to regular",
+    "/greets [on|off] - toggle or show greet status",
+    "/addgreet <text> - add a greeting (placeholders +n +ip +uc +rn ...)",
+    "/remgreet <index> - remove greeting by index",
+    "/listgreets - list greetings",
+    "/addfilter <word> [block|kick|ban] - add a chat word filter",
+    "/remfilter <word> - remove a word filter",
+    "/listfilters - list word filters",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -232,6 +239,34 @@ pub fn dispatch_builtin(
                 None => vec![],
             };
             (true, events)
+        }
+        "greets" => {
+            handle_greets(ctx, user, args);
+            (true, vec![])
+        }
+        "addgreet" => {
+            handle_addgreet(ctx, user, args);
+            (true, vec![])
+        }
+        "remgreet" => {
+            handle_remgreet(ctx, user, args);
+            (true, vec![])
+        }
+        "listgreets" => {
+            handle_listgreets(ctx, user, args);
+            (true, vec![])
+        }
+        "addfilter" => {
+            handle_addfilter(ctx, user, args);
+            (true, vec![])
+        }
+        "remfilter" => {
+            handle_remfilter(ctx, user, args);
+            (true, vec![])
+        }
+        "listfilters" => {
+            handle_listfilters(ctx, user, args);
+            (true, vec![])
         }
         _ => (false, vec![]),
     }
@@ -961,6 +996,151 @@ fn outranks(issuer: &AresUser, target: &AresUser) -> bool {
     (*issuer.level.read() as u8) > (*target.level.read() as u8)
 }
 
+// ============================================================================
+// Greets (mensajes de bienvenida) — requiere Admin+
+// ============================================================================
+
+fn handle_greets(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    match args.trim().to_ascii_lowercase().as_str() {
+        "on" => {
+            ctx.greets.set_enabled(true);
+            send_system_line(ctx, user, "Greets enabled.");
+        }
+        "off" => {
+            ctx.greets.set_enabled(false);
+            send_system_line(ctx, user, "Greets disabled.");
+        }
+        "" => {
+            let state = if ctx.greets.is_enabled() { "on" } else { "off" };
+            send_system_line(
+                ctx,
+                user,
+                &format!("Greets are {} ({} configured).", state, ctx.greets.len()),
+            );
+        }
+        _ => send_system_line(ctx, user, "Usage: /greets [on|off]"),
+    }
+}
+
+fn handle_addgreet(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let template = args.trim();
+    if template.is_empty() {
+        send_system_line(ctx, user, "Usage: /addgreet <text>  (placeholders: +n +ip +id +f +v +uc +rn +ut +l)");
+        return;
+    }
+    let id = ctx.greets.add(template);
+    if id != 0 {
+        send_system_line(ctx, user, &format!("Greet #{} added.", ctx.greets.len() - 1));
+    } else {
+        send_system_line(ctx, user, "Failed to persist greet.");
+    }
+}
+
+fn handle_remgreet(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let Ok(index) = args.trim().parse::<usize>() else {
+        send_system_line(ctx, user, "Usage: /remgreet <index>");
+        return;
+    };
+    match ctx.greets.remove_at(index) {
+        Some(t) => send_system_line(ctx, user, &format!("Removed greet: {}", t)),
+        None => send_system_line(ctx, user, "No greet at that index."),
+    }
+}
+
+fn handle_listgreets(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let greets = ctx.greets.list();
+    if greets.is_empty() {
+        send_system_line(ctx, user, "No greets configured.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Greets ({}):", greets.len()));
+    for (i, g) in greets.iter().enumerate() {
+        send_system_line(ctx, user, &format!("{} - {}", i, g));
+    }
+}
+
+// ============================================================================
+// Word filters — requiere Admin+
+// ============================================================================
+
+fn handle_addfilter(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let args = args.trim();
+    if args.is_empty() {
+        send_system_line(ctx, user, "Usage: /addfilter <word> [block|kick|ban]");
+        return;
+    }
+    // El último token puede ser la acción; el resto es el patrón.
+    let (pattern, action) = match args.rsplit_once(char::is_whitespace) {
+        Some((p, last)) if matches!(last.to_ascii_lowercase().as_str(), "block" | "kick" | "ban") => {
+            (p.trim(), FilterAction::parse(last))
+        }
+        _ => (args, FilterAction::Block),
+    };
+    if pattern.is_empty() {
+        send_system_line(ctx, user, "Usage: /addfilter <word> [block|kick|ban]");
+        return;
+    }
+    ctx.word_filter.add(pattern, action);
+    send_system_line(
+        ctx,
+        user,
+        &format!("Filter '{}' → {} added.", pattern.to_ascii_lowercase(), action.as_str()),
+    );
+}
+
+fn handle_remfilter(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let pattern = args.trim();
+    if pattern.is_empty() {
+        send_system_line(ctx, user, "Usage: /remfilter <word>");
+        return;
+    }
+    if ctx.word_filter.remove(pattern) {
+        send_system_line(ctx, user, &format!("Filter '{}' removed.", pattern.to_ascii_lowercase()));
+    } else {
+        send_system_line(ctx, user, "No matching filter.");
+    }
+}
+
+fn handle_listfilters(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let filters = ctx.word_filter.list();
+    if filters.is_empty() {
+        send_system_line(ctx, user, "No word filters configured.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Word filters ({}):", filters.len()));
+    for (pattern, action) in &filters {
+        send_system_line(ctx, user, &format!("{} → {}", pattern, action.as_str()));
+    }
+}
+
 fn can_edit_topic(user: &AresUser) -> bool {
     let level = *user.level.read() as u8;
     level >= ILevel::Moderator as u8
@@ -1670,5 +1850,100 @@ mod tests {
         assert!(text.contains("ip=10.0.0.2"));
         assert!(text.contains("guid=02020202020202020202020202020202"));
         assert!(text.contains("level=2"));
+    }
+
+    #[test]
+    fn builtin_greets_require_admin() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "addgreet", "hola +n");
+        assert!(handled);
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
+        assert!(ctx.greets.is_empty());
+    }
+
+    #[test]
+    fn builtin_greet_add_list_remove() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "addgreet", "welcome +n to +rn");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Greet #0 added.");
+        assert_eq!(ctx.greets.list(), vec!["welcome +n to +rn"]);
+
+        let _ = dispatch_builtin(&ctx, &alice, "listgreets", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Greets (1):");
+        assert_eq!(next_pvt_text(&mut alice_rx), "0 - welcome +n to +rn");
+
+        let _ = dispatch_builtin(&ctx, &alice, "remgreet", "0");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Removed greet: welcome +n to +rn");
+        assert!(ctx.greets.is_empty());
+
+        let _ = dispatch_builtin(&ctx, &alice, "remgreet", "5");
+        assert_eq!(next_pvt_text(&mut alice_rx), "No greet at that index.");
+    }
+
+    #[test]
+    fn builtin_greets_toggle() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "greets", "off");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Greets disabled.");
+        assert!(!ctx.greets.is_enabled());
+
+        let _ = dispatch_builtin(&ctx, &alice, "greets", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Greets are off (0 configured).");
+    }
+
+    #[test]
+    fn builtin_filter_add_list_remove() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "addfilter", "badword ban");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Filter 'badword' → ban added.");
+        assert_eq!(
+            ctx.word_filter.check("this is a badword").unwrap(),
+            server_core::FilterAction::Ban
+        );
+
+        // Sin acción explícita → block
+        let _ = dispatch_builtin(&ctx, &alice, "addfilter", "spammy");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Filter 'spammy' → block added.");
+
+        let _ = dispatch_builtin(&ctx, &alice, "listfilters", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Word filters (2):");
+        // Dos líneas de detalle (ordenadas por patrón): badword, spammy
+        assert_eq!(next_pvt_text(&mut alice_rx), "badword → ban");
+        assert_eq!(next_pvt_text(&mut alice_rx), "spammy → block");
+
+        let _ = dispatch_builtin(&ctx, &alice, "remfilter", "badword");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Filter 'badword' removed.");
+        assert!(ctx.word_filter.check("badword").is_none());
+
+        let _ = dispatch_builtin(&ctx, &alice, "remfilter", "nope");
+        assert_eq!(next_pvt_text(&mut alice_rx), "No matching filter.");
+    }
+
+    #[test]
+    fn builtin_filter_requires_admin() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "addfilter", "x ban");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
+        assert!(ctx.word_filter.is_empty());
     }
 }

@@ -139,6 +139,9 @@ pub async fn handle_tcp_client(
         ip: user.external_ip.to_string(),
     });
 
+    // Greet de bienvenida (PM del bot al usuario que entra)
+    send_greet(&ctx, &user);
+
     // ============================================================
     // Loop de lectura de mensajes
     // ============================================================
@@ -620,6 +623,14 @@ async fn handle_public(
         return;
     }
 
+    // Word filter: solo aplica a usuarios regulares (Moderator+ exentos).
+    if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
+        if let Some(action) = ctx.word_filter.check(&text) {
+            apply_filter_action(ctx, user, action, &name);
+            return;
+        }
+    }
+
     // Hook onTextBefore: si algún script retorna false, cancelar el broadcast
     if !scripting.check_text_before(&name, &text) {
         debug!("onTextBefore canceló mensaje de '{}'", name);
@@ -828,6 +839,82 @@ fn broadcast_to_room(ctx: &AppContext, sender: &server_core::user_pool::AresUser
             let _ = sender_id; // unused but indicates intent
         }
     }
+}
+
+/// Envía el greet de bienvenida (rotado) como PM del bot al usuario que
+/// acaba de entrar, con los placeholders sustituidos. No-op si los greets
+/// están deshabilitados o no hay ninguno configurado.
+fn send_greet(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
+    let Some(template) = ctx.greets.next_template() else {
+        return;
+    };
+    let gctx = server_core::GreetContext {
+        name: &user.name.read(),
+        ip: &user.external_ip.to_string(),
+        id: user.id,
+        file_count: user.file_count,
+        version: &user.version,
+        user_count: ctx.user_pool.len(),
+        room_name: &ctx.settings.room_name,
+        uptime_secs: ctx.uptime_secs(),
+        region: &user.region,
+    };
+    let text = server_core::greets::render_greet(&template, &gctx);
+    let _ = user.send(outbound::build_pvt(&ctx.settings.bot_name, &text));
+}
+
+/// Aplica la acción de un word filter a un mensaje bloqueado: notifica al
+/// emisor y, según la acción, lo expulsa (remueve del pool) o lo banea.
+fn apply_filter_action(
+    ctx: &AppContext,
+    user: &Arc<server_core::user_pool::AresUser>,
+    action: server_core::FilterAction,
+    name: &str,
+) {
+    use server_core::FilterAction;
+    // Aviso al emisor de que su mensaje fue bloqueado.
+    let _ = user.send(outbound::build_pvt(
+        &ctx.settings.bot_name,
+        "Your message was blocked by a word filter.",
+    ));
+
+    match action {
+        FilterAction::Block => {
+            debug!("word filter bloqueó mensaje de '{}'", name);
+        }
+        FilterAction::Kick => {
+            info!("word filter: kick de '{}'", name);
+            filter_remove_user(ctx, user);
+        }
+        FilterAction::Ban => {
+            info!("word filter: ban de '{}'", name);
+            let _ = ctx.bans.ban(
+                &user.name.read(),
+                &user.version,
+                &user.guid,
+                user.external_ip,
+                user.local_ip,
+                user.data_port,
+            );
+            filter_remove_user(ctx, user);
+        }
+    }
+}
+
+/// Remueve un usuario del pool y difunde su PART (mismo patrón que `/kick`).
+fn filter_remove_user(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>) {
+    let part_pkt = outbound::build_part(user);
+    ctx.user_pool.remove(user.id);
+    ctx.stats.on_user_part();
+    for u in ctx.user_pool.users() {
+        if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = u.send(part_pkt.clone());
+        }
+    }
+    ctx.publish_link_event(LinkEvent::Part {
+        origin: None,
+        name: user.name.read().clone(),
+    });
 }
 
 // ============================================================================

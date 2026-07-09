@@ -195,6 +195,16 @@ impl Database {
                 PRIMARY KEY (ip, port)
             );
 
+            CREATE TABLE IF NOT EXISTS greets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS word_filters (
+                pattern TEXT NOT NULL PRIMARY KEY,
+                action INTEGER NOT NULL DEFAULT 0
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -788,6 +798,73 @@ impl Database {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
         }
+    }
+
+    // ========================================================================
+    // Greets (mensajes de bienvenida)
+    // ========================================================================
+
+    /// Inserta un template de greet y retorna su id.
+    pub fn add_greet(&self, template: &str) -> DbResult<i64> {
+        let conn = self.conn.lock();
+        conn.execute("INSERT INTO greets (template) VALUES (?1)", params![template])?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Elimina un greet por id. Retorna `true` si existía.
+    pub fn remove_greet(&self, id: i64) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM greets WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    }
+
+    /// Lista todos los greets como `(id, template)` ordenados por id.
+    pub fn list_greets(&self) -> DbResult<Vec<(i64, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id, template FROM greets ORDER BY id")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ========================================================================
+    // Word filters (filtro de palabras del chat público)
+    // ========================================================================
+
+    /// Inserta o actualiza un patrón de filtro con su acción.
+    /// Retorna `true` si era nuevo.
+    pub fn add_word_filter(&self, pattern: &str, action: u8) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "INSERT INTO word_filters (pattern, action) VALUES (?1, ?2) \
+             ON CONFLICT(pattern) DO UPDATE SET action = ?2",
+            params![pattern, action as i64],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Elimina un filtro por patrón. Retorna `true` si existía.
+    pub fn remove_word_filter(&self, pattern: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM word_filters WHERE pattern = ?1", params![pattern])?;
+        Ok(n > 0)
+    }
+
+    /// Lista los filtros como `(pattern, action)`.
+    pub fn list_word_filters(&self) -> DbResult<Vec<(String, u8)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT pattern, action FROM word_filters ORDER BY pattern")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u8))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 }
 

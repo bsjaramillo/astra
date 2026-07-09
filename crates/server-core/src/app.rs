@@ -11,7 +11,9 @@ use super::accounts::AccountManager;
 use super::bans::BanSystem;
 use super::captcha::CaptchaManager;
 use super::db::Database;
+use super::greets::GreetManager;
 use super::idle::IdleManager;
+use super::word_filter::WordFilterManager;
 use super::security::SecurityManager;
 use super::settings::Settings;
 use super::stats::Stats;
@@ -264,6 +266,10 @@ pub struct AppContext {
     pub vrooms: Arc<VroomManager>,
     /// Manager de idle (detecta transitions active↔idle).
     pub idle: Arc<IdleManager>,
+    /// Manager de greets (mensajes de bienvenida).
+    pub greets: Arc<GreetManager>,
+    /// Manager de filtros de palabras del chat público.
+    pub word_filter: Arc<WordFilterManager>,
     /// Snapshot de nodos UDP conocidos (name, port, user_count).
     /// Actualizado por `UdpNodeManager` cuando se agregan/actualizan nodos.
     pub udp_nodes: parking_lot::RwLock<Vec<(String, u16, u32)>>,
@@ -299,6 +305,8 @@ impl AppContext {
         ));
         let vrooms = Arc::new(VroomManager::new());
         let idle = Arc::new(IdleManager::new());
+        let greets = Arc::new(GreetManager::new(db.clone()));
+        let word_filter = Arc::new(WordFilterManager::new(db.clone()));
         let (link_events, _) = broadcast::channel(1024);
         Self {
             settings: Arc::new(settings),
@@ -312,6 +320,8 @@ impl AppContext {
             captcha,
             vrooms,
             idle,
+            greets,
+            word_filter,
             udp_nodes: parking_lot::RwLock::new(Vec::new()),
             link_servers: parking_lot::RwLock::new(Vec::new()),
             link_users: parking_lot::RwLock::new(Vec::new()),

@@ -106,8 +106,19 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
   tipos de datos realmente usados (`ILevel`, `IFont`, `ILink`) a
   `server-core::types` y se borró el crate (−745 líneas, un crate menos en
   el workspace). También se eliminó `BanSystem::to_iban_vec` (código muerto)
-- [ ] Comandos restantes de sb0t de baja prioridad (greets, scribble admin,
-  proxy admin, captcha admin, filter)
+- [x] **Greets** (mensajes de bienvenida) — `GreetManager` en server-core
+  con persistencia SQLite (tabla `greets`), rotación y sustitución de
+  placeholders (`+n +ip +id +f +v +uc +rn +ut +l`, paridad `Greets.cs`).
+  Comandos `/greets [on|off]`, `/addgreet`, `/remgreet <i>`, `/listgreets`
+  (Admin+). Se envía como PM del bot al entrar, en TCP y WS. Validado E2E
+- [x] **Word filter** — `WordFilterManager` en server-core con persistencia
+  (tabla `word_filters`), matching con comodines `*`/`?` (paridad
+  `WordFilter.cs`) y acciones `block`/`kick`/`ban`. Comandos `/addfilter
+  <word> [accion]`, `/remfilter`, `/listfilters` (Admin+). Aplica a
+  usuarios regulares (Moderator+ exentos) en público TCP y WS. Validado E2E
+- [ ] Otros comandos sb0t de muy baja prioridad no migrados (scribble/proxy/
+  captcha admin, url list, roominfo, whowas): requieren subsistemas que
+  Astra no tiene o son de nicho; fuera de scope salvo pedido explícito
 
 ## Orden de ejecución
 
