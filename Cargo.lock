@@ -266,6 +266,7 @@ name = "astra-web"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "astra-commands",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -275,6 +276,7 @@ dependencies = [
  "http",
  "parking_lot",
  "proto-ares",
+ "rand 0.8.6",
  "scopeguard",
  "serde",
  "serde_json",

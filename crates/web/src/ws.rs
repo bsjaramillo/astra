@@ -77,6 +77,11 @@ async fn handle_ws_connection(
     let request = read_http_request(&mut stream).await?;
     debug!("WS handshake request de {}: {} headers", peer, request.headers.len());
 
+    // 1.5) Rutas del panel de administración (HTTP, no WebSocket).
+    if request.path == "/admin" || request.path.starts_with("/admin/") || request.path.starts_with("/admin?") {
+        return handle_admin_route(&ctx, &mut stream, &request).await;
+    }
+
     // 2) Extraer la clave
     let key = request
         .headers
@@ -120,12 +125,13 @@ async fn handle_ws_connection(
     handle_connection(ctx, stream, peer).await
 }
 
-/// Lee un HTTP request completo (hasta \r\n\r\n).
+/// Lee un HTTP request completo (headers + body si hay Content-Length).
 async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
-    let mut buf = vec![0u8; 8192];
+    let mut buf = vec![0u8; 65536];
     let mut total = 0;
 
-    // Leer hasta encontrar \r\n\r\n
+    // 1) Leer hasta el fin de los headers (\r\n\r\n).
+    let header_end;
     loop {
         let n = stream.read(&mut buf[total..]).await?;
         if n == 0 {
@@ -133,13 +139,36 @@ async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest
         }
         total += n;
         if let Some(idx) = find_double_crlf(&buf[..total]) {
-            let raw = std::str::from_utf8(&buf[..idx])?;
-            return Ok(parse_http_request(raw));
+            header_end = idx;
+            break;
         }
         if total >= buf.len() {
             anyhow::bail!("HTTP request demasiado largo");
         }
     }
+
+    let raw = std::str::from_utf8(&buf[..header_end])?;
+    let mut req = parse_http_request(raw);
+
+    // 2) Si hay Content-Length, leer el body (para POST del panel admin).
+    let content_len: usize = req
+        .header("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if content_len > 0 && content_len <= 1_048_576 {
+        let mut body = buf[header_end..total].to_vec();
+        while body.len() < content_len {
+            let n = stream.read(&mut buf[..]).await?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&buf[..n]);
+        }
+        body.truncate(content_len);
+        req.body = String::from_utf8_lossy(&body).into_owned();
+    }
+
+    Ok(req)
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
@@ -152,11 +181,27 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
 }
 
 struct HttpRequest {
-    #[allow(dead_code)]
     method: String,
-    #[allow(dead_code)]
     path: String,
     headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl HttpRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Token del header `Authorization: Bearer <token>`.
+    fn bearer_token(&self) -> &str {
+        self.header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("")
+            .trim()
+    }
 }
 
 fn parse_http_request(raw: &str) -> HttpRequest {
@@ -180,7 +225,119 @@ fn parse_http_request(raw: &str) -> HttpRequest {
         method,
         path,
         headers,
+        body: String::new(),
     }
+}
+
+/// Rutea las peticiones del panel de administración.
+///
+/// - `GET /admin`           → HTML del panel (login incluido en la página).
+/// - `POST /admin/login`    → `{password}` → `{token}` (o 401).
+/// - `GET  /admin/state`    → snapshot JSON (requiere Bearer token).
+/// - `POST /admin/cmd`      → `{cmd}` → `{output:[...]}` (requiere Bearer token).
+async fn handle_admin_route(
+    ctx: &Arc<AppContext>,
+    stream: &mut TcpStream,
+    req: &HttpRequest,
+) -> anyhow::Result<()> {
+    let path = req.path.split('?').next().unwrap_or("");
+
+    // El panel HTML no requiere token (el login se hace desde la página).
+    if path == "/admin" || path == "/admin/" {
+        send_http_html(stream, crate::panel::ADMIN_HTML).await?;
+        return Ok(());
+    }
+
+    if !crate::admin::is_enabled(ctx) {
+        send_http_json(stream, 403, "{\"error\":\"admin panel disabled (no owner password set)\"}").await?;
+        return Ok(());
+    }
+
+    if path == "/admin/login" && req.method.eq_ignore_ascii_case("POST") {
+        let password = json_field(&req.body, "password").unwrap_or_default();
+        match crate::admin::authenticate(ctx, &password) {
+            Some(token) => {
+                let body = format!("{{\"token\":\"{}\"}}", token);
+                send_http_json(stream, 200, &body).await?;
+            }
+            None => {
+                send_http_json(stream, 401, "{\"error\":\"invalid password\"}").await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // A partir de acá se requiere token válido.
+    if !crate::admin::validate(req.bearer_token()) {
+        send_http_json(stream, 401, "{\"error\":\"unauthorized\"}").await?;
+        return Ok(());
+    }
+
+    match (req.method.as_str(), path) {
+        ("GET", "/admin/state") => {
+            let json = crate::admin::state_json(ctx);
+            send_http_json(stream, 200, &json).await?;
+        }
+        (m, "/admin/cmd") if m.eq_ignore_ascii_case("POST") => {
+            let cmd = json_field(&req.body, "cmd").unwrap_or_default();
+            let lines = crate::admin::run_command(ctx, &cmd);
+            let arr: Vec<String> = lines.iter().map(|l| format!("\"{}\"", json_escape(l))).collect();
+            let body = format!("{{\"output\":[{}]}}", arr.join(","));
+            send_http_json(stream, 200, &body).await?;
+        }
+        _ => {
+            send_http_json(stream, 404, "{\"error\":\"not found\"}").await?;
+        }
+    }
+    Ok(())
+}
+
+/// Extrae un campo string de nivel superior de un JSON simple (sin parser
+/// completo: busca `"campo":"valor"` con escapes básicos).
+fn json_field(body: &str, field: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get(field)?.as_str().map(|s| s.to_string())
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+async fn send_http_json(stream: &mut TcpStream, code: u16, body: &str) -> anyhow::Result<()> {
+    let status = match code {
+        200 => "200 OK",
+        401 => "401 Unauthorized",
+        403 => "403 Forbidden",
+        404 => "404 Not Found",
+        _ => "400 Bad Request",
+    };
+    let response = format!(
+        "HTTP/1.1 {}\r\n\
+         Content-Type: application/json; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        status,
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
 }
 
 fn compute_accept_key(key: &str) -> String {

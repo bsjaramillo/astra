@@ -20,7 +20,9 @@ bot_name = "Astra"
 room_name = "Astra Chat"
 room_topic = "Welcome to Astra"
 
-# Password del owner (hasheada con SHA-1; dejar vacío para deshabilitar).
+# Password del owner. En el chat: /login <password> → nivel Owner.
+# También protege el PANEL DE ADMINISTRACIÓN WEB en http://<host>:<port>/admin
+# (mismo puerto que el server). Si está vacío, el panel queda deshabilitado.
 owner_password = ""
 
 # Permitir registro de cuentas locales.

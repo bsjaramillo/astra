@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 proto-ares = { path = "../proto-ares" }
 server-core = { path = "../server-core" }
+astra-commands = { path = "../commands" }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
@@ -26,4 +27,5 @@ base64 = { workspace = true }
 futures = { workspace = true }
 sha1 = { workspace = true }
 parking_lot = { workspace = true }
+rand = { workspace = true }
 scopeguard = { workspace = true }

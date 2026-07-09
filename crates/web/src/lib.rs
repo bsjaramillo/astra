@@ -24,6 +24,7 @@
 
 #![warn(missing_docs)]
 
+pub mod admin;
 pub mod handler;
 pub mod panel;
 pub mod protocol;
