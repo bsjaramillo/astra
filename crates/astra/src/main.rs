@@ -386,6 +386,25 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // Rotación de URLs de la sala (cada 60s): difunde el siguiente banner
+    // clicable a todos los usuarios conectados (paridad con sb0t Urls.Tick).
+    let url_ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await; // primer tick inmediato: skip
+        loop {
+            interval.tick().await;
+            if let Some(item) = url_ctx.urls.next_url() {
+                let pkt = server_core::outbound::build_url(&item.address, &item.text);
+                for u in url_ctx.user_pool.users() {
+                    if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = u.send(pkt.clone());
+                    }
+                }
+            }
+        }
+    });
+
     // Stats reporter (cada 30s) + cleanup periódico
     let stats_ctx = ctx.clone();
     let stats_scripting = scripting.clone();

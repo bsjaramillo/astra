@@ -75,12 +75,16 @@ pub mod greets;
 /// Filtro de palabras del chat público.
 pub mod word_filter;
 
+/// Enlaces rotados de la sala (URLs).
+pub mod urls;
+
 /// Re-exports comunes.
 pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use greets::{GreetContext, GreetManager};
 pub use room::Room;
 pub use stats::Stats;
 pub use types::{IFont, ILevel, ILink};
+pub use urls::{UrlItem, UrlManager};
 pub use user_pool::{AresUser, UserPool};
 pub use vroom::VroomManager;
 pub use word_filter::{FilterAction, WordFilterManager};

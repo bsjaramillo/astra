@@ -58,6 +58,10 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/addfilter <word> [block|kick|ban] - add a chat word filter",
     "/remfilter <word> - remove a word filter",
     "/listfilters - list word filters",
+    "/url [on|off] - toggle or show rotating room URLs",
+    "/addurl <address> <text> - add a rotating room URL",
+    "/remurl <index> - remove a room URL",
+    "/listurl - list room URLs",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -266,6 +270,22 @@ pub fn dispatch_builtin(
         }
         "listfilters" => {
             handle_listfilters(ctx, user, args);
+            (true, vec![])
+        }
+        "url" => {
+            handle_url(ctx, user, args);
+            (true, vec![])
+        }
+        "addurl" => {
+            handle_addurl(ctx, user, args);
+            (true, vec![])
+        }
+        "remurl" => {
+            handle_remurl(ctx, user, args);
+            (true, vec![])
+        }
+        "listurl" | "listurls" => {
+            handle_listurl(ctx, user, args);
             (true, vec![])
         }
         _ => (false, vec![]),
@@ -1141,6 +1161,92 @@ fn handle_listfilters(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
 }
 
+// ============================================================================
+// URLs rotadas de la sala — requiere Admin+
+// ============================================================================
+
+fn handle_url(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    match args.trim().to_ascii_lowercase().as_str() {
+        "on" => {
+            ctx.urls.set_enabled(true);
+            send_system_line(ctx, user, "Room URLs enabled.");
+        }
+        "off" => {
+            ctx.urls.set_enabled(false);
+            send_system_line(ctx, user, "Room URLs disabled.");
+        }
+        "" => {
+            let state = if ctx.urls.is_enabled() { "on" } else { "off" };
+            send_system_line(
+                ctx,
+                user,
+                &format!("Room URLs are {} ({} configured).", state, ctx.urls.len()),
+            );
+        }
+        _ => send_system_line(ctx, user, "Usage: /url [on|off]"),
+    }
+}
+
+fn handle_addurl(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    // Formato: <address> <text...>  (address es el primer token)
+    let args = args.trim();
+    let Some((address, text)) = args.split_once(char::is_whitespace) else {
+        send_system_line(ctx, user, "Usage: /addurl <address> <text>");
+        return;
+    };
+    let address = address.trim();
+    let text = text.trim();
+    if address.is_empty() || text.is_empty() {
+        send_system_line(ctx, user, "Usage: /addurl <address> <text>");
+        return;
+    }
+    let id = ctx.urls.add(address, text);
+    if id != 0 {
+        send_system_line(ctx, user, &format!("URL #{} added.", ctx.urls.len() - 1));
+    } else {
+        send_system_line(ctx, user, "Failed to persist URL.");
+    }
+}
+
+fn handle_remurl(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let Ok(index) = args.trim().parse::<usize>() else {
+        send_system_line(ctx, user, "Usage: /remurl <index>");
+        return;
+    };
+    match ctx.urls.remove_at(index) {
+        Some(item) => send_system_line(ctx, user, &format!("Removed URL: {}", item.text)),
+        None => send_system_line(ctx, user, "No URL at that index."),
+    }
+}
+
+fn handle_listurl(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let urls = ctx.urls.list();
+    if urls.is_empty() {
+        send_system_line(ctx, user, "No room URLs configured.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Room URLs ({}):", urls.len()));
+    for (i, u) in urls.iter().enumerate() {
+        send_system_line(ctx, user, &format!("{} - {} [{}]", i, u.text, u.address));
+    }
+}
+
 fn can_edit_topic(user: &AresUser) -> bool {
     let level = *user.level.read() as u8;
     level >= ILevel::Moderator as u8
@@ -1945,5 +2051,46 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &alice, "addfilter", "x ban");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
         assert!(ctx.word_filter.is_empty());
+    }
+
+    #[test]
+    fn builtin_url_add_list_remove() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "addurl", "https://astra.dev Astra site");
+        assert_eq!(next_pvt_text(&mut alice_rx), "URL #0 added.");
+        let list = ctx.urls.list();
+        assert_eq!(list[0].address, "https://astra.dev");
+        assert_eq!(list[0].text, "Astra site");
+
+        let _ = dispatch_builtin(&ctx, &alice, "listurl", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room URLs (1):");
+        assert_eq!(next_pvt_text(&mut alice_rx), "0 - Astra site [https://astra.dev]");
+
+        let _ = dispatch_builtin(&ctx, &alice, "remurl", "0");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Removed URL: Astra site");
+        assert!(ctx.urls.is_empty());
+    }
+
+    #[test]
+    fn builtin_url_toggle_and_admin_gate() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        // Moderator no alcanza
+        let _ = dispatch_builtin(&ctx, &alice, "addurl", "u t");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
+
+        *alice.level.write() = ILevel::Admin;
+        let _ = dispatch_builtin(&ctx, &alice, "url", "off");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room URLs disabled.");
+        assert!(!ctx.urls.is_enabled());
+        let _ = dispatch_builtin(&ctx, &alice, "url", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room URLs are off (0 configured).");
     }
 }

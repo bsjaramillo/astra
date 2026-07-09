@@ -205,6 +205,12 @@ impl Database {
                 action INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS urls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                text TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -860,6 +866,39 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u8))
         })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ========================================================================
+    // URLs (enlaces rotados de la sala)
+    // ========================================================================
+
+    /// Inserta una URL y retorna su id.
+    pub fn add_url(&self, address: &str, text: &str) -> DbResult<i64> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO urls (address, text) VALUES (?1, ?2)",
+            params![address, text],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Elimina una URL por id. Retorna `true` si existía.
+    pub fn remove_url(&self, id: i64) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM urls WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    }
+
+    /// Lista las URLs como `(id, address, text)` ordenadas por id.
+    pub fn list_urls(&self) -> DbResult<Vec<(i64, String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id, address, text FROM urls ORDER BY id")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
