@@ -23,3 +23,7 @@ parking_lot = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 sha1 = { workspace = true }
+md-5 = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+rand = { workspace = true }
