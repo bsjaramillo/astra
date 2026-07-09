@@ -154,3 +154,41 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
 | 4 | D (WebSocket) | Medio | Bajo |
 | 5 | E (Link) | Medio — solo importa multi-servidor | Alto |
 | 6 | F (Tooling) | Bajo | Medio |
+
+---
+
+## Auditoría de paridad sb0t (revisión 2026-07-09)
+
+Revisión exhaustiva sb0t↔Astra + implementación de gaps encontrados.
+
+### Corregido
+
+- **Wire TCP compatible con Ares real** (crítico). Antes Astra usaba framing
+  propio (`[op][payload]`, strings i32), incompatible: ningún cliente Ares de
+  escritorio podía conectar. Ahora habla el wire real:
+  - Framing `[size:u16 LE][op][payload]` (lectura con acumulación de bytes,
+    escritura con prefijo en la writer task de TCP).
+  - Strings null-terminated (`read_string_nt`/`write_string_nt` en proto-ares)
+    para clientes sin cifrar. link/udp mantienen su encoding.
+  - Verificado E2E con login Ares framed + público con eco.
+- **Protocolo WebSocket ib0t/sb0t** (commit previo): clientes web reales
+  (ib0t/inbizio) conectan; secuencia de estado inicial + broadcast traducido.
+- **Voice chat relay**: wrapper ADVANCED_FEATURES (250) + VcFirst/Chunk público
+  y privado (paridad TCPAdvancedProcessor).
+- **Opcodes antes ignorados**: ClientCommand, AUTHLOGIN/AUTHREGISTER (→ /login,
+  /register), AUTOLOGIN (auto-login por GUID).
+- **Comandos**: kill, ban10/ban60 (bans temporales), whisper, shout, pmblock
+  (+ flag pm_blocked), rempassword, unecho, unkiddy, viewfilter, y aliases
+  planos de sb0t (addwordfilter/addjoinfilter/addfilefilter + rem*).
+
+### Diferido (requiere infraestructura mayor)
+
+- **Cifrado del cliente Ares** (crypto=250): necesita el handshake AES/RSA de
+  Ares (CryptoKey). Hoy solo se soportan clientes sin cifrar (null-terminated).
+- **Comandos host\*** (hostban/hostkick/hostkill/hostmuzzle/hostclone/hostcban/
+  hostunban/hostunmuzzle): operan sobre toda la red enlazada; requieren
+  propagación de acciones admin por el hub.
+- **jsmsg**: mensaje desde contexto de script; requiere integración scripting.
+- **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
+  `AddShare`/`RemShare` no se sirven (feature P2P grande, fuera de alcance de un
+  servidor de chat). SHARING se sigue anunciando por el browse.
