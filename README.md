@@ -2,63 +2,168 @@
 
 > Servidor de chat compatible con **Ares Galaxy**, escrito en **Rust**.
 
-Astra es un servidor de chat multiplataforma que implementa el protocolo binario de Ares Galaxy. Es una reescritura moderna de [sb0t](https://github.com/.../sb0t) (C#/.NET Framework), enfocada en:
+Astra es un servidor de chat multiplataforma que implementa el protocolo binario
+de Ares Galaxy. Es una reescritura moderna de sb0t (C#/.NET Framework), con
+**paridad funcional completa** — mismo protocolo, misma seguridad, los mismos
+~125 comandos, y un panel de administración web que reemplaza la GUI Windows-only
+del original.
 
-- **Compatibilidad de protocolo**: cualquier cliente Ares oficial puede conectarse sin cambios.
+- **Compatibilidad de protocolo**: cualquier cliente Ares oficial se conecta sin cambios.
 - **Multiplataforma real**: Linux, Windows, macOS, FreeBSD, Raspberry Pi (ARM).
-- **Seguridad por construcción**: memory safety garantizada por el compilador.
-- **Rendimiento**: un solo binario estático con miles de conexiones concurrentes.
-- **Despliegue simple**: un solo puerto lógico para TCP, WS, Link y UDP.
+- **Seguridad por construcción**: memory safety garantizada por el compilador +
+  5 capas anti-DDoS + captcha opcional.
+- **Despliegue simple**: un solo puerto lógico para TCP (Ares), WebSocket (web),
+  Link (multi-servidor) y UDP (room search).
+- **Un binario estático**, sin runtime, con miles de conexiones concurrentes.
 
-## Estado del proyecto
+## Qué incluye
 
-🚧 **En desarrollo activo** — ver [ROADMAP.md](./ROADMAP.md) para el plan completo.
+- Protocolo Ares completo (TCP + UDP room search).
+- Login, UserPool, persistencia SQLite (bans, cuentas, historial).
+- 5 capas de defensa anti-DDoS + captcha para IPs nuevas.
+- Chat: público, emote, PM, join/part, topic, vrooms.
+- **~125 comandos** de moderación/administración (paridad con sb0t).
+- Clientes web (WebSocket / ib0t / HTML5) en el mismo puerto.
+- **Panel de administración web** (`/admin`) con auth por owner password.
+- Motor de scripting JS (boa_engine) para plugins de sala.
+- Link Hub/Leaf entre servidores con **cifrado AES-256** (paridad sb0t).
+- GeoIP/ASN opcional (MaxMind GeoLite2 o DB-IP Lite) para `/trace` y `asnban`.
 
-**Fase actual**: setup inicial completo, primer binario funcional (un puerto TCP/UDP/WS/Link y logins básicos).
+---
 
-## Compilar y ejecutar
+## Inicio rápido
+
+### Opción A — Docker (lo más simple)
 
 ```bash
-# Requisitos: Rust 1.75+
-cargo --version
-
-# Compilar
-cargo build --release
-
-# Ejecutar con configuración por defecto (puerto 5009)
-./target/release/astra
-
-# Ejecutar con config custom
-./target/release/astra --port 6000 --config mi-sala.toml
-
-# Modo verbose
-./target/release/astra --verbose
+git clone <repo> && cd astra
+cp astra.toml.example astra.toml   # editá room_name y owner_password
+docker compose up -d
 ```
+
+El server queda escuchando en el puerto **5009** (TCP + UDP).
+
+### Opción B — Binario nativo
+
+```bash
+# Requiere Rust 1.75+
+cargo build --release
+cp astra.toml.example astra.toml   # editá room_name y owner_password
+./target/release/astra --config astra.toml
+```
+
+---
+
+## Guía para crear tu sala
+
+1. **Configurá** `astra.toml` (copiado de `astra.toml.example`). Lo mínimo:
+   ```toml
+   room_name = "Mi Sala"
+   bot_name  = "MiBot"
+   owner_password = "algo-secreto"   # te da nivel Owner y protege /admin
+   ```
+   > Si `owner_password` queda vacío, el panel de administración se deshabilita.
+
+2. **Arrancá** el server:
+   ```bash
+   ./target/release/astra --config astra.toml
+   ```
+
+3. **Abrí el puerto** 5009 (TCP y UDP) en tu router/firewall para que otros entren:
+   ```bash
+   sudo ufw allow 5009/tcp && sudo ufw allow 5009/udp
+   ```
+   Tu IP pública (ej. `curl ifconfig.me`) es la que compartís.
+
+4. **Administrá**, de dos formas equivalentes:
+   - **Panel web**: `http://<tu-ip>:5009/admin` → ingresá el `owner_password`.
+     Gestión de usuarios (ban/kick/muzzle/niveles), bans, flags de sala, greets,
+     filtros, edición del config, y una consola de comandos.
+   - **Comandos en el chat**: `/login <owner_password>` te hace Owner; después
+     `/topic`, `/ban`, `/grant <nick> moderator`, `/help`, etc.
+
+5. **La gente entra**:
+   - **Cliente Ares Galaxy**: agregar sala por dirección → `<tu-ip>:5009`.
+   - **Navegador**: `http://<tu-ip>:5009/` (cliente de chat web básico).
+   - Si dejás `roomsearch = true`, la sala se anuncia en la red de descubrimiento UDP.
+
+---
+
+## Despliegue con HTTPS (reverse proxy)
+
+Astra multiplexa el protocolo binario de Ares y el HTTP/WebSocket **en el mismo
+puerto**. Un reverse proxy con TLS solo puede cubrir la parte **web** (cliente
+navegador + panel `/admin`); los clientes **Ares** usan TCP binario plano y se
+conectan directo al `:5009` (el protocolo Ares no soporta TLS).
+
+Para dar **HTTPS al panel de admin y al cliente web** hay un setup con [Caddy](https://caddyserver.com)
+(certificados automáticos de Let's Encrypt) listo para usar:
+
+```bash
+# 1. Editá el Caddyfile y poné tu dominio real (chat.midominio.com).
+# 2. Apuntá el DNS de ese dominio a tu servidor.
+# 3. Levantá todo:
+docker compose -f docker-compose.tls.yml up -d
+```
+
+Con eso:
+- `https://chat.midominio.com/`      → cliente web (TLS).
+- `https://chat.midominio.com/admin` → panel de administración (TLS).
+- `<tu-ip>:5009`                      → clientes Ares (directo, sin TLS).
+
+Ver [`Caddyfile`](./Caddyfile) y [`docker-compose.tls.yml`](./docker-compose.tls.yml).
+
+---
+
+## Configuración
+
+Todos los campos están documentados en [`astra.toml.example`](./astra.toml.example):
+puerto, nombre de sala, `owner_password`, capas de seguridad anti-DDoS, captcha,
+trusted leaves del Link, rutas de bases GeoIP, etc.
+
+Flags de CLI:
+
+```bash
+astra --config astra.toml       # archivo de config
+astra --port 6000               # puerto (sobreescribe el toml)
+astra --data-dir ./data         # DB, logs, seed, bases GeoIP
+astra --link-server             # modo hub
+astra --link-client <ip:port>   # modo leaf
+astra --no-web / --no-roomsearch
+astra seed-refresh              # re-descarga la lista de salas
+```
+
+---
 
 ## Tests
 
 ```bash
-cargo test              # todos los tests
-cargo test -p proto-ares  # solo los del protocolo
+cargo test              # toda la suite
+cargo test -p proto-ares  # solo el protocolo
+cargo bench -p proto-ares # benchmarks
 ```
+
+---
 
 ## Estructura
 
 ```
 astra/
 ├── crates/
-│   ├── proto-ares/    # Protocolo binario (PacketReader, PacketWriter, TcpMsg, UdpMsg)
-│   ├── iconnect/      # Traits públicos (IUser, IRoom, IChannel, IStats, ...)
-│   ├── server-core/   # UserPool, Room, Stats, Settings, BanSystem, Captcha
-│   ├── astra-udp/     # Listener UDP (room search)
-│   ├── astra-captcha/ # Generación de captchas
-│   ├── astra-commands/# 50+ comandos slash
-│   ├── astra-scripting/ # Motor JS (boa_engine)
-│   ├── astra-web/     # WebSockets + panel admin (mismo puerto que TCP)
-│   └── astra/         # Binario principal (CLI)
-├── docs/
-├── Cargo.toml         # Workspace
-└── ROADMAP.md
+│   ├── proto-ares/      # Protocolo binario (PacketReader/Writer, TcpMsg, UdpMsg)
+│   ├── server-core/     # UserPool, Settings, BanSystem, Captcha, managers, GeoIP
+│   ├── udp/             # Room search UDP
+│   ├── captcha/         # Generación de captchas
+│   ├── commands/        # ~125 comandos slash
+│   ├── scripting/       # Motor JS (boa_engine)
+│   ├── web/             # WebSockets + panel de administración
+│   ├── link/            # Link Hub/Leaf con cifrado AES-256
+│   └── astra/           # Binario principal (CLI)
+├── docs/                # ARCHITECTURE, PROTOCOL, SECURITY, ROADMAP-V2
+├── astra.toml.example
+├── docker-compose.yml       # despliegue simple
+├── docker-compose.tls.yml   # despliegue con HTTPS (Caddy)
+└── Caddyfile
 ```
 
 ## Diferencias con el sb0t original
@@ -67,11 +172,12 @@ astra/
 |---|---|---|
 | Plataforma | Solo Windows | Linux, Windows, macOS, ARM |
 | Runtime | .NET Framework 4.7.2 | Ninguno (binario estático) |
-| Concurrencia | Thread + Thread.Sleep(25ms) | tokio async |
+| Concurrencia | Thread + `Thread.Sleep(25ms)` | tokio async |
 | Memoria | GC + posibles fugas | Memory-safe por construcción |
 | Motor JS | Jurassic (vendoreado) | boa_engine (puro Rust) |
-| GUI | WPF + WinForms | Web panel (en desarrollo) |
-| Build | msbuild + Visual Studio | cargo |
+| Administración | GUI WPF (Windows) | Panel web multiplataforma (`/admin`) |
+| Link | AES + trusted leaves | AES-256 + trusted leaves (paridad) |
+| Build | msbuild + Visual Studio | `cargo` |
 
 ## Licencia
 

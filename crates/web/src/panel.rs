@@ -25,7 +25,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <button onclick="send()">Send</button>
 
 <script>
-const ws = new WebSocket("ws://" + location.host + "/");
+const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/");
 const msgs = document.getElementById("msgs");
 const input = document.getElementById("input");
 

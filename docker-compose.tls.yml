@@ -1,0 +1,50 @@
+# docker-compose.tls.yml — Astra + Caddy (HTTPS automático para la web/admin)
+#
+# Uso:
+#   1. Editá el Caddyfile: poné tu dominio real y apuntá su DNS a este host.
+#   2. docker compose -f docker-compose.tls.yml up -d
+#
+# Resultado:
+#   https://tu-dominio/       -> cliente web (TLS, vía Caddy)
+#   https://tu-dominio/admin  -> panel de administración (TLS, vía Caddy)
+#   <tu-ip>:5009 (TCP/UDP)    -> clientes Ares (directo, sin TLS por protocolo)
+
+services:
+  astra:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: astra:dev
+    container_name: astra-server
+    restart: unless-stopped
+    # 5009 se publica para que los clientes Ares se conecten directo.
+    # La superficie web NO se publica acá: entra por Caddy (abajo).
+    ports:
+      - "5009:5009"       # TCP clientes Ares
+      - "5009:5009/udp"   # UDP room search
+    volumes:
+      - astra-data:/app/data
+      - ./astra.toml:/app/astra.toml:ro
+    command: ["/app/astra", "--config", "/app/astra.toml"]
+    environment:
+      RUST_LOG: info
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: astra-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"     # ACME HTTP-01 + redirect a HTTPS
+      - "443:443"   # HTTPS
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - astra
+
+volumes:
+  astra-data:
+    name: astra-data
+  caddy-data:
+  caddy-config:

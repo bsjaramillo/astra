@@ -1,0 +1,21 @@
+# Caddy — reverse proxy con HTTPS automático para la superficie web de Astra
+# (cliente navegador en / y panel de administración en /admin).
+#
+# IMPORTANTE:
+#  - Reemplazá `chat.midominio.com` por tu dominio real y apuntá su DNS a este
+#    servidor. Caddy obtiene el certificado TLS de Let's Encrypt solo.
+#  - Esto NO cubre a los clientes Ares: ellos hablan TCP binario y se conectan
+#    directo al puerto 5009 (el protocolo Ares no soporta TLS).
+#
+# Para pruebas locales sin dominio, reemplazá la primera línea por:
+#     localhost {
+# y Caddy usará un certificado interno autofirmado.
+
+chat.midominio.com {
+	# Proxea toda la superficie HTTP/WebSocket a Astra. Caddy maneja el
+	# upgrade a WebSocket automáticamente, así que el cliente web (ws) y las
+	# rutas del panel (/admin, /admin/state, /admin/cmd) funcionan por HTTPS.
+	reverse_proxy astra:5009
+
+	encode gzip
+}
