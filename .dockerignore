@@ -37,8 +37,8 @@ tests/
 **/*.test.rs
 **/test_*.rs
 
-# Datos locales del dev (se monta como volume en runtime)
-data/seed_rooms.json
+# Datos locales del dev (la DB se crea en runtime; el seed_rooms.json SÍ se
+# incluye en la imagen para bootstrapear el room search UDP).
 data/astra.db
 data/astra.db-journal
 data/astra.db-wal
