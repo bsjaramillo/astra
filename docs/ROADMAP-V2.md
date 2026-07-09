@@ -197,12 +197,24 @@ Handshake AES completo (paridad `Crypto.cs` / `TCPOutbound.CryptoKey`):
   LoginAck/features/topic y hace round-trip de público cifrado. Sin regresión
   en clientes sin cifrar ni WS.
 
-### Diferido (requiere infraestructura mayor)
+### Comandos host* + propagación por link — IMPLEMENTADO
 
-- **Comandos host\*** (hostban/hostkick/hostkill/hostmuzzle/hostclone/hostcban/
-  hostunban/hostunmuzzle): operan sobre toda la red enlazada; requieren
-  propagación de acciones admin por el hub.
-- **jsmsg**: mensaje desde contexto de script; requiere integración scripting.
+- hostban/hostkick/hostkill/hostmuzzle/hostunmuzzle/hostunban/hostclone/hostcban
+  con gate Host (= Owner en Astra). Aplican local y se propagan por la red:
+  `LinkEvent::AdminAction` → wire `LinkMsg::Admin` (`[kind:u8][target:str]`,
+  cifrado AES del link) → cada servidor lo aplica con
+  `AppContext::apply_admin_action`; el hub hace fanout a los demás leaves con
+  `origin` (sin eco). Verificado E2E con hub+leaf reales: `/hostmuzzle` desde
+  el hub silenció a un usuario del leaf.
+- hostcban limpia bans + range bans + muzzles + efectos de texto (paridad
+  HostCBans). `RangeBanManager::clear()` nuevo.
+- **jsmsg**: no era gap — nunca fue built-in en sb0t; rutea al scripting
+  (`ScriptEvent::Command` → onCommand), igual que Astra ya hacía.
+- **loadtemplate**: mensaje honesto (Astra usa mensajes built-in; no hay
+  plantillas que recargar). Era el último stub.
+
+### Diferido (fuera de alcance)
+
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
   `AddShare`/`RemShare` no se sirven (feature P2P grande, fuera de alcance de un
   servidor de chat). SHARING se sigue anunciando por el browse.
