@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 proto-ares = { path = "../proto-ares" }
-iconnect = { path = "../iconnect" }
 server-core = { path = "../server-core" }
 astra-udp = { path = "../udp" }
 astra-captcha = { path = "../captcha" }

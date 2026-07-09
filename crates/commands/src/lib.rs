@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::net::IpAddr;
 
 use server_core::{outbound, AppContext, AresUser};
-use iconnect::ILevel;
+use server_core::ILevel;
 
 use astra_scripting::{ScriptEvent, ScriptHandle};
 

@@ -8,13 +8,12 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
-use iconnect::{IFont, ILevel, ILink};
+use crate::types::{IFont, ILevel, ILink};
 
 /// Estructura interna de un usuario Ares (`AresUser`).
 ///
-/// Es la implementación concreta de `iconnect::IUser` que mantiene el
-/// estado del usuario mientras está conectado. Se comparte entre el
-/// bucle de red y los handlers de mensajes.
+/// Mantiene el estado del usuario mientras está conectado. Se comparte
+/// entre el bucle de red y los handlers de mensajes.
 pub struct AresUser {
     /// ID de sesión (único dentro del servidor).
     pub id: u16,

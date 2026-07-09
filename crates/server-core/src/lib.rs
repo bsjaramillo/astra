@@ -66,9 +66,13 @@ pub mod outbound;
 /// Utilidades de tiempo.
 pub mod time;
 
+/// Tipos de datos básicos del usuario (ILevel, IFont, ILink).
+pub mod types;
+
 /// Re-exports comunes.
 pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use room::Room;
 pub use stats::Stats;
+pub use types::{IFont, ILevel, ILink};
 pub use user_pool::{AresUser, UserPool};
 pub use vroom::VroomManager;

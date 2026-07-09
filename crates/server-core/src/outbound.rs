@@ -117,15 +117,15 @@ pub fn build_userlist_item(user: &AresUser) -> Bytes {
 }
 
 /// Convierte un ILevel a su valor numérico (u8).
-fn level_to_u8(level: &iconnect::ILevel) -> u8 {
+fn level_to_u8(level: &crate::types::ILevel) -> u8 {
     match level {
-        iconnect::ILevel::Anonymous => 0,
-        iconnect::ILevel::Regular => 1,
-        iconnect::ILevel::Voice => 2,
-        iconnect::ILevel::Moderator => 50,
-        iconnect::ILevel::Admin => 80,
-        iconnect::ILevel::Owner => 100,
-        iconnect::ILevel::System => 255,
+        crate::types::ILevel::Anonymous => 0,
+        crate::types::ILevel::Regular => 1,
+        crate::types::ILevel::Voice => 2,
+        crate::types::ILevel::Moderator => 50,
+        crate::types::ILevel::Admin => 80,
+        crate::types::ILevel::Owner => 100,
+        crate::types::ILevel::System => 255,
     }
 }
 

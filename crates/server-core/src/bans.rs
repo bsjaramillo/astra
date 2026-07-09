@@ -6,8 +6,6 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use iconnect::IBan;
-
 use crate::db::{BanRecord, Database};
 
 /// Sistema de bans con cache en memoria + persistencia.
@@ -184,21 +182,6 @@ impl BanSystem {
         for b in cache.iter() {
             f(b);
         }
-    }
-
-    /// Convierte los bans al formato `iconnect::IBan`.
-    pub fn to_iban_vec(&self) -> Vec<IBan> {
-        let cache = self.cache.read();
-        cache
-            .iter()
-            .map(|b| IBan {
-                target: b.guid.iter().map(|x| format!("{:02x}", x)).collect::<String>(),
-                reason: String::new(),
-                timestamp: crate::time::unix_time(),
-                duration_secs: 0,
-                is_ip: false,
-            })
-            .collect()
     }
 
     /// Cantidad de bans activos.

@@ -153,7 +153,6 @@ dependencies = [
  "chrono",
  "clap",
  "config",
- "iconnect",
  "proto-ares",
  "rand 0.8.6",
  "reqwest",
@@ -185,7 +184,6 @@ dependencies = [
  "astra-scripting",
  "bytes",
  "chrono",
- "iconnect",
  "proto-ares",
  "rand 0.8.6",
  "regex",
@@ -206,7 +204,6 @@ dependencies = [
  "cbc",
  "chrono",
  "futures",
- "iconnect",
  "md-5",
  "parking_lot",
  "proto-ares",
@@ -231,7 +228,6 @@ dependencies = [
  "boa_gc",
  "bytes",
  "chrono",
- "iconnect",
  "md-5",
  "parking_lot",
  "proto-ares",
@@ -254,7 +250,6 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
- "iconnect",
  "parking_lot",
  "proto-ares",
  "rand 0.8.6",
@@ -277,7 +272,6 @@ dependencies = [
  "chrono",
  "futures",
  "http",
- "iconnect",
  "parking_lot",
  "proto-ares",
  "scopeguard",
@@ -1467,18 +1461,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "iconnect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "thiserror 1.0.69",
- "uuid",
 ]
 
 [[package]]
@@ -2759,7 +2741,6 @@ dependencies = [
  "chrono",
  "futures",
  "hmac",
- "iconnect",
  "md-5",
  "once_cell",
  "parking_lot",

@@ -440,7 +440,7 @@ async fn send_initial_state(
 
     // OpChange (este usuario)
     let level = *user.level.read();
-    let is_op = level as u8 >= iconnect::ILevel::Moderator as u8;
+    let is_op = level as u8 >= server_core::ILevel::Moderator as u8;
     let _ = user.send(outbound::build_opchange(is_op));
 }
 

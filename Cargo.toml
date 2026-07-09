@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/proto-ares",
-    "crates/iconnect",
     "crates/server-core",
     "crates/udp",
     "crates/captcha",

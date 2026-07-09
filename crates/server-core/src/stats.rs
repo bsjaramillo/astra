@@ -3,9 +3,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
-/// Estadísticas del servidor.
-///
-/// Implementa `iconnect::IStats`.
+/// Estadísticas del servidor (uptime, picos, totales).
 pub struct Stats {
     /// Pico de usuarios simultáneos.
     peak_users: AtomicU32,

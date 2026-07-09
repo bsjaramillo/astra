@@ -98,9 +98,14 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
   `Entities_list` lee el snapshot `ctx.udp_nodes`, y `Link_createLink`/
   `Link_disconnect`/`Link_kickHub` publican al bus `LinkRequest` que tiene
   consumer real en `main.rs` (el item venía del audit desactualizado)
-- [ ] Decidir `iconnect`: implementar los 27 traits o reducir el crate a
-  los tipos realmente usados (`ILevel`) — hoy son 730 líneas sin
-  consumidores. **Decisión del dueño del proyecto**
+- [x] `iconnect` **eliminado** (2026-07-08). En sb0t `iconnect` era el ABI
+  de plugins de terceros (los proyectos `commands`/`scripting` dependían
+  solo de él), pero Astra no expone plugins binarios —la extensibilidad es
+  vía scripting JS embebido— así que los 27 traits nunca se implementaron.
+  Decisión del dueño: sin soporte de plugins de terceros. Se movieron los 3
+  tipos de datos realmente usados (`ILevel`, `IFont`, `ILink`) a
+  `server-core::types` y se borró el crate (−745 líneas, un crate menos en
+  el workspace). También se eliminó `BanSystem::to_iban_vec` (código muerto)
 - [ ] Comandos restantes de sb0t de baja prioridad (greets, scribble admin,
   proxy admin, captcha admin, filter)
 
