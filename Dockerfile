@@ -29,8 +29,11 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 WORKDIR /app
 
 # Binario + datos iniciales (scripts de ejemplo, etc.).
+# El data dir se copia como `nonroot` (UID 65532) para que el usuario del
+# contenedor pueda escribir la DB SQLite. Al montar un volumen vacío encima,
+# Docker hereda esta propiedad, así que el volumen queda escribible.
 COPY --from=builder /app/target/release/astra /app/astra
-COPY data /app/data
+COPY --chown=65532:65532 data /app/data
 
 # Astra multiplexa TCP (Ares), WebSocket (web/admin), Link y UDP en un solo
 # puerto lógico (5009 por defecto).
