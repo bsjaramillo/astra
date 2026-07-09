@@ -306,20 +306,20 @@ async fn ws_handshake_login(
     let (ident, args) = match protocol::parse_incoming(&text) {
         Some(p) => p,
         None => {
-            warn!("ws: primer frame no parseable de {}", peer);
+            warn!("ws: primer frame no parseable de {}: {:?}", peer, text);
             return Ok(None);
         }
     };
 
     if !matches!(ident, "LOGIN" | "INBIZIO_LOGIN") {
-        warn!("ws: primer frame no es login: {} de {}", ident, peer);
+        warn!("ws: primer frame no es login: ident={:?} de {}: {:?}", ident, peer, text);
         return Ok(None);
     }
 
     let login = match protocol::parse_login(args) {
         Some(l) => l,
         None => {
-            warn!("ws: login malformado de {}", peer);
+            warn!("ws: login malformado de {}: args={:?}", peer, args);
             return Ok(None);
         }
     };
