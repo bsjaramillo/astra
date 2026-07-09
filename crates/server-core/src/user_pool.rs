@@ -142,6 +142,9 @@ pub struct AresUser {
     /// Inbizier flags.
     pub inbizier_web: bool,
     pub inbizier_mobile: bool,
+    /// Bloqueo de PMs entrantes (`/pmblock`). Si está activo, los PMs de
+    /// usuarios regulares no se entregan (Moderator+ siempre pasan).
+    pub pm_blocked: AtomicBool,
     /// Cache de ASN.
     pub asn_cache: parking_lot::RwLock<Option<u32>>,
     /// Canal de envío al cliente (None si no está conectado).
@@ -220,6 +223,7 @@ impl AresUser {
             last_scribble: 0,
             inbizier_web: false,
             inbizier_mobile: false,
+            pm_blocked: AtomicBool::new(false),
             asn_cache: parking_lot::RwLock::new(None),
             sender: None,
             ws_text_sender: None,

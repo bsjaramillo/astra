@@ -552,6 +552,31 @@ async fn dispatch_message(
         TcpMsg::PersonalMessage => {
             handle_personal_message(ctx, user, &pkt.data[1..]).await;
         }
+        TcpMsg::ClientCommand => {
+            // Canal de comandos de Ares (sin '/'). Se rutea a los built-ins.
+            let mut r = PacketReader::new(&pkt.data[1..]);
+            if let Ok(cmd_text) = r.read_string() {
+                route_command_text(ctx, user, &scripting, &cmd_text);
+            }
+        }
+        TcpMsg::ClientAuthLogin => {
+            // Atajo de protocolo para `/login <password>` (sb0t AUTHLOGIN).
+            let mut r = PacketReader::new(&pkt.data[1..]);
+            if let Ok(pw) = r.read_string() {
+                route_command_text(ctx, user, &scripting, &format!("login {}", pw));
+            }
+        }
+        TcpMsg::ClientAuthRegister => {
+            // Atajo de protocolo para `/register <password>` (sb0t AUTHREGISTER).
+            let mut r = PacketReader::new(&pkt.data[1..]);
+            if let Ok(pw) = r.read_string() {
+                route_command_text(ctx, user, &scripting, &format!("register {}", pw));
+            }
+        }
+        TcpMsg::ClientAutologin => {
+            // Auto-login por GUID: restaura el nivel de la cuenta asociada.
+            handle_autologin(ctx, user);
+        }
         TcpMsg::ClientBrowse => {
             publish_raw_link(ctx, LINK_MSG_BROWSE, &pkt.data[1..]);
             // El payload de ClientBrowse es un string Ares (null-terminated) con
@@ -598,6 +623,42 @@ async fn dispatch_message(
         }
     }
     Ok(())
+}
+
+/// Rutea un texto de comando (con o sin '/') a los built-ins, disparando los
+/// eventos de scripting que genere. Usado por el opcode `ClientCommand` y los
+/// atajos AUTHLOGIN/AUTHREGISTER.
+fn route_command_text(
+    ctx: &Arc<AppContext>,
+    user: &Arc<server_core::user_pool::AresUser>,
+    scripting: &ScriptHandle,
+    text: &str,
+) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let slashed = if text.starts_with('/') {
+        text.to_string()
+    } else {
+        format!("/{}", text)
+    };
+    if let Some((cmd, args)) = astra_commands::parse_command(&slashed) {
+        let (handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
+        if handled {
+            for ev in events {
+                scripting.dispatch(ev);
+            }
+            return;
+        }
+        let name = user.name.read().clone();
+        astra_commands::dispatch(ctx, scripting, &name, cmd, args);
+    }
+}
+
+/// Maneja el opcode AUTOLOGIN: restaura el nivel de la cuenta asociada al GUID.
+fn handle_autologin(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>) {
+    let _ = astra_commands::dispatch_autologin(ctx, user);
 }
 
 fn publish_raw_link(ctx: &AppContext, msg: u8, payload: &[u8]) {
@@ -819,11 +880,16 @@ async fn handle_pvt(
             debug!("onPMBefore canceló PM de '{}' a '{}'", from, target_name);
             return;
         }
-        if target
-            .ignore_list
-            .read()
-            .iter()
-            .any(|entry| entry.eq_ignore_ascii_case(&from))
+        // /pmblock: si el target bloquea PMs y el emisor es regular, se trata
+        // como ignore (Moderator+ siempre pasan).
+        let blocked_by_pmblock = target.pm_blocked.load(std::sync::atomic::Ordering::Relaxed)
+            && (*user.level.read() as u8) < server_core::ILevel::Moderator as u8;
+        if blocked_by_pmblock
+            || target
+                .ignore_list
+                .read()
+                .iter()
+                .any(|entry| entry.eq_ignore_ascii_case(&from))
         {
             let mut w = PacketWriter::with_msg(TcpMsg::ServerIsIgnoringYou);
             w.write_string(&target_name).ok();

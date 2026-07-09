@@ -246,6 +246,14 @@ pub fn dispatch_builtin(
             };
             (true, events)
         }
+        "ban10" => {
+            handle_ban_timed(ctx, user, args, 600);
+            (true, vec![])
+        }
+        "ban60" => {
+            handle_ban_timed(ctx, user, args, 3600);
+            (true, vec![])
+        }
         "banlist" => {
             handle_banlist(ctx, user, args);
             (true, vec![])
@@ -254,7 +262,7 @@ pub fn dispatch_builtin(
             handle_whois(ctx, user, args);
             (true, vec![])
         }
-        "kick" => {
+        "kick" | "kill" => {
             handle_kick(ctx, user, args);
             (true, vec![])
         }
@@ -286,8 +294,16 @@ pub fn dispatch_builtin(
             handle_register(ctx, user, args);
             (true, vec![])
         }
-        "unregister" => {
+        "unregister" | "rempassword" => {
             handle_unregister(ctx, user, args);
+            (true, vec![])
+        }
+        "whisper" => {
+            handle_whisper(ctx, user, args);
+            (true, vec![])
+        }
+        "pmblock" => {
+            handle_pmblock(ctx, user, args);
             (true, vec![])
         }
         "login" => {
@@ -471,6 +487,19 @@ pub fn dispatch_builtin(
             handle_kiddy(ctx, user, args);
             (true, vec![])
         }
+        "unkiddy" => {
+            handle_unkiddy(ctx, user, args);
+            (true, vec![])
+        }
+        "unecho" => {
+            // sb0t: limpia el echo del target (texto vacío = clear).
+            handle_echo(ctx, user, args.trim());
+            (true, vec![])
+        }
+        "shout" => {
+            handle_announce(ctx, user, args);
+            (true, vec![])
+        }
         "mtimeout" => {
             handle_mtimeout(ctx, user, args);
             (true, vec![])
@@ -622,12 +651,37 @@ pub fn dispatch_builtin(
             handle_banlist(ctx, user, args);
             (true, vec![])
         }
-        "wordfilters" => {
+        "wordfilters" | "viewfilter" => {
             handle_listfilters(ctx, user, args);
             (true, vec![])
         }
         "filter" => {
             handle_filter_dispatch(ctx, user, args);
+            (true, vec![])
+        }
+        // Aliases planos de sb0t para los filtros (Astra usa subcomandos).
+        "addwordfilter" => {
+            handle_addfilter(ctx, user, args);
+            (true, vec![])
+        }
+        "remwordfilter" => {
+            handle_remfilter(ctx, user, args);
+            (true, vec![])
+        }
+        "addjoinfilter" => {
+            handle_name_filter(ctx, user, &format!("add {}", args.trim()), true);
+            (true, vec![])
+        }
+        "remjoinfilter" => {
+            handle_name_filter(ctx, user, &format!("del {}", args.trim()), true);
+            (true, vec![])
+        }
+        "addfilefilter" => {
+            handle_name_filter(ctx, user, &format!("add {}", args.trim()), false);
+            (true, vec![])
+        }
+        "remfilefilter" => {
+            handle_name_filter(ctx, user, &format!("del {}", args.trim()), false);
             (true, vec![])
         }
         "addtopic" => {
@@ -934,6 +988,72 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     true
 }
 
+/// `/ban10` y `/ban60`: ban temporal (expira en `secs` segundos). Paridad sb0t.
+fn handle_ban_timed(ctx: &AppContext, user: &Arc<AresUser>, args: &str, secs: i64) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, &format!("Usage: /ban{} <nick>", secs / 60));
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    let ident = ctx.bans.ban_with_expiry(
+        &target.name.read(),
+        &target.version,
+        &target.guid,
+        target.external_ip,
+        target.local_ip,
+        target.data_port,
+        secs,
+    );
+    if ident == 0 {
+        send_system_line(ctx, user, "Failed to persist ban.");
+        return;
+    }
+    let mins = secs / 60;
+    send_system_line(
+        ctx,
+        user,
+        &format!("Banned '{}' for {} minutes (ident {}).", target.name.read(), mins, ident),
+    );
+    send_system_line(
+        ctx,
+        &target,
+        &format!("You have been banned from this room for {} minutes.", mins),
+    );
+    ctx.record_ban(
+        &user.name.read(),
+        &target.name.read(),
+        &target.external_ip.to_string(),
+    );
+    force_part_user(ctx, &target);
+}
+
+/// `/unkiddy <nick>`: fuerza el modo kiddy a OFF (a diferencia de `/kiddy` que togglea).
+fn handle_unkiddy(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /unkiddy <nick>");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    target.kiddied.store(false, std::sync::atomic::Ordering::Relaxed);
+    send_system_line(ctx, user, &format!("Kiddy mode off for '{}'.", target_name));
+}
+
 fn handle_unban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     if !can_edit_topic(user) {
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
@@ -1213,6 +1333,40 @@ fn handle_register(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 }
 
+/// `/whisper <nick> <text>`: envía un PM privado al target, apareciendo como
+/// del emisor (paridad sb0t).
+fn handle_whisper(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let target_name = parts.next().unwrap_or("").trim();
+    let text = parts.next().unwrap_or("").trim();
+    if target_name.is_empty() || text.is_empty() {
+        send_system_line(ctx, user, "Usage: /whisper <nick> <text>");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    let from = user.name.read().clone();
+    let _ = target.send(outbound::build_pvt(&from, text));
+    send_system_line(ctx, user, &format!("Whispered to '{}'.", target_name));
+}
+
+/// `/pmblock`: togglea el bloqueo de PMs entrantes del propio usuario.
+fn handle_pmblock(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    let now = !user.pm_blocked.load(std::sync::atomic::Ordering::Relaxed);
+    user.pm_blocked.store(now, std::sync::atomic::Ordering::Relaxed);
+    send_system_line(
+        ctx,
+        user,
+        if now {
+            "PM blocking ON. Regular users can no longer PM you."
+        } else {
+            "PM blocking OFF."
+        },
+    );
+}
+
 fn handle_unregister(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     match ctx.accounts.unregister(&user.guid) {
         Ok(true) => send_system_line(ctx, user, "Account deleted."),
@@ -1257,6 +1411,22 @@ fn handle_login(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
         send_system_line(ctx, user, "Logged in (level unchanged).");
     }
     changed
+}
+
+/// Auto-login por GUID (sb0t SecureLogin / AUTOLOGIN): si el GUID tiene una
+/// cuenta registrada, restaura su nivel. Retorna `true` si el nivel cambió.
+pub fn dispatch_autologin(ctx: &AppContext, user: &Arc<AresUser>) -> bool {
+    let Some(acc) = ctx.accounts.find_by_guid(&user.guid).ok().flatten() else {
+        return false;
+    };
+    let level = level_from_u8(acc.level);
+    apply_level(
+        ctx,
+        user,
+        user,
+        level,
+        &format!("Auto-logged in (level {}).", acc.level),
+    )
 }
 
 /// Retorna el nick del target si el nivel cambió.
