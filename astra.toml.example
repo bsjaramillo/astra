@@ -57,6 +57,24 @@ link_hub_port = 5011
 # Generar uno nuevo:  head -c 16 /dev/urandom | xxd -p
 guid = "astra-default-guid-12"
 
+# Leaves confiados para el Link Hub (paridad sb0t).
+#
+# Si la lista está VACÍA (o ausente), el hub opera en modo LEGACY: acepta
+# cualquier leaf que se conecte y la sesión NO se encripta.
+#
+# Con al menos un entry, solo se aceptan leaves cuyas credentials
+# —SHA1(reverse(name ++ guid))— coincidan, y toda la sesión se encripta
+# con AES-256-CBC (los strings de cada mensaje viajan cifrados).
+#
+# IMPORTANTE: el `guid` de cada trusted leaf debe ser EXACTAMENTE el mismo
+# string que el `guid` configurado en el astra.toml de ese leaf, y el
+# `name` debe coincidir con su `room_name`. Si no, la derivación de la
+# clave AES no coincide y el handshake falla.
+#
+# [[link_trusted_leaves]]
+# name = "OtraSala"
+# guid = "guid-del-otro-server-1"
+
 # --- Supabase (opcional, syncing de bans con un panel central) ------------
 
 # Si están configurados, Astra sincroniza bans con un backend Supabase.

@@ -63,15 +63,27 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
 - [x] Panel HTML servido: `GET /` sin `Upgrade: websocket` responde 200 con
   `panel::INDEX_HTML` (antes 400). Validado E2E con curl
 
-## Fase E — Link hardening 🚧
+## Fase E — Link hardening ✅ (2026-07-08)
 
-- [ ] Encriptación AES de mensajes link (paridad con sb0t) — **requiere el
-  código fuente de referencia de sb0t** para replicar la derivación de key
-  y el modo exacto; no implementar a ciegas
+- [x] Encriptación AES de mensajes link con **paridad exacta sb0t**
+  (`crates/link/src/crypto.rs`, verificado contra `core/Crypto.cs`):
+  - Cifrado de stream `e67`/`d67` (idéntico al de sb0t), con vector de
+    referencia y test de roundtrip
+  - Credentials del leaf: `SHA1(reverse(name ++ guid))` (20 bytes)
+  - Key AES-256 + IV generados por el hub, enviados en `HubAck` ofuscados
+    con `e67` sobre `MD5(guid_del_leaf)` (8 rondas); el leaf los des-ofusca
+  - Post-handshake, los **strings** de cada mensaje van AES-256-CBC + PKCS7
+    (`u16 len + ciphertext + null`), campos binarios en claro — igual sb0t
+  - Vector AES-256-CBC verificado contra `openssl enc`
+  - **Dual-mode**: sin `link_trusted_leaves` configurados, el hub opera en
+    modo legacy (sin cifrar) para no romper links Astra existentes
+  - 9 tests de crypto + 1 de roundtrip cifrado en protocol + 2 E2E
+    (handshake cifrado con userlist descifrada; leaf no autorizado rechazado)
+- [x] Autenticación de leafs: lista de `link_trusted_leaves` (name+guid) en
+  `astra.toml`; el hub valida credentials y rechaza leaves desconocidos
 - [x] Reconnect automático del `LinkClient` con backoff — ya existía
   (exponencial 1s→60s en `LinkClient::run`); corregido bug: `peer_users`/
   `peer_name` no se limpiaban al reconectar (duplicaba usuarios del hub)
-- [ ] Autenticación de leafs (password por link)
 
 ## Fase F — Tooling y limpieza 🚧
 
