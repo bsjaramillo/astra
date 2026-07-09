@@ -87,6 +87,15 @@ pub struct AresUser {
     pub level: parking_lot::RwLock<ILevel>,
     /// ¿Muzzled? (mutable en runtime via /muzzle)
     pub muzzled: AtomicBool,
+    /// Si es un muzzle temporal (`/mtimeout`), epoch-ms en que expira (0 = permanente).
+    pub muzzle_until: std::sync::atomic::AtomicU64,
+    /// ¿"Kiddied"? Si sí, su texto público se transforma (efecto sb0t).
+    pub kiddied: AtomicBool,
+    /// ¿"Lowered"? Si sí, su texto público se pasa a minúsculas (`/lower`).
+    pub lowered: AtomicBool,
+    /// Texto de "echo" (heckle): si está seteado, se le reenvía al usuario
+    /// cada vez que habla en público (`/echo`).
+    pub echo_text: parking_lot::RwLock<Option<String>>,
     /// ¿Cloaked?
     pub cloaked: bool,
     /// ¿Captcha pendiente?
@@ -171,6 +180,10 @@ impl AresUser {
             cbot: false,
             level: parking_lot::RwLock::new(ILevel::Anonymous),
             muzzled: AtomicBool::new(false),
+            muzzle_until: std::sync::atomic::AtomicU64::new(0),
+            kiddied: AtomicBool::new(false),
+            lowered: AtomicBool::new(false),
+            echo_text: parking_lot::RwLock::new(None),
             cloaked: false,
             needs_captcha: AtomicBool::new(false),
             logged_in: false,
@@ -192,6 +205,21 @@ impl AresUser {
             sender: None,
             ws_text_sender: None,
         }
+    }
+
+    /// ¿Está muzzled ahora mismo? Los muzzles temporales (`/mtimeout`) se
+    /// auto-expiran: si `muzzle_until` ya pasó, se limpia el muzzle.
+    pub fn is_muzzled(&self) -> bool {
+        if !self.muzzled.load(Ordering::Relaxed) {
+            return false;
+        }
+        let until = self.muzzle_until.load(Ordering::Relaxed);
+        if until != 0 && crate::time::unix_time() >= until {
+            self.muzzled.store(false, Ordering::Relaxed);
+            self.muzzle_until.store(0, Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 
     /// Envía un paquete al cliente. Retorna `true` si se encoló OK.

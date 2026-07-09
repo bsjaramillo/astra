@@ -78,6 +78,21 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/listasnbans - list ASN bans",
     "/clearbans - remove all bans",
     "/banstats - show recent ban actions",
+    "/move <nick> <vroom> - move a user to a vroom",
+    "/changename <nick> <newname> - force-rename a user",
+    "/oldname <nick> - show a user's original name",
+    "/changemessage <nick> <text> - set a user's personal message",
+    "/admins - list online ops",
+    "/announce <text> - announce to the whole room",
+    "/adminmsg <text> - message all ops",
+    "/pmroom <text> - PM every user",
+    "/echo <nick> [text] - heckle a user privately (empty clears)",
+    "/clone <nick> <text> - make a message appear from a user",
+    "/kiddy <nick> - toggle kiddie-text on a user",
+    "/mtimeout <nick> <secs> - muzzle a user temporarily",
+    "/redirect <nick> <ip:port> - redirect a user to another server",
+    "/disableadmins - disable admin commands (owner)",
+    "/enableadmins - re-enable admin commands (owner)",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -134,6 +149,17 @@ pub fn dispatch_builtin(
     args: &str,
 ) -> (bool, Vec<astra_scripting::ScriptEvent>) {
     let cmd = command.to_ascii_lowercase();
+
+    // Gate global `/disableadmins`: si está activo, solo el Owner puede usar
+    // comandos admin (todo salvo los de usuario común y el propio toggle).
+    if ctx.admins_disabled.load(std::sync::atomic::Ordering::Relaxed)
+        && !has_level(user, ILevel::Owner)
+        && !is_user_command(&cmd)
+    {
+        send_system_line(ctx, user, "Admin commands are currently disabled.");
+        return (true, vec![]);
+    }
+
     match cmd.as_str() {
         "help" => {
             handle_help(ctx, user, args);
@@ -368,8 +394,78 @@ pub fn dispatch_builtin(
             handle_banstats(ctx, user, args);
             (true, vec![])
         }
+        "move" => {
+            handle_move(ctx, user, args);
+            (true, vec![])
+        }
+        "changename" => {
+            handle_changename(ctx, user, args);
+            (true, vec![])
+        }
+        "oldname" => {
+            handle_oldname(ctx, user, args);
+            (true, vec![])
+        }
+        "changemessage" => {
+            handle_changemessage(ctx, user, args);
+            (true, vec![])
+        }
+        "admins" => {
+            handle_admins(ctx, user, args);
+            (true, vec![])
+        }
+        "announce" => {
+            handle_announce(ctx, user, args);
+            (true, vec![])
+        }
+        "adminmsg" | "adminannounce" => {
+            handle_opmsg(ctx, user, args);
+            (true, vec![])
+        }
+        "pmroom" => {
+            handle_pmall(ctx, user, args);
+            (true, vec![])
+        }
+        "echo" => {
+            handle_echo(ctx, user, args);
+            (true, vec![])
+        }
+        "clone" => {
+            handle_clone(ctx, user, args);
+            (true, vec![])
+        }
+        "kiddy" => {
+            handle_kiddy(ctx, user, args);
+            (true, vec![])
+        }
+        "mtimeout" => {
+            handle_mtimeout(ctx, user, args);
+            (true, vec![])
+        }
+        "redirect" => {
+            handle_redirect(ctx, user, args);
+            (true, vec![])
+        }
+        "disableadmins" => {
+            handle_disableadmins(ctx, user, true);
+            (true, vec![])
+        }
+        "enableadmins" => {
+            handle_disableadmins(ctx, user, false);
+            (true, vec![])
+        }
         _ => (false, vec![]),
     }
+}
+
+/// ¿Es un comando de usuario común (no gateado por `/disableadmins`)?
+fn is_user_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "help" | "users" | "whois" | "id" | "info" | "uptime" | "stats"
+            | "version" | "topic" | "motd" | "roominfo" | "status"
+            | "register" | "unregister" | "login" | "cname" | "nick" | "vroom"
+    )
 }
 
 fn handle_help(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
@@ -1653,6 +1749,373 @@ fn handle_banstats(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
 }
 
+// ============================================================================
+// Moderación extra (Tanda 4)
+// ============================================================================
+
+fn handle_move(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let mut parts = args.trim().rsplitn(2, char::is_whitespace);
+    let vroom_str = parts.next().unwrap_or("");
+    let target_name = parts.next().unwrap_or("").trim();
+    let (Ok(new_vroom), false) = (vroom_str.parse::<u16>(), target_name.is_empty()) else {
+        send_system_line(ctx, user, "Usage: /move <nick> <vroom>");
+        return;
+    };
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot move a user of equal or higher level.");
+        return;
+    }
+
+    let old_vroom = *target.vroom.read();
+    if old_vroom == new_vroom {
+        send_system_line(ctx, user, "User is already in that vroom.");
+        return;
+    }
+    if ctx.vrooms.get(new_vroom).is_none() {
+        let _ = ctx.vrooms.create(new_vroom, None, None);
+    }
+
+    // Part del vroom viejo + join al nuevo (mismo patrón que /vroom).
+    let mut part_user = AresUser::new(target.id, target.external_ip, target.guid);
+    part_user.logged_in = true;
+    *part_user.name.write() = target.name.read().clone();
+    *part_user.vroom.write() = old_vroom;
+    *target.vroom.write() = new_vroom;
+
+    let part_pkt = outbound::build_part(&part_user);
+    let join_pkt = outbound::build_join_or_userlist(&target);
+    for other in ctx.user_pool.users() {
+        if !other.logged_in || other.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
+        let ov = *other.vroom.read();
+        if ov == old_vroom {
+            let _ = other.send(part_pkt.clone());
+        }
+        if ov == new_vroom {
+            let _ = other.send(join_pkt.clone());
+        }
+    }
+    ctx.publish_link_event(server_core::LinkEvent::VroomChanged {
+        origin: None,
+        user: server_core::LinkUserSnapshot::from_user(&target),
+    });
+    send_system_line(ctx, &target, &format!("You were moved to vroom {}.", new_vroom));
+    send_system_line(ctx, user, &format!("Moved '{}' to vroom {}.", target_name, new_vroom));
+}
+
+fn handle_changename(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let target_name = parts.next().unwrap_or("").trim();
+    let new_name = parts.next().unwrap_or("").trim();
+    if target_name.is_empty() || new_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /changename <nick> <newname>");
+        return;
+    }
+    if new_name.chars().count() > 30 {
+        send_system_line(ctx, user, "New name too long.");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    if ctx.user_pool.get_by_name(new_name).is_some() {
+        send_system_line(ctx, user, "That name is already in use.");
+        return;
+    }
+    let old_name = target.name.read().clone();
+    *target.name.write() = new_name.to_string();
+    ctx.user_pool.rename(target.id, &old_name, new_name);
+
+    // Part con el nombre viejo + join con el nuevo (refresh en clientes).
+    let mut part_user = AresUser::new(target.id, target.external_ip, target.guid);
+    part_user.logged_in = true;
+    *part_user.name.write() = old_name.clone();
+    let part_pkt = outbound::build_part(&part_user);
+    let join_pkt = outbound::build_join_or_userlist(&target);
+    for other in ctx.user_pool.users() {
+        if other.logged_in
+            && *other.vroom.read() == *target.vroom.read()
+            && !other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = other.send(part_pkt.clone());
+            let _ = other.send(join_pkt.clone());
+        }
+    }
+    ctx.publish_link_event(server_core::LinkEvent::NickChanged {
+        origin: None,
+        old_name: old_name.clone(),
+        user: server_core::LinkUserSnapshot::from_user(&target),
+    });
+    send_system_line(ctx, user, &format!("Renamed '{}' to '{}'.", old_name, new_name));
+}
+
+fn handle_oldname(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /oldname <nick>");
+        return;
+    }
+    match ctx.user_pool.get_by_name(target_name) {
+        Some(t) => {
+            let org = t.org_name.read().clone();
+            let org = if org.is_empty() { t.name.read().clone() } else { org };
+            send_system_line(ctx, user, &format!("'{}' original name: {}", target_name, org));
+        }
+        None => send_system_line(ctx, user, "User not found."),
+    }
+}
+
+fn handle_changemessage(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let target_name = parts.next().unwrap_or("").trim();
+    let text = parts.next().unwrap_or("").trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /changemessage <nick> <text>");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot modify a user of equal or higher level.");
+        return;
+    }
+    *target.personal_message.lock() = text.to_string();
+    ctx.publish_link_event(server_core::LinkEvent::PersonalMessage {
+        origin: None,
+        name: target.name.read().clone(),
+        text: text.to_string(),
+    });
+    send_system_line(ctx, user, &format!("Set personal message for '{}'.", target_name));
+}
+
+fn handle_admins(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    let mut ops: Vec<(String, u8)> = ctx
+        .user_pool
+        .users()
+        .into_iter()
+        .filter(|u| u.logged_in && (*u.level.read() as u8) > ILevel::Regular as u8)
+        .map(|u| (u.name.read().clone(), *u.level.read() as u8))
+        .collect();
+    ops.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase())));
+    if ops.is_empty() {
+        send_system_line(ctx, user, "No ops online.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Ops online ({}):", ops.len()));
+    for (name, level) in &ops {
+        send_system_line(ctx, user, &format!("{} (level {})", name, level));
+    }
+}
+
+fn handle_announce(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let text = args.trim();
+    if text.is_empty() {
+        send_system_line(ctx, user, "Usage: /announce <text>");
+        return;
+    }
+    // El bot lo dice en público a toda la sala.
+    let pkt = outbound::build_public(&ctx.settings.bot_name, text);
+    for u in ctx.user_pool.users() {
+        if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = u.send(pkt.clone());
+        }
+    }
+}
+
+fn handle_echo(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let target_name = parts.next().unwrap_or("").trim();
+    let text = parts.next().unwrap_or("").trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /echo <nick> [text]  (empty text clears)");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot echo a user of equal or higher level.");
+        return;
+    }
+    if text.is_empty() {
+        *target.echo_text.write() = None;
+        send_system_line(ctx, user, &format!("Cleared echo on '{}'.", target_name));
+    } else {
+        *target.echo_text.write() = Some(text.to_string());
+        send_system_line(ctx, user, &format!("Echo set on '{}'.", target_name));
+    }
+}
+
+fn handle_clone(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let target_name = parts.next().unwrap_or("").trim();
+    let text = parts.next().unwrap_or("").trim();
+    if target_name.is_empty() || text.is_empty() {
+        send_system_line(ctx, user, "Usage: /clone <nick> <text>");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    // Difunde un mensaje público/emote como si lo dijera el target.
+    let name = target.name.read().clone();
+    let pkt = if let Some(emote) = text.strip_prefix("/me ") {
+        outbound::build_emote(&name, emote)
+    } else {
+        outbound::build_public(&name, text)
+    };
+    let vroom = *target.vroom.read();
+    for u in ctx.user_pool.users() {
+        if u.logged_in && *u.vroom.read() == vroom && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = u.send(pkt.clone());
+        }
+    }
+    send_system_line(ctx, user, &format!("Cloned message as '{}'.", target_name));
+}
+
+fn handle_kiddy(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /kiddy <nick>");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot kiddy a user of equal or higher level.");
+        return;
+    }
+    let now_on = !target.kiddied.load(std::sync::atomic::Ordering::Relaxed);
+    target.kiddied.store(now_on, std::sync::atomic::Ordering::Relaxed);
+    send_system_line(
+        ctx,
+        user,
+        &format!("Kiddy mode {} for '{}'.", if now_on { "on" } else { "off" }, target_name),
+    );
+}
+
+fn handle_mtimeout(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let mut parts = args.trim().rsplitn(2, char::is_whitespace);
+    let secs_str = parts.next().unwrap_or("");
+    let target_name = parts.next().unwrap_or("").trim();
+    let (Ok(secs), false) = (secs_str.parse::<u64>(), target_name.is_empty()) else {
+        send_system_line(ctx, user, "Usage: /mtimeout <nick> <seconds>");
+        return;
+    };
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot muzzle a user of equal or higher level.");
+        return;
+    }
+    let until = server_core::time::unix_time() + secs.saturating_mul(1000);
+    target.muzzle_until.store(until, std::sync::atomic::Ordering::Relaxed);
+    target.muzzled.store(true, std::sync::atomic::Ordering::Relaxed);
+    ctx.publish_link_event(server_core::LinkEvent::UserUpdated {
+        origin: None,
+        user: server_core::LinkUserSnapshot::from_user(&target),
+    });
+    send_system_line(ctx, &target, &format!("You have been muzzled for {}s.", secs));
+    send_system_line(ctx, user, &format!("Muzzled '{}' for {}s.", target_name, secs));
+}
+
+fn handle_redirect(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    // Formato: <nick> <ip:port> (o astrahash:// que resolvemos a ip:port)
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let target_name = parts.next().unwrap_or("").trim();
+    let dest = parts.next().unwrap_or("").trim();
+    if target_name.is_empty() || dest.is_empty() {
+        send_system_line(ctx, user, "Usage: /redirect <nick> <ip:port>");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    if !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot redirect a user of equal or higher level.");
+        return;
+    }
+    let dest = dest.strip_prefix("astrahash://").unwrap_or(dest);
+    let Some((ip_str, port_str)) = dest.rsplit_once(':') else {
+        send_system_line(ctx, user, "Destination must be ip:port.");
+        return;
+    };
+    let (Ok(ip), Ok(port)) = (ip_str.parse::<IpAddr>(), port_str.parse::<u16>()) else {
+        send_system_line(ctx, user, "Invalid ip:port.");
+        return;
+    };
+    let _ = target.send(outbound::build_redirect(ip, port, &ctx.settings.room_name));
+    send_system_line(ctx, user, &format!("Redirected '{}' to {}:{}.", target_name, ip, port));
+}
+
+fn handle_disableadmins(ctx: &AppContext, user: &Arc<AresUser>, disable: bool) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    ctx.admins_disabled.store(disable, std::sync::atomic::Ordering::Relaxed);
+    send_system_line(
+        ctx,
+        user,
+        if disable { "Admin commands disabled." } else { "Admin commands enabled." },
+    );
+}
+
 /// Formatea un timestamp epoch-ms como tiempo relativo ("5m ago", etc.).
 fn format_time_ago(last_seen_ms: i64) -> String {
     let now_ms = server_core::time::unix_time() as i64;
@@ -2600,6 +3063,137 @@ mod tests {
 
         let _ = dispatch_builtin(&ctx, &alice, "customnames", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob → BobbyTables");
+    }
+
+    #[test]
+    fn builtin_move_changes_vroom() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "move", "Bob 5");
+        assert_eq!(*bob.vroom.read(), 5);
+        let _ = next_pvt_text(&mut alice_rx); // "You were moved..." goes to bob; alice gets ack
+    }
+
+    #[test]
+    fn builtin_changename_renames() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "changename", "Bob Roberto");
+        assert_eq!(*bob.name.read(), "Roberto");
+        assert!(ctx.user_pool.get_by_name("Roberto").is_some());
+        assert!(ctx.user_pool.get_by_name("Bob").is_none());
+        assert_eq!(next_pvt_text(&mut alice_rx), "Renamed 'Bob' to 'Roberto'.");
+    }
+
+    #[test]
+    fn builtin_admins_lists_ops() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        let (carol, _c_rx) = make_test_user(3, "Carol");
+        *alice.level.write() = ILevel::Moderator;
+        *bob.level.write() = ILevel::Admin;
+        // carol regular
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob);
+        ctx.user_pool.add(carol);
+
+        let _ = dispatch_builtin(&ctx, &alice, "admins", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Ops online (2):");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Bob (level 80)");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Alice (level 50)");
+    }
+
+    #[test]
+    fn builtin_announce_broadcasts_public() {
+        let ctx = make_test_ctx();
+        let (alice, _a_rx) = make_test_user(1, "Alice");
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob);
+
+        let _ = dispatch_builtin(&ctx, &alice, "announce", "server reboot soon");
+        // Bob recibe un público del bot
+        let pkt = bob_rx.try_recv().expect("announce");
+        assert_eq!(pkt[0], TcpMsg::Public as u8);
+        let mut r = PacketReader::new(&pkt[1..]);
+        let from = r.read_string().unwrap();
+        let text = r.read_string().unwrap();
+        assert_eq!(from, "Astra");
+        assert_eq!(text, "server reboot soon");
+    }
+
+    #[test]
+    fn builtin_kiddy_and_echo_toggle() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "kiddy", "Bob");
+        assert!(bob.kiddied.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut alice_rx), "Kiddy mode on for 'Bob'.");
+
+        let _ = dispatch_builtin(&ctx, &alice, "echo", "Bob you smell");
+        assert_eq!(bob.echo_text.read().as_deref(), Some("you smell"));
+        assert_eq!(next_pvt_text(&mut alice_rx), "Echo set on 'Bob'.");
+        let _ = dispatch_builtin(&ctx, &alice, "echo", "Bob");
+        assert!(bob.echo_text.read().is_none());
+    }
+
+    #[test]
+    fn builtin_mtimeout_muzzles_temporarily() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "mtimeout", "Bob 60");
+        assert!(bob.is_muzzled());
+        assert!(bob.muzzle_until.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        let _ = next_pvt_text(&mut alice_rx); // bob notice; alice ack next
+    }
+
+    #[test]
+    fn builtin_disableadmins_gate() {
+        let ctx = make_test_ctx();
+        let (owner, mut owner_rx) = make_test_user(1, "Owner");
+        let (mod_u, mut mod_rx) = make_test_user(2, "Mod");
+        *owner.level.write() = ILevel::Owner;
+        *mod_u.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(owner.clone());
+        ctx.user_pool.add(mod_u.clone());
+
+        let _ = dispatch_builtin(&ctx, &owner, "disableadmins", "");
+        assert_eq!(next_pvt_text(&mut owner_rx), "Admin commands disabled.");
+
+        // Un moderador ya no puede usar comandos admin
+        let (handled, _) = dispatch_builtin(&ctx, &mod_u, "kiddy", "Owner");
+        assert!(handled);
+        assert_eq!(next_pvt_text(&mut mod_rx), "Admin commands are currently disabled.");
+
+        // Pero sí comandos de usuario
+        let (handled, _) = dispatch_builtin(&ctx, &mod_u, "help", "");
+        assert!(handled);
+
+        // El owner re-habilita
+        let _ = dispatch_builtin(&ctx, &owner, "enableadmins", "");
+        assert_eq!(next_pvt_text(&mut owner_rx), "Admin commands enabled.");
     }
 
     #[test]

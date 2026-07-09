@@ -192,6 +192,20 @@ pub fn build_topic(text: &str) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+/// Redirect a otro servidor (`MSG_CHAT_SERVER_REDIRECT`, opcode 6).
+///
+/// Formato sb0t: `ip, u16 port, ip, str room_name, str "Redirecting..."`.
+/// El cliente Ares cierra y se reconecta al `ip:port` indicado.
+pub fn build_redirect(ip: std::net::IpAddr, port: u16, room_name: &str) -> Bytes {
+    let mut w = PacketWriter::with_msg(TcpMsg::ServerRedirect);
+    write_ip(&mut w, &ip);
+    w.write_u16_le(port).ok();
+    write_ip(&mut w, &ip);
+    w.write_string(room_name).ok();
+    w.write_string("Redirecting...").ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
 /// Mensaje público (broadcast).
 ///
 /// Formato: `str name, str text`

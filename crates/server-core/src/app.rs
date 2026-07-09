@@ -296,6 +296,9 @@ pub struct AppContext {
     pub asn_bans: Arc<AsnBanManager>,
     /// Log reciente de acciones de ban para `/banstats`: `(banner, target, ip)`.
     pub ban_log: parking_lot::Mutex<std::collections::VecDeque<(String, String, String)>>,
+    /// Si está activo, los comandos admin se ignoran salvo para el Owner
+    /// (`/disableadmins`). Paridad con `Settings.DisableAdmins` de sb0t.
+    pub admins_disabled: std::sync::atomic::AtomicBool,
     /// Snapshot de nodos UDP conocidos (name, port, user_count).
     /// Actualizado por `UdpNodeManager` cuando se agregan/actualizan nodos.
     pub udp_nodes: parking_lot::RwLock<Vec<(String, u16, u32)>>,
@@ -360,6 +363,7 @@ impl AppContext {
             range_bans,
             asn_bans,
             ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            admins_disabled: std::sync::atomic::AtomicBool::new(false),
             udp_nodes: parking_lot::RwLock::new(Vec::new()),
             link_servers: parking_lot::RwLock::new(Vec::new()),
             link_users: parking_lot::RwLock::new(Vec::new()),

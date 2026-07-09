@@ -81,6 +81,9 @@ pub mod urls;
 /// Range bans (prefijos de IP) y ASN bans.
 pub mod ip_bans;
 
+/// Transformaciones de texto de los efectos de moderación (kiddy, lower...).
+pub mod text_effects;
+
 /// Re-exports comunes.
 pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use greets::{GreetContext, GreetManager};
