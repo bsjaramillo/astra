@@ -107,6 +107,9 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/stealth [on|off] - hide admin identity in actions",
     "/disableavatar [on|off] - disable avatars",
     "/cloak [on|off] - cloak yourself in admin actions",
+    "/lower <nick> - force a user's text to lowercase (/unlower)",
+    "/kewltext <nick> - leetspeak a user's text (/unkewltext)",
+    "/paint <nick> - decorate a user's text (/unpaint)",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -486,8 +489,40 @@ pub fn dispatch_builtin(
             handle_cloak(ctx, user, args);
             (true, vec![])
         }
+        "lower" => {
+            handle_text_effect(ctx, user, args, TextEffect::Lower, true);
+            (true, vec![])
+        }
+        "unlower" => {
+            handle_text_effect(ctx, user, args, TextEffect::Lower, false);
+            (true, vec![])
+        }
+        "kewltext" => {
+            handle_text_effect(ctx, user, args, TextEffect::Kewl, true);
+            (true, vec![])
+        }
+        "unkewltext" => {
+            handle_text_effect(ctx, user, args, TextEffect::Kewl, false);
+            (true, vec![])
+        }
+        "paint" => {
+            handle_text_effect(ctx, user, args, TextEffect::Paint, true);
+            (true, vec![])
+        }
+        "unpaint" => {
+            handle_text_effect(ctx, user, args, TextEffect::Paint, false);
+            (true, vec![])
+        }
         _ => (false, vec![]),
     }
+}
+
+/// Efecto de texto per-usuario que un mod puede aplicar a un target.
+#[derive(Clone, Copy)]
+enum TextEffect {
+    Lower,
+    Kewl,
+    Paint,
 }
 
 /// ¿Es un comando de usuario común (no gateado por `/disableadmins`)?
@@ -2232,6 +2267,52 @@ fn handle_cloak(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 }
 
+// ============================================================================
+// Efectos de texto per-usuario (Tanda 6) — Moderator+
+// ============================================================================
+
+fn handle_text_effect(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    args: &str,
+    effect: TextEffect,
+    enable: bool,
+) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /<effect> <nick>");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    if enable && !outranks(user, &target) {
+        send_system_line(ctx, user, "You cannot target a user of equal or higher level.");
+        return;
+    }
+    let (flag, label) = match effect {
+        TextEffect::Lower => (&target.lowered, "lower"),
+        TextEffect::Kewl => (&target.kewl, "kewl text"),
+        TextEffect::Paint => (&target.painted, "paint"),
+    };
+    flag.store(enable, std::sync::atomic::Ordering::Relaxed);
+    send_system_line(
+        ctx,
+        user,
+        &format!(
+            "{} {} for '{}'.",
+            label,
+            if enable { "enabled" } else { "disabled" },
+            target_name
+        ),
+    );
+}
+
 /// Formatea un timestamp epoch-ms como tiempo relativo ("5m ago", etc.).
 fn format_time_ago(last_seen_ms: i64) -> String {
     let now_ms = server_core::time::unix_time() as i64;
@@ -3179,6 +3260,31 @@ mod tests {
 
         let _ = dispatch_builtin(&ctx, &alice, "customnames", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob → BobbyTables");
+    }
+
+    #[test]
+    fn builtin_text_effects_toggle() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "lower", "Bob");
+        assert!(bob.lowered.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut alice_rx), "lower enabled for 'Bob'.");
+
+        let _ = dispatch_builtin(&ctx, &alice, "kewltext", "Bob");
+        assert!(bob.kewl.load(std::sync::atomic::Ordering::Relaxed));
+        let _ = next_pvt_text(&mut alice_rx);
+
+        let _ = dispatch_builtin(&ctx, &alice, "unlower", "Bob");
+        assert!(!bob.lowered.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut alice_rx), "lower disabled for 'Bob'.");
+
+        let _ = dispatch_builtin(&ctx, &alice, "paint", "Bob");
+        assert!(bob.painted.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]

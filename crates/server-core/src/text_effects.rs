@@ -17,7 +17,34 @@ pub fn apply_punish_effects(user: &AresUser, text: &str) -> String {
     if user.kiddied.load(Ordering::Relaxed) {
         out = kiddy_transform(&out);
     }
+    if user.kewl.load(Ordering::Relaxed) {
+        out = kewl_transform(&out);
+    }
+    if user.painted.load(Ordering::Relaxed) {
+        out = paint_transform(&out);
+    }
     out
+}
+
+/// "Kewl text": sustitución leetspeak (a→4, e→3, i→1, o→0, s→5, t→7).
+pub fn kewl_transform(text: &str) -> String {
+    text.chars()
+        .map(|c| match c.to_ascii_lowercase() {
+            'a' => '4',
+            'e' => '3',
+            'i' => '1',
+            'o' => '0',
+            's' => '5',
+            't' => '7',
+            _ => c,
+        })
+        .collect()
+}
+
+/// "Paint": decora el texto envolviéndolo con marcas (aproximación en texto
+/// plano del efecto de color de sb0t, que requiere el protocolo de fuente Ares).
+pub fn paint_transform(text: &str) -> String {
+    format!("*·¸¸·* {} *·¸¸·*", text)
 }
 
 /// ¿El texto está "gritado" (mayoría de letras en mayúscula y con
@@ -85,6 +112,21 @@ mod tests {
     #[test]
     fn kiddy_transform_keeps_non_alpha() {
         assert_eq!(kiddy_transform("a b1c"), "a B1c");
+    }
+
+    #[test]
+    fn kewl_and_paint_transforms() {
+        assert_eq!(kewl_transform("elite"), "3l173");
+        assert_eq!(kewl_transform("SASO"), "5450");
+        assert!(paint_transform("hi").contains("hi"));
+        assert!(paint_transform("hi").len() > 2);
+    }
+
+    #[test]
+    fn combined_effects_via_user() {
+        let u = user();
+        u.kewl.store(true, Ordering::Relaxed);
+        assert_eq!(apply_punish_effects(&u, "test"), "7357");
     }
 
     #[test]

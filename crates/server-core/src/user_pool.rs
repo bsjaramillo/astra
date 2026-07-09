@@ -93,6 +93,10 @@ pub struct AresUser {
     pub kiddied: AtomicBool,
     /// ¿"Lowered"? Si sí, su texto público se pasa a minúsculas (`/lower`).
     pub lowered: AtomicBool,
+    /// ¿"Kewl text"? Si sí, su texto se transforma a leetspeak (`/kewltext`).
+    pub kewl: AtomicBool,
+    /// ¿"Painted"? Si sí, su texto se decora (`/paint`).
+    pub painted: AtomicBool,
     /// Texto de "echo" (heckle): si está seteado, se le reenvía al usuario
     /// cada vez que habla en público (`/echo`).
     pub echo_text: parking_lot::RwLock<Option<String>>,
@@ -183,6 +187,8 @@ impl AresUser {
             muzzle_until: std::sync::atomic::AtomicU64::new(0),
             kiddied: AtomicBool::new(false),
             lowered: AtomicBool::new(false),
+            kewl: AtomicBool::new(false),
+            painted: AtomicBool::new(false),
             echo_text: parking_lot::RwLock::new(None),
             cloaked: AtomicBool::new(false),
             needs_captcha: AtomicBool::new(false),
