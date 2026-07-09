@@ -535,31 +535,31 @@ pub async fn write_text_frame<W: AsyncWriteExt + Unpin>(
     let bytes = text.as_bytes();
     let len = bytes.len();
 
+    // IMPORTANTE (RFC 6455 §5.1): el servidor NO debe enmascarar los frames
+    // que envía al cliente. El bit de máscara (0x80) va en 0 y no se escribe
+    // mask key. (Los browsers cierran la conexión si el server enmascara.)
     let mut header = Vec::with_capacity(10);
     header.push(0x81); // FIN=1, opcode=text
     if len < 126 {
-        header.push(0x80 | len as u8);
+        header.push(len as u8);
     } else if len < 65536 {
-        header.push(0x80 | 126);
+        header.push(126);
         header.extend_from_slice(&(len as u16).to_be_bytes());
     } else {
-        header.push(0x80 | 127);
+        header.push(127);
         header.extend_from_slice(&(len as u64).to_be_bytes());
     }
-
-    // Mask = 0x00000000 (no enmascarar)
-    header.extend_from_slice(&[0, 0, 0, 0]);
 
     writer.write_all(&header).await?;
     writer.write_all(bytes).await?;
     Ok(())
 }
 
-/// Escribe un close frame. Genérico sobre cualquier `AsyncWriteExt`.
+/// Escribe un close frame (sin máscara, como corresponde al server).
 pub async fn write_close_frame<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
 ) -> anyhow::Result<()> {
-    let header = [0x88, 0x80, 0, 0, 0, 0];
+    let header = [0x88, 0x00];
     writer.write_all(&header).await?;
     Ok(())
 }
@@ -574,6 +574,27 @@ mod tests {
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
         let accept = compute_accept_key(key);
         assert_eq!(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[tokio::test]
+    async fn server_frames_are_not_masked() {
+        // RFC 6455 §5.1: el server no debe enmascarar. El segundo byte (que
+        // lleva el bit de máscara en 0x80) debe tener ese bit apagado.
+        let mut buf: Vec<u8> = Vec::new();
+        write_text_frame(&mut buf, "hola").await.unwrap();
+        assert_eq!(buf[0], 0x81); // FIN + text
+        assert_eq!(buf[1] & 0x80, 0, "el bit de máscara debe estar apagado");
+        assert_eq!(buf[1] & 0x7F, 4, "len = 4");
+        assert_eq!(&buf[2..], b"hola"); // sin mask key, payload directo
+
+        // Frame largo (>125): usa extended length de 2 bytes, sin máscara.
+        let mut buf2: Vec<u8> = Vec::new();
+        let long = "x".repeat(200);
+        write_text_frame(&mut buf2, &long).await.unwrap();
+        assert_eq!(buf2[1] & 0x80, 0);
+        assert_eq!(buf2[1] & 0x7F, 126);
+        assert_eq!(u16::from_be_bytes([buf2[2], buf2[3]]), 200);
+        assert_eq!(&buf2[4..], long.as_bytes());
     }
 
     #[test]
