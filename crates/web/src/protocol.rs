@@ -13,9 +13,6 @@
 
 #![allow(dead_code)]
 
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-
 /// Opcode de un mensaje del cliente al server (entrante).
 pub mod incoming {
     pub const LOGIN: &str = "LOGIN";
@@ -120,140 +117,138 @@ pub fn parse_lens_args(text: &str) -> Option<Vec<String>> {
 }
 
 // ============================================================================
-// Constructores de mensajes salientes
+// Constructores de mensajes salientes (formato ib0t/sb0t)
 // ============================================================================
+//
+// Todos son length-prefixed: `IDENT:len1,len2,...:val1val2...` donde cada
+// `len` es el conteo de chars del valor concatenado a continuación. El nivel
+// se envía como el valor decimal del byte ("0", "50", "100"), igual que
+// `WebOutbound.cs` de sb0t.
 
-/// Construye `ACK:nombre,roomname,version`.
-pub fn build_ack(name: &str, room_name: &str, version: &str) -> String {
-    build(outgoing::ACK, &format!("{},{},{}", name, room_name, version))
+fn clen(s: &str) -> usize {
+    s.chars().count()
 }
 
-/// Construye `MYFEATURES:version_str,flags,unknown,lang,cookie,unknown`.
-///
-/// `flags` es un byte (0x1f = PVT|sharing|compression|VC|opus).
-pub fn build_myfeatures(version: &str, flags: u8, language: u8, cookie: u32) -> String {
-    build(
-        outgoing::MYFEATURES,
-        &format!(
-            "{},{},0,{},{},1",
-            version, flags, language, cookie
-        ),
+/// `ACK:{len}:{name}` — ack de login.
+pub fn build_ack(name: &str) -> String {
+    format!("ACK:{}:{}", clen(name), name)
+}
+
+/// `SERVER_INFO:2:II` — info del server para clientes inbizier.
+pub fn build_server_info() -> String {
+    "SERVER_INFO:2:II".to_string()
+}
+
+/// `TOPIC_FIRST:{len}:{text}` — topic enviado al entrar.
+pub fn build_topic_first(text: &str) -> String {
+    format!("TOPIC_FIRST:{}:{}", clen(text), text)
+}
+
+/// `TOPIC:{len}:{text}` — cambio de topic en runtime.
+pub fn build_topic(text: &str) -> String {
+    format!("TOPIC:{}:{}", clen(text), text)
+}
+
+/// `USERINFO:...` — info detallada de un usuario (userlist para inbizier).
+pub fn build_userinfo(
+    name: &str,
+    pmsg: &str,
+    avatar_b64: &str,
+    id: u16,
+    level: u8,
+    inbizier_web: bool,
+    inbizier_mobile: bool,
+) -> String {
+    userinfo_like("USERINFO", name, pmsg, avatar_b64, id, level, inbizier_web, inbizier_mobile)
+}
+
+/// `JOININFO:...` — igual que USERINFO, cuando alguien entra.
+pub fn build_joininfo(
+    name: &str,
+    pmsg: &str,
+    avatar_b64: &str,
+    id: u16,
+    level: u8,
+    inbizier_web: bool,
+    inbizier_mobile: bool,
+) -> String {
+    userinfo_like("JOININFO", name, pmsg, avatar_b64, id, level, inbizier_web, inbizier_mobile)
+}
+
+fn userinfo_like(
+    ident: &str,
+    name: &str,
+    pmsg: &str,
+    avatar_b64: &str,
+    id: u16,
+    level: u8,
+    inbizier_web: bool,
+    inbizier_mobile: bool,
+) -> String {
+    let id_str = id.to_string();
+    let web = if inbizier_web { "1" } else { "0" };
+    let mobile = if inbizier_mobile { "1" } else { "0" };
+    // lens: name,pmsg,avatar,id,1,1,1 ; vals: name+pmsg+avatar+id+level+web+mobile
+    format!(
+        "{}:{},{},{},{},1,1,1:{}{}{}{}{}{}{}",
+        ident,
+        clen(name),
+        clen(pmsg),
+        clen(avatar_b64),
+        clen(&id_str),
+        name,
+        pmsg,
+        avatar_b64,
+        id_str,
+        level,
+        web,
+        mobile
     )
 }
 
-/// Construye `TOPIC:text`.
-pub fn build_topic(text: &str) -> String {
-    build(outgoing::TOPIC, text)
+/// `USERLIST:{nameLen},1:{name}{level}` — item de userlist simple (no inbizier).
+pub fn build_userlist_item(name: &str, level: u8) -> String {
+    format!("USERLIST:{},1:{}{}", clen(name), name, level)
 }
 
-/// Construye `JOIN:args_con_lens`.
-pub fn build_join(args: &[&str]) -> String {
-    build_with_lens(outgoing::JOIN, args)
-}
-
-/// Construye `PART:name`.
-pub fn build_part(name: &str) -> String {
-    build(outgoing::PART, name)
-}
-
-/// Construye `USERLIST:args_con_lens`.
-pub fn build_userlist(args: &[&str]) -> String {
-    build_with_lens(outgoing::USERLIST, args)
-}
-
-/// Construye `USERLIST_END:`.
+/// `USERLIST_END:` — fin de la userlist.
 pub fn build_userlist_end() -> String {
-    format!("{}:", outgoing::USERLIST_END)
+    "USERLIST_END:".to_string()
 }
 
-/// Construye `PUBLIC:from,text`.
-pub fn build_public(from: &str, text: &str) -> String {
-    build(outgoing::PUBLIC, &format!("{},{}", from, text))
+/// `OFFLINE:{len}:{name}` — un usuario salió (part).
+pub fn build_offline(name: &str) -> String {
+    format!("OFFLINE:{}:{}", clen(name), name)
 }
 
-/// Construye `EMOTE:from,text`.
-pub fn build_emote(from: &str, text: &str) -> String {
-    build(outgoing::EMOTE, &format!("{},{}", from, text))
+/// `PUBLIC:{nameLen},{textLen}:{name}{text}`.
+pub fn build_public(name: &str, text: &str) -> String {
+    format!("PUBLIC:{},{}:{}{}", clen(name), clen(text), name, text)
 }
 
-/// Construye `PM:from,text`.
-pub fn build_pm(from: &str, text: &str) -> String {
-    build(outgoing::PM, &format!("{},{}", from, text))
+/// `EMOTE:{nameLen},{textLen}:{name}{text}`.
+pub fn build_emote(name: &str, text: &str) -> String {
+    format!("EMOTE:{},{}:{}{}", clen(name), clen(text), name, text)
 }
 
-/// Construye `OPCHANGE:level`.
-pub fn build_opchange(level: u8) -> String {
-    build(outgoing::OPCHANGE, &level.to_string())
+/// `PM:{nameLen},{textLen}:{name}{text}`.
+pub fn build_pm(name: &str, text: &str) -> String {
+    format!("PM:{},{}:{}{}", clen(name), clen(text), name, text)
 }
 
-/// Construye `NOSUCH:reason`.
-pub fn build_nosuch(reason: &str) -> String {
-    build(outgoing::NOSUCH, reason)
+/// `UPDATE:{nameLen},1:{name}{level}` — cambio de nivel de un usuario.
+pub fn build_update(name: &str, level: u8) -> String {
+    format!("UPDATE:{},1:{}{}", clen(name), name, level)
 }
 
-/// Construye un userlist item (mismo formato que JOIN).
-pub fn build_user_item(
-    port: u16,
-    users: u16,
-    file_count: u16,
-    external_ip: IpAddr,
-    data_port: u16,
-    node_ip: IpAddr,
-    node_port: u16,
-    name: &str,
-    local_ip: IpAddr,
-    browsable: bool,
-    level: u8,
-    age: u8,
-    sex: u8,
-    country: u8,
-    region: &str,
-    features: u8,
-) -> String {
-    let ext = ip_to_str(external_ip);
-    let node = ip_to_str(node_ip);
-    let local = ip_to_str(local_ip);
-
-    let args = [
-        port.to_string(),
-        users.to_string(),
-        file_count.to_string(),
-        ext,
-        data_port.to_string(),
-        node,
-        node_port.to_string(),
-        "0".to_string(),
-        name.to_string(),
-        local,
-        if browsable { "1" } else { "0" }.to_string(),
-        level.to_string(),
-        age.to_string(),
-        sex.to_string(),
-        country.to_string(),
-        region.to_string(),
-        features.to_string(),
-    ];
-    let s: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    build_userlist(&s)
+/// `NOSUCH:{len}:{text}`.
+pub fn build_nosuch(text: &str) -> String {
+    format!("NOSUCH:{}:{}", clen(text), text)
 }
 
-/// Construye `USERLIST_BOT:name` (la línea del bot fantasma).
-pub fn build_userlist_bot(name: &str) -> String {
-    let args: Vec<String> = [
-        "0", "0", "0", "0.0.0.0", "69", "0.0.0.0", "0", "0", name, "0.0.0.0", "1", "3", "0", "0", "0", "",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    let s: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    build_userlist(&s)
-}
-
-fn ip_to_str(ip: IpAddr) -> String {
-    match ip {
-        IpAddr::V4(v4) => v4.to_string(),
-        IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED.to_string(),
-    }
+/// `URL:{addrLen},{tagLen}:{addr}{tag}`.
+pub fn build_url(addr: &str, tag: &str) -> String {
+    format!("URL:{},{}:{}{}", clen(addr), clen(tag), addr, tag)
 }
 
 // ============================================================================
@@ -420,9 +415,39 @@ mod tests {
     }
 
     #[test]
-    fn test_build_userlist_bot() {
-        let s = build_userlist_bot("MyBot");
-        assert!(s.starts_with("USERLIST:"));
+    fn build_ack_is_length_prefixed() {
+        assert_eq!(build_ack("Alice"), "ACK:5:Alice");
+    }
+
+    #[test]
+    fn build_public_two_fields() {
+        // PUBLIC:{nameLen},{textLen}:{name}{text}
+        assert_eq!(build_public("Bob", "hi there"), "PUBLIC:3,8:Bobhi there");
+    }
+
+    #[test]
+    fn build_userinfo_shape() {
+        // USERINFO:name,pmsg,av,id,1,1,1:{name}{pmsg}{av}{id}{level}{web}{mobile}
+        let s = build_userinfo("Ann", "", "", 7, 100, true, false);
+        assert_eq!(s, "USERINFO:3,0,0,1,1,1,1:Ann710010");
+    }
+
+    #[test]
+    fn build_userlist_item_simple() {
+        assert_eq!(build_userlist_item("Cy", 50), "USERLIST:2,1:Cy50");
+    }
+
+    #[test]
+    fn build_offline_and_end() {
+        assert_eq!(build_offline("Zoe"), "OFFLINE:3:Zoe");
+        assert_eq!(build_userlist_end(), "USERLIST_END:");
+    }
+
+    #[test]
+    fn level_is_decimal_byte() {
+        // level 100 → "100", concatenado tras el id.
+        let s = build_userinfo("X", "", "", 0, 255, false, true);
+        assert_eq!(s, "USERINFO:1,0,0,1,1,1,1:X025501");
     }
 
     #[test]

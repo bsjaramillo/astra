@@ -2969,7 +2969,9 @@ fn guid_to_hex(guid: &[u8; 16]) -> String {
 
 fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
     let part_pkt = outbound::build_part(target);
-    let ws_part = format!("PART:{}", target.name.read());
+    let tname = target.name.read();
+    let ws_part = format!("OFFLINE:{}:{}", tname.chars().count(), tname);
+    drop(tname);
 
     ctx.user_pool.remove(target.id);
     ctx.stats.on_user_part();
@@ -2987,7 +2989,7 @@ fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
 
 fn broadcast_topic(ctx: &AppContext, text: &str) {
     let pkt = outbound::build_topic(text);
-    let ws_msg = format!("TOPIC:{}", text);
+    let ws_msg = format!("TOPIC:{}:{}", text.chars().count(), text);
     for u in ctx.user_pool.users() {
         if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;

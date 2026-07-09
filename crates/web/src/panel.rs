@@ -46,22 +46,51 @@ ws.onopen = () => {
   log("[>] " + login);
 };
 
+// Parser length-prefixed ib0t: "IDENT:len1,len2,...:val1val2...".
+// Devuelve {ident, fields:[...], rest} donde `rest` es lo que queda tras
+// consumir los campos por longitud (para el nivel/flags de USERINFO/USERLIST,
+// cuyo length-prefix dice "1" aunque el valor sea el byte decimal completo).
+function parseLP(data) {
+  const i1 = data.indexOf(":");
+  if (i1 < 0) return { ident: data, fields: [], rest: "" };
+  const ident = data.substring(0, i1);
+  const after = data.substring(i1 + 1);
+  const i2 = after.indexOf(":");
+  if (i2 < 0 || !/^[0-9,]*$/.test(after.substring(0, i2))) {
+    return { ident, fields: [], rest: after };
+  }
+  const lens = after.substring(0, i2).split(",").filter(x => x !== "").map(Number);
+  const body = after.substring(i2 + 1);
+  const fields = [];
+  let pos = 0;
+  // Solo consumimos por longitud los campos "reales" (los que no son ",1"
+  // sintéticos de nivel/flags). Para simplificar, consumimos todos menos
+  // dejamos que el consumidor mire `rest` cuando aplique.
+  for (const l of lens) { fields.push(body.substr(pos, l)); pos += l; }
+  return { ident, fields, rest: body.substring(pos), body };
+}
+
 ws.onmessage = (e) => {
   log("[<] " + e.data);
-  const i = e.data.indexOf(":");
-  if (i < 0) return;
-  const ident = e.data.substring(0, i);
-  const args = e.data.substring(i + 1);
-  if (ident === "ACK") {
-    const [name, room, ver] = args.split(",");
-    log("✓ Logueado como " + name + " en " + room, "nick");
-  } else if (ident === "TOPIC") {
-    log("📌 " + args, "topic");
-  } else if (ident === "PUBLIC") {
-    const c = args.indexOf(",");
-    log("[" + args.substring(0, c) + "] " + args.substring(c + 1));
-  } else if (ident === "PM") {
-    log("💬 " + args, "pm");
+  const m = parseLP(e.data);
+  if (m.ident === "ACK") {
+    log("✓ Logueado como " + m.fields[0], "nick");
+  } else if (m.ident === "TOPIC" || m.ident === "TOPIC_FIRST") {
+    log("📌 " + m.fields[0], "topic");
+  } else if (m.ident === "PUBLIC") {
+    const from = m.fields[0] || "server";
+    log("[" + from + "] " + (m.fields[1] || ""));
+  } else if (m.ident === "EMOTE") {
+    log("* " + m.fields[0] + " " + (m.fields[1] || ""));
+  } else if (m.ident === "PM") {
+    log("💬 " + m.fields[0] + ": " + (m.fields[1] || ""), "pm");
+  } else if (m.ident === "USERLIST" || m.ident === "USERINFO" || m.ident === "JOININFO") {
+    // fields[0] = name; el nivel/flags quedan en `rest` (o al final del body).
+    log("👤 " + m.fields[0], "nick");
+  } else if (m.ident === "OFFLINE") {
+    log("👋 " + m.fields[0] + " salió");
+  } else if (m.ident === "NOSUCH") {
+    log("⚠ " + m.fields[0]);
   }
 };
 

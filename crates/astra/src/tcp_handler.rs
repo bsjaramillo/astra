@@ -905,9 +905,17 @@ fn broadcast_to_room(ctx: &AppContext, sender: &server_core::user_pool::AresUser
     let users = ctx.user_pool.users();
     for u in users {
         if u.logged_in && *u.vroom.read() == vroom && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            // En el sb0t original el sender también recibe el broadcast
-            // (excepto en algunos casos). Aquí también.
-            let _ = u.send(pkt.clone());
+            if u.web_client {
+                // Cliente web: traducir el binario al formato texto ib0t.
+                if let Some(text) = astra_web::ws_outbound::translate_broadcast(&pkt, sender, &u) {
+                    if let Some(tx) = &u.ws_text_sender {
+                        let _ = tx.send(text);
+                    }
+                }
+            } else {
+                // En el sb0t original el sender también recibe el broadcast.
+                let _ = u.send(pkt.clone());
+            }
             let _ = sender_id; // unused but indicates intent
         }
     }

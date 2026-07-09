@@ -22,11 +22,11 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::protocol::{
-    self, build_ack, build_myfeatures, build_opchange, build_topic, build_user_item,
-    build_userlist_bot, build_userlist_end,
+    self, build_ack, build_public, build_server_info, build_topic_first, build_userinfo,
+    build_userlist_end, build_userlist_item,
 };
 use crate::ws::{write_close_frame, write_text_frame, WsOpcode};
-use crate::ws_outbound::{build_initial_state_ws, build_userlist_item_ws, translate_broadcast};
+use crate::ws_outbound::translate_broadcast;
 
 /// Maneja una conexión WebSocket después del handshake.
 pub async fn handle_connection(
@@ -345,6 +345,11 @@ async fn ws_handshake_login(
     user.ws_text_sender = Some(ws_text_tx.clone());
     user.logged_in = true;
     user.web_client = true;
+    user.inbizier_web = login.inbizier_web;
+    user.inbizier_mobile = login.inbizier_mobile;
+    if !login.pmsg.is_empty() {
+        *user.personal_message.lock() = login.pmsg.clone();
+    }
 
     let user_arc = Arc::new(user);
     ctx.user_pool.add(user_arc.clone());
@@ -401,65 +406,61 @@ fn make_login_data(login: &protocol::LoginArgs) -> LoginData {
     }
 }
 
-/// Envía el estado inicial al cliente WS recién conectado (formato texto directo).
+/// Envía el estado inicial al cliente WS recién conectado, en el orden que
+/// espera el cliente ib0t/inbizio (ver `WebProcessor.cs` de sb0t):
+/// PUBLIC de bienvenida → ACK → SERVER_INFO → TOPIC_FIRST → userlist → USERLIST_END.
 async fn send_initial_state_ws(
     ctx: &AppContext,
     user: &Arc<AresUser>,
     tx: &mpsc::UnboundedSender<String>,
 ) {
+    use server_core::ILevel;
+
     let room_name = ctx.settings.room_name.clone();
     let room_topic = ctx.current_room_topic();
     let bot_name = ctx.settings.bot_name.clone();
+    let inbizier = user.inbizier_web || user.inbizier_mobile;
 
-    // ACK
-    let _ = tx.send(build_ack(&user.name.read(), &room_name, &user.version));
-    // MyFeatures
-    let _ = tx.send(build_myfeatures(&user.version, 0x1F, 0, 0));
-    // Topic
-    let _ = tx.send(build_topic(&room_topic));
-    // Bot
-    let _ = tx.send(build_userlist_bot(&bot_name));
+    // 1) Bienvenida como PUBLIC del server (nombre vacío).
+    let _ = tx.send(build_public(
+        "",
+        &format!("{} — Astra {}", room_name, env!("CARGO_PKG_VERSION")),
+    ));
+    // 2) ACK con el nick asignado.
+    let _ = tx.send(build_ack(&user.name.read()));
+    // 3) SERVER_INFO para clientes inbizier.
+    if inbizier {
+        let _ = tx.send(build_server_info());
+    }
+    // 4) Topic inicial.
+    let _ = tx.send(build_topic_first(&room_topic));
 
-    // Userlist
-    let user_id = user.id;
+    // 5) Userlist: bot + usuarios logueados en la misma vroom (incluye self).
+    let emit = |name: &str, pmsg: &str, id: u16, level: u8, iw: bool, im: bool| {
+        if inbizier {
+            build_userinfo(name, pmsg, "", id, level, iw, im)
+        } else {
+            build_userlist_item(name, level)
+        }
+    };
+    let _ = tx.send(emit(&bot_name, "", 0, ILevel::Owner as u8, false, false));
+    let vroom = *user.vroom.read();
     for other in ctx.user_pool.users() {
-        if other.id != user_id && other.logged_in {
-            let item = build_userlist_item_ws(&other);
-            let _ = tx.send(item);
+        if other.logged_in && *other.vroom.read() == vroom {
+            let name = other.name.read().clone();
+            let pmsg = other.personal_message.lock().clone();
+            let _ = tx.send(emit(
+                &name,
+                &pmsg,
+                other.id,
+                *other.level.read() as u8,
+                other.inbizier_web,
+                other.inbizier_mobile,
+            ));
         }
     }
-
-    // End
+    // 6) Fin de la userlist.
     let _ = tx.send(build_userlist_end());
-
-    // OpChange
-    let level = *user.level.read() as u8;
-    let _ = tx.send(build_opchange(level));
-
-    let _ = (room_name, room_topic, bot_name); // silence unused
-}
-
-/// Construye un item de userlist completo para un usuario.
-fn build_userlist_item_full(user: &Arc<AresUser>) -> String {
-    let features = outbound::build_features(user);
-    build_user_item(
-        0,
-        0,
-        user.file_count,
-        user.external_ip,
-        user.data_port,
-        user.node_ip,
-        user.node_port,
-        &user.name.read(),
-        user.local_ip,
-        user.browsable,
-        *user.level.read() as u8,
-        user.age,
-        user.sex,
-        user.country,
-        &user.region,
-        features,
-    )
 }
 
 /// Despacha un mensaje entrante del cliente WS.
@@ -479,9 +480,7 @@ async fn dispatch_ws_message(
         "PING" => {
             debug!("ws PING de id={}", user.id);
         }
-        "COMMAND" => {
-            debug!("ws COMMAND de id={}: {}", user.id, args);
-        }
+        "COMMAND" => handle_ws_command(ctx, user, args),
         _ => {
             debug!("ws mensaje {} no procesado de id={}", ident, user.id);
         }
@@ -489,8 +488,26 @@ async fn dispatch_ws_message(
     Ok(())
 }
 
+/// Ejecuta un comando recibido por el ident `COMMAND` (sin '/', ej. `op nick`).
+fn handle_ws_command(ctx: &AppContext, user: &Arc<AresUser>, raw: &str) {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return;
+    }
+    let (cmd, cargs) = match raw.split_once(' ') {
+        Some((c, a)) => (c, a.trim()),
+        None => (raw, ""),
+    };
+    let _ = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);
+}
+
 fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     if text.is_empty() {
+        return;
+    }
+    // Comando slash (/op, /help, ...): mismos built-ins que el path TCP.
+    if let Some((cmd, cargs)) = astra_commands::parse_command(text) {
+        let _ = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);
         return;
     }
     // Word filter: solo aplica a usuarios regulares (Moderator+ exentos).
@@ -590,7 +607,7 @@ fn broadcast_to_room(ctx: &AppContext, sender: &AresUser, pkt: Bytes) {
         if u.logged_in && *u.vroom.read() == vroom && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             if u.web_client {
                 // WS user: traducir a texto y enviar por ws_text_sender
-                if let Some(text) = translate_broadcast(&pkt, sender) {
+                if let Some(text) = translate_broadcast(&pkt, sender, &u) {
                     if let Some(tx) = &u.ws_text_sender {
                         let _ = tx.send(text);
                     }
