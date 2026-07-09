@@ -32,10 +32,10 @@ pub struct Settings {
     pub web_port: u16,
     /// Directorio de datos (bans, cuentas, logs).
     pub data_dir: String,
-    /// ¿Habilitar Link Hub?
+    /// ¿Habilitar Link Hub? El link NO usa un puerto propio: las conexiones
+    /// de otros servidores entran multiplexadas por el puerto TCP principal
+    /// (`port`), junto con los clientes Ares y WebSocket.
     pub link_hub_enabled: bool,
-    /// Puerto del Link Hub.
-    pub link_hub_port: u16,
     /// GUID del server (para autenticación en link)
     pub guid: String,
     /// URL de Supabase (opcional).
@@ -166,7 +166,6 @@ impl Default for Settings {
             web_port: 5010,
             data_dir: "./data".to_string(),
             link_hub_enabled: false,
-            link_hub_port: 5011,
             guid: "astra-default-guid".to_string(),
             supabase_url: None,
             supabase_key: None,
