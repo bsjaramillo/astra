@@ -217,21 +217,49 @@ pub struct LinkUser {
 pub const MSG_LINK_PROTO: u8 = 0xFB;
 
 /// Builder para construir link packets (formato idéntico al sb0t original).
+///
+/// Si se construye con [`new_with_crypto`](Self::new_with_crypto), los
+/// strings se escriben encriptados (AES-256-CBC, formato sb0t:
+/// `u16 len + ciphertext + null`). Los campos binarios van siempre en claro.
 pub struct LinkPacketBuilder {
     buf: BytesMut,
+    crypto: Option<crate::crypto::LinkCrypto>,
 }
 
 impl LinkPacketBuilder {
     pub fn new() -> Self {
         Self {
             buf: BytesMut::new(),
+            crypto: None,
+        }
+    }
+
+    /// Builder cuyas strings van encriptadas con la crypto de sesión.
+    /// `None` equivale a [`new`](Self::new) (strings en claro).
+    pub fn new_with_crypto(crypto: Option<crate::crypto::LinkCrypto>) -> Self {
+        Self {
+            buf: BytesMut::new(),
+            crypto,
         }
     }
 
     /// Escribe una string null-terminated (formato Ares para link).
+    ///
+    /// Con crypto de sesión: `u16 len + AES(utf8) + null` (sb0t
+    /// `TCPPacketWriter.WriteString(leaf, text)`).
     pub fn write_string(&mut self, s: &str) {
-        self.buf.extend_from_slice(s.as_bytes());
-        self.buf.put_u8(0);
+        match &self.crypto {
+            Some(c) => {
+                let enc = c.encrypt(s.as_bytes());
+                self.buf.put_u16_le(enc.len() as u16);
+                self.buf.extend_from_slice(&enc);
+                self.buf.put_u8(0);
+            }
+            None => {
+                self.buf.extend_from_slice(s.as_bytes());
+                self.buf.put_u8(0);
+            }
+        }
     }
 
     /// Escribe una string sin null al final.
@@ -308,6 +336,7 @@ impl Default for LinkPacketBuilder {
 /// `new` skipea automáticamente el prefijo de longitud.
 pub struct LinkPacketReader<'a> {
     buf: &'a [u8],
+    crypto: Option<crate::crypto::LinkCrypto>,
 }
 
 impl<'a> LinkPacketReader<'a> {
@@ -316,13 +345,22 @@ impl<'a> LinkPacketReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         // Skipear el prefijo de longitud (2 bytes u16 LE)
         let buf = if data.len() >= 2 { &data[2..] } else { data };
-        Self { buf }
+        Self { buf, crypto: None }
     }
 
     /// Crea un reader desde un payload SIN prefijo de longitud.
     /// Usar con los args de `read_link_from_stream` (que ya incluye el op byte).
     pub fn from_payload(data: &'a [u8]) -> Self {
-        Self { buf: data }
+        Self { buf: data, crypto: None }
+    }
+
+    /// Como [`from_payload`](Self::from_payload) pero desencriptando los
+    /// strings con la crypto de sesión (`None` = strings en claro).
+    pub fn from_payload_with_crypto(
+        data: &'a [u8],
+        crypto: Option<crate::crypto::LinkCrypto>,
+    ) -> Self {
+        Self { buf: data, crypto }
     }
 
     /// Lee el opcode.
@@ -336,7 +374,33 @@ impl<'a> LinkPacketReader<'a> {
     }
 
     /// Lee una string null-terminated.
+    ///
+    /// Con crypto de sesión: `u16 len + AES + null opcional` (sb0t
+    /// `TCPPacketReader.ReadString(leaf)`).
     pub fn read_string(&mut self) -> Result<String, String> {
+        if let Some(c) = self.crypto {
+            if self.buf.len() < 2 {
+                return Err("string encriptada sin length prefix".into());
+            }
+            let len = u16::from_le_bytes([self.buf[0], self.buf[1]]) as usize;
+            if self.buf.len() < 2 + len {
+                return Err(format!(
+                    "string encriptada truncada: esperaba {} bytes, hay {}",
+                    len,
+                    self.buf.len() - 2
+                ));
+            }
+            let plain = c
+                .decrypt(&self.buf[2..2 + len])
+                .ok_or_else(|| "string encriptada inválida (padding)".to_string())?;
+            self.buf = &self.buf[2 + len..];
+            // sb0t: null terminator opcional después del ciphertext
+            if let Some(&0) = self.buf.first() {
+                self.buf = &self.buf[1..];
+            }
+            return String::from_utf8(plain).map_err(|e| format!("string inválida: {}", e));
+        }
+
         let end = self
             .buf
             .iter()

@@ -45,6 +45,24 @@ pub struct Settings {
     /// Configuración de seguridad.
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Leaves confiados para el Link Hub (paridad sb0t).
+    ///
+    /// Si la lista está vacía, el hub opera en modo legacy: acepta
+    /// cualquier leaf y la sesión viaja sin encriptar. Con al menos un
+    /// entry, solo se aceptan leaves cuyas credentials
+    /// (`SHA1(reverse(name ++ guid))`) coincidan, y la sesión se encripta
+    /// con AES-256-CBC.
+    #[serde(default)]
+    pub link_trusted_leaves: Vec<TrustedLeaf>,
+}
+
+/// Un leaf autorizado a conectarse al Link Hub.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedLeaf {
+    /// Nombre de la sala del leaf (su `room_name`).
+    pub name: String,
+    /// GUID del leaf (su `guid` de astra.toml, mismo string).
+    pub guid: String,
 }
 
 /// Configuración de seguridad (defensa en capas).
@@ -153,6 +171,7 @@ impl Default for Settings {
             supabase_url: None,
             supabase_key: None,
             security: SecurityConfig::default(),
+            link_trusted_leaves: Vec::new(),
         }
     }
 }
