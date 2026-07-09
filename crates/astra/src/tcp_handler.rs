@@ -319,6 +319,13 @@ async fn process_handshake(
                         return Ok(None);
                     }
 
+                    // Range ban (prefijo de IP)
+                    if ctx.range_bans.is_banned(external_ip) {
+                        warn!("REJECTED (range ban): peer={}", peer);
+                        let _ = tx.send(server_error_packet("You are banned from this room"));
+                        return Ok(None);
+                    }
+
                     // Join-flood
                     if ctx.user_history.is_join_flooding(external_ip, now_ms) {
                         warn!("REJECTED (join-flood): peer={}", peer);

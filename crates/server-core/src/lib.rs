@@ -78,9 +78,13 @@ pub mod word_filter;
 /// Enlaces rotados de la sala (URLs).
 pub mod urls;
 
+/// Range bans (prefijos de IP) y ASN bans.
+pub mod ip_bans;
+
 /// Re-exports comunes.
 pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use greets::{GreetContext, GreetManager};
+pub use ip_bans::{AsnBanManager, RangeBanManager};
 pub use room::Room;
 pub use stats::Stats;
 pub use types::{IFont, ILevel, ILink};

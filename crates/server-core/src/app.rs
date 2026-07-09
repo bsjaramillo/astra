@@ -13,6 +13,7 @@ use super::captcha::CaptchaManager;
 use super::db::Database;
 use super::greets::GreetManager;
 use super::idle::IdleManager;
+use super::ip_bans::{AsnBanManager, RangeBanManager};
 use super::urls::UrlManager;
 use super::word_filter::WordFilterManager;
 use super::security::SecurityManager;
@@ -289,6 +290,12 @@ pub struct AppContext {
     pub word_filter: Arc<WordFilterManager>,
     /// Manager de URLs rotadas de la sala.
     pub urls: Arc<UrlManager>,
+    /// Range bans (prefijos de IP).
+    pub range_bans: Arc<RangeBanManager>,
+    /// ASN bans.
+    pub asn_bans: Arc<AsnBanManager>,
+    /// Log reciente de acciones de ban para `/banstats`: `(banner, target, ip)`.
+    pub ban_log: parking_lot::Mutex<std::collections::VecDeque<(String, String, String)>>,
     /// Snapshot de nodos UDP conocidos (name, port, user_count).
     /// Actualizado por `UdpNodeManager` cuando se agregan/actualizan nodos.
     pub udp_nodes: parking_lot::RwLock<Vec<(String, u16, u32)>>,
@@ -332,6 +339,8 @@ impl AppContext {
         let greets = Arc::new(GreetManager::new(db.clone()));
         let word_filter = Arc::new(WordFilterManager::new(db.clone()));
         let urls = Arc::new(UrlManager::new(db.clone()));
+        let range_bans = Arc::new(RangeBanManager::new(db.clone()));
+        let asn_bans = Arc::new(AsnBanManager::new(db.clone()));
         let (link_events, _) = broadcast::channel(1024);
         Self {
             settings: Arc::new(settings),
@@ -348,6 +357,9 @@ impl AppContext {
             greets,
             word_filter,
             urls,
+            range_bans,
+            asn_bans,
+            ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             udp_nodes: parking_lot::RwLock::new(Vec::new()),
             link_servers: parking_lot::RwLock::new(Vec::new()),
             link_users: parking_lot::RwLock::new(Vec::new()),
@@ -404,6 +416,22 @@ impl AppContext {
         let hist = self.message_history.lock();
         let start = hist.len().saturating_sub(n);
         hist.iter().skip(start).cloned().collect()
+    }
+
+    /// Registra una acción de ban en el log (para `/banstats`).
+    pub fn record_ban(&self, banner: &str, target: &str, ip: &str) {
+        let mut log = self.ban_log.lock();
+        if log.len() >= 50 {
+            log.pop_front();
+        }
+        log.push_back((banner.to_string(), target.to_string(), ip.to_string()));
+    }
+
+    /// Retorna las últimas `n` acciones de ban (más viejas primero).
+    pub fn recent_bans(&self, n: usize) -> Vec<(String, String, String)> {
+        let log = self.ban_log.lock();
+        let start = log.len().saturating_sub(n);
+        log.iter().skip(start).cloned().collect()
     }
 
     /// Publica un evento para replicación Link.

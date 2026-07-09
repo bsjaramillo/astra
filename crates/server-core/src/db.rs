@@ -211,6 +211,14 @@ impl Database {
                 text TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS range_bans (
+                prefix TEXT NOT NULL PRIMARY KEY
+            );
+
+            CREATE TABLE IF NOT EXISTS asn_bans (
+                asn INTEGER NOT NULL PRIMARY KEY
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -951,6 +959,80 @@ impl Database {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    // ========================================================================
+    // Range bans (prefijos de IP) y ASN bans
+    // ========================================================================
+
+    /// Agrega un prefijo de range ban. Retorna `true` si era nuevo.
+    pub fn add_range_ban(&self, prefix: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO range_bans (prefix) VALUES (?1)",
+            params![prefix],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Elimina un prefijo. Retorna `true` si existía.
+    pub fn remove_range_ban(&self, prefix: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM range_bans WHERE prefix = ?1", params![prefix])?;
+        Ok(n > 0)
+    }
+
+    /// Lista los prefijos de range ban.
+    pub fn list_range_bans(&self) -> DbResult<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT prefix FROM range_bans ORDER BY prefix")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Borra todos los range bans. Retorna cuántos borró.
+    pub fn clear_range_bans(&self) -> DbResult<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute("DELETE FROM range_bans", [])?)
+    }
+
+    /// Agrega un ASN ban. Retorna `true` si era nuevo.
+    pub fn add_asn_ban(&self, asn: u32) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO asn_bans (asn) VALUES (?1)",
+            params![asn as i64],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Elimina un ASN ban. Retorna `true` si existía.
+    pub fn remove_asn_ban(&self, asn: u32) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM asn_bans WHERE asn = ?1", params![asn as i64])?;
+        Ok(n > 0)
+    }
+
+    /// Lista los ASN baneados.
+    pub fn list_asn_bans(&self) -> DbResult<Vec<u32>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT asn FROM asn_bans ORDER BY asn")?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r? as u32);
+        }
+        Ok(out)
+    }
+
+    /// Borra todos los bans normales. Retorna cuántos borró.
+    pub fn clear_bans(&self) -> DbResult<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute("DELETE FROM bans", [])?)
     }
 }
 

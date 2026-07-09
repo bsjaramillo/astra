@@ -70,6 +70,14 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/id <nick> - show a user's session id",
     "/info <nick> - show detailed user info",
     "/customnames - list online users' custom names",
+    "/rangeban <ip-prefix> - ban an IP prefix",
+    "/rangeunban <ip-prefix|index> - remove a range ban",
+    "/listrangebans - list range bans",
+    "/asnban <asn> - ban an ASN",
+    "/asnunban <asn> - remove an ASN ban",
+    "/listasnbans - list ASN bans",
+    "/clearbans - remove all bans",
+    "/banstats - show recent ban actions",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -328,6 +336,38 @@ pub fn dispatch_builtin(
             handle_customnames(ctx, user, args);
             (true, vec![])
         }
+        "rangeban" => {
+            handle_rangeban(ctx, user, args);
+            (true, vec![])
+        }
+        "rangeunban" => {
+            handle_rangeunban(ctx, user, args);
+            (true, vec![])
+        }
+        "listrangebans" => {
+            handle_listrangebans(ctx, user, args);
+            (true, vec![])
+        }
+        "asnban" => {
+            handle_asnban(ctx, user, args);
+            (true, vec![])
+        }
+        "asnunban" => {
+            handle_asnunban(ctx, user, args);
+            (true, vec![])
+        }
+        "listasnbans" => {
+            handle_listasnbans(ctx, user, args);
+            (true, vec![])
+        }
+        "clearbans" | "cbans" => {
+            handle_clearbans(ctx, user, args);
+            (true, vec![])
+        }
+        "banstats" => {
+            handle_banstats(ctx, user, args);
+            (true, vec![])
+        }
         _ => (false, vec![]),
     }
 }
@@ -561,6 +601,13 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
         &format!("Banned '{}' (ident {}).", target.name.read(), ident),
     );
     send_system_line(ctx, &target, "You have been banned from this room.");
+
+    // Registrar la acción para /banstats.
+    ctx.record_ban(
+        &user.name.read(),
+        &target.name.read(),
+        &target.external_ip.to_string(),
+    );
 
     // Expulsión inmediata del pool para reflejar el ban en runtime.
     force_part_user(ctx, &target);
@@ -1472,6 +1519,137 @@ fn handle_customnames(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
     if !found {
         send_system_line(ctx, user, "No users have a custom name set.");
+    }
+}
+
+// ============================================================================
+// Bans avanzados (range / ASN / clear / stats) — requiere Admin+
+// ============================================================================
+
+fn handle_rangeban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let prefix = args.trim();
+    if prefix.is_empty() {
+        send_system_line(ctx, user, "Usage: /rangeban <ip-prefix>");
+        return;
+    }
+    if ctx.range_bans.add(prefix) {
+        send_system_line(ctx, user, &format!("Range ban added: {}", prefix.replace('*', "")));
+    } else {
+        send_system_line(ctx, user, "Range ban already exists (or invalid).");
+    }
+}
+
+fn handle_rangeunban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_system_line(ctx, user, "Usage: /rangeunban <ip-prefix|index>");
+        return;
+    }
+    // Puede ser índice o prefijo literal.
+    let removed = if let Ok(index) = arg.parse::<usize>() {
+        ctx.range_bans.remove_at(index).is_some()
+    } else {
+        ctx.range_bans.remove(arg)
+    };
+    if removed {
+        send_system_line(ctx, user, "Range ban removed.");
+    } else {
+        send_system_line(ctx, user, "No matching range ban.");
+    }
+}
+
+fn handle_listrangebans(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let list = ctx.range_bans.list();
+    if list.is_empty() {
+        send_system_line(ctx, user, "No range bans.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Range bans ({}):", list.len()));
+    for (i, p) in list.iter().enumerate() {
+        send_system_line(ctx, user, &format!("{} - {}", i, p));
+    }
+}
+
+fn handle_asnban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let Ok(asn) = args.trim().parse::<u32>() else {
+        send_system_line(ctx, user, "Usage: /asnban <asn>");
+        return;
+    };
+    if ctx.asn_bans.add(asn) {
+        send_system_line(ctx, user, &format!("ASN {} banned.", asn));
+    } else {
+        send_system_line(ctx, user, "ASN already banned (or invalid).");
+    }
+}
+
+fn handle_asnunban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let Ok(asn) = args.trim().parse::<u32>() else {
+        send_system_line(ctx, user, "Usage: /asnunban <asn>");
+        return;
+    };
+    if ctx.asn_bans.remove(asn) {
+        send_system_line(ctx, user, &format!("ASN {} unbanned.", asn));
+    } else {
+        send_system_line(ctx, user, "ASN not banned.");
+    }
+}
+
+fn handle_listasnbans(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let list = ctx.asn_bans.list();
+    if list.is_empty() {
+        send_system_line(ctx, user, "No ASN bans.");
+        return;
+    }
+    let joined = list.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+    send_system_line(ctx, user, &format!("ASN bans ({}): {}", list.len(), joined));
+}
+
+fn handle_clearbans(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let n = ctx.bans.clear_all();
+    send_system_line(ctx, user, &format!("Cleared {} ban(s).", n));
+}
+
+fn handle_banstats(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let bans = ctx.recent_bans(20);
+    send_system_line(
+        ctx,
+        user,
+        &format!("Active bans: {} | recent actions: {}", ctx.bans.len(), bans.len()),
+    );
+    for (banner, target, ip) in &bans {
+        send_system_line(ctx, user, &format!("{} banned {} [{}]", banner, target, ip));
     }
 }
 
@@ -2422,6 +2600,79 @@ mod tests {
 
         let _ = dispatch_builtin(&ctx, &alice, "customnames", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob → BobbyTables");
+    }
+
+    #[test]
+    fn builtin_rangeban_add_check_remove() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "rangeban", "1.2.3.*");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Range ban added: 1.2.3.");
+        assert!(ctx.range_bans.is_banned("1.2.3.55".parse().unwrap()));
+
+        let _ = dispatch_builtin(&ctx, &alice, "listrangebans", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Range bans (1):");
+        assert_eq!(next_pvt_text(&mut alice_rx), "0 - 1.2.3.");
+
+        let _ = dispatch_builtin(&ctx, &alice, "rangeunban", "0");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Range ban removed.");
+        assert!(!ctx.range_bans.is_banned("1.2.3.55".parse().unwrap()));
+    }
+
+    #[test]
+    fn builtin_asnban_add_list_remove() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "asnban", "64500");
+        assert_eq!(next_pvt_text(&mut alice_rx), "ASN 64500 banned.");
+        assert!(ctx.asn_bans.is_banned(64500));
+
+        let _ = dispatch_builtin(&ctx, &alice, "listasnbans", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "ASN bans (1): 64500");
+
+        let _ = dispatch_builtin(&ctx, &alice, "asnunban", "64500");
+        assert_eq!(next_pvt_text(&mut alice_rx), "ASN 64500 unbanned.");
+        assert!(!ctx.asn_bans.is_banned(64500));
+    }
+
+    #[test]
+    fn builtin_clearbans_and_banstats() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        // Ban de Bob → registra acción
+        let _ = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let _ = next_pvt_text(&mut alice_rx); // "Banned 'Bob'..."
+        assert_eq!(ctx.bans.len(), 1);
+
+        let _ = dispatch_builtin(&ctx, &alice, "banstats", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Active bans: 1 | recent actions: 1");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Alice banned Bob [10.0.0.2]");
+
+        let _ = dispatch_builtin(&ctx, &alice, "clearbans", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Cleared 1 ban(s).");
+        assert_eq!(ctx.bans.len(), 0);
+    }
+
+    #[test]
+    fn builtin_rangeban_requires_admin() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        let _ = dispatch_builtin(&ctx, &alice, "rangeban", "1.2.3");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
+        assert!(ctx.range_bans.is_empty());
     }
 
     #[test]

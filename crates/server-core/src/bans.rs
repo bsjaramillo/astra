@@ -193,6 +193,15 @@ impl BanSystem {
     pub fn is_empty(&self) -> bool {
         self.cache.read().is_empty()
     }
+
+    /// Borra todos los bans (persistente). Retorna cuántos había.
+    pub fn clear_all(&self) -> usize {
+        let mut cache = self.cache.write();
+        let n = cache.len();
+        cache.clear();
+        let _ = self.db.clear_bans();
+        n
+    }
 }
 
 #[cfg(test)]
