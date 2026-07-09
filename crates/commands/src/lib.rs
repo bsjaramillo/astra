@@ -119,6 +119,13 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/listpasswords - list registered accounts (owner)",
     "/joinfilter [add|del <pat>|list] - filter nicks at login",
     "/filefilter [add|del <pat>|list] - filter shared file names",
+    "/vspy [on|off] - watch other vrooms' chat",
+    "/ipsend [on|off] - receive joiners' IP info",
+    "/logsend [on|off] - receive a room activity log",
+    "/bansend [on|off] - receive ban notifications",
+    "/trace <nick|ip> - geolocate a user (needs GeoIP db)",
+    "/define <word> - dictionary definition (Wordnik)",
+    "/urban <term> - Urban Dictionary lookup",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -2703,12 +2710,127 @@ fn handle_subscription(ctx: &AppContext, user: &Arc<AresUser>, args: &str, sub: 
     }
 }
 
-fn handle_define(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
-    handle_unavailable(ctx, user, "define");
+/// API key de Wordnik hardcodeada (idéntica a sb0t DefineDictionary.cs).
+const WORDNIK_API_KEY: &str = "0f69e2f981991cfe0e1351afd6a2d39da10077112d21165be";
+
+/// `/define <word>` — busca la definición en Wordnik (misma URL/key que sb0t).
+/// Hace el fetch en una task async y PMea el resultado al que lo pidió.
+fn handle_define(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let word = args.trim().to_lowercase();
+    if word.is_empty() {
+        send_system_line(ctx, user, "Usage: /define <word>");
+        return;
+    }
+    let bot = ctx.settings.bot_name.clone();
+    let user = user.clone();
+    let encoded = urlencode(&word);
+    spawn_lookup(user.clone(), bot.clone(), move || async move {
+        let url = format!(
+            "http://api.wordnik.com/v4/word.json/{}/definitions?includeRelated=false&limit=3&sourceDictionaries=all&useCanonical=false",
+            encoded
+        );
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&url)
+            .header("api_key", WORDNIK_API_KEY)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .ok()?;
+        let json: serde_json::Value = resp.json().await.ok()?;
+        let defs = json.as_array()?;
+        if defs.is_empty() {
+            return Some(format!("No definition found for '{}'.", word));
+        }
+        let mut out = format!("Definitions for '{}':", word);
+        for d in defs.iter().take(3) {
+            if let Some(t) = d.get("text").and_then(|v| v.as_str()) {
+                out.push('\n');
+                out.push_str(t);
+            }
+        }
+        Some(out)
+    });
 }
 
-fn handle_urban(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
-    handle_unavailable(ctx, user, "urban");
+/// `/urban <term>` — busca en Urban Dictionary (misma URL que sb0t).
+fn handle_urban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let term = args.trim().to_string();
+    if term.is_empty() {
+        send_system_line(ctx, user, "Usage: /urban <term>");
+        return;
+    }
+    let bot = ctx.settings.bot_name.clone();
+    let user = user.clone();
+    let encoded = urlencode(&term);
+    spawn_lookup(user.clone(), bot.clone(), move || async move {
+        let url = format!(
+            "http://www.urbandictionary.com/iphone/search/define?term={}",
+            encoded
+        );
+        let client = reqwest::Client::new();
+        let json: serde_json::Value = client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let first = json.get("list")?.as_array()?.first()?;
+        let def = first.get("definition")?.as_str()?;
+        Some(format!("Urban '{}': {}", term, def.replace(['[', ']'], "")))
+    });
+}
+
+/// URL-encode mínimo (espacios y caracteres no alfanuméricos → %XX).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Ejecuta un lookup async (HTTP) en una task de tokio y PMea el resultado
+/// (o un error honesto) al usuario. Si no hay runtime tokio (p. ej. en
+/// tests), degrada a un aviso sin colgar.
+fn spawn_lookup<F, Fut>(user: Arc<AresUser>, bot: String, make: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Option<String>> + Send,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                let result = make().await;
+                let text = result.unwrap_or_else(|| "Lookup failed (service unavailable).".to_string());
+                for line in text.lines() {
+                    let _ = user.send(server_core::outbound::build_pvt(&bot, line));
+                }
+            });
+        }
+        Err(_) => {
+            let _ = user.send(server_core::outbound::build_pvt(
+                &bot,
+                "Lookup requires the async runtime (unavailable here).",
+            ));
+        }
+    }
 }
 
 /// `/trace <nick|ip>` — geolocaliza una IP usando la base GeoIP (si está
@@ -3822,6 +3944,43 @@ mod tests {
     }
 
     #[test]
+    fn urlencode_escapes_correctly() {
+        assert_eq!(urlencode("hello world"), "hello%20world");
+        assert_eq!(urlencode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(urlencode("plain"), "plain");
+    }
+
+    #[test]
+    fn builtin_define_usage_and_access() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+
+        // Regular user → denegado
+        let _ = dispatch_builtin(&ctx, &alice, "define", "word");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Moderator+ required.");
+
+        // Moderator sin args → usage
+        *alice.level.write() = ILevel::Moderator;
+        let _ = dispatch_builtin(&ctx, &alice, "define", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Usage: /define <word>");
+    }
+
+    #[tokio::test]
+    async fn define_spawns_and_pms_result() {
+        // Con runtime tokio, /define agenda un fetch. No dependemos del
+        // servicio real: solo verificamos que no panica y que el comando se
+        // marca como handled. (El PM del resultado llega async y puede fallar
+        // si no hay red; eso no rompe el test.)
+        let ctx = make_test_ctx();
+        let (alice, _rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "define", "xyzzy");
+        assert!(handled);
+    }
+
+    #[test]
     fn builtin_trace_without_geoip_is_honest() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
@@ -3930,10 +4089,6 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
-
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "define", "word");
-        assert!(handled);
-        assert!(next_pvt_text(&mut alice_rx).contains("external dictionary"));
 
         let (handled, _) = dispatch_builtin(&ctx, &alice, "loadtemplate", "");
         assert!(handled);

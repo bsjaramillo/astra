@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 proto-ares = { path = "../proto-ares" }

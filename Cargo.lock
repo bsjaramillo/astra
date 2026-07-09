@@ -187,6 +187,7 @@ dependencies = [
  "proto-ares",
  "rand 0.8.6",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "server-core",
