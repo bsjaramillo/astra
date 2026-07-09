@@ -289,7 +289,10 @@ pub fn parse_login(args_text: &str) -> Option<LoginArgs> {
 
     let version = items[0].clone();
     let guid_hex = &items[1];
-    if guid_hex.len() != 32 {
+    // El cliente Ares/ib0t manda 32 hex chars (16 bytes); algunos clientes
+    // web (ej. "inbizio web") mandan 64 hex chars (32 bytes). Tomamos los
+    // primeros 16 bytes en cualquier caso (paridad con sb0t WebProcessor).
+    if guid_hex.len() < 32 {
         return None;
     }
     let mut guid = [0u8; 16];
@@ -382,6 +385,28 @@ mod tests {
         assert_eq!(login.pmsg, "hello");
         assert!(!login.inbizier_web);
         assert!(!login.inbizier_mobile);
+    }
+
+    #[test]
+    fn parse_login_inbizio_64char_guid() {
+        // Login real de un cliente "inbizio web": guid de 64 hex chars (32B),
+        // useragent largo, y campos pmsg/avatar. Debe parsear (tomando los
+        // primeros 16 bytes del guid).
+        let args = "4,64,13,109,18,18,0:6000000d7bcb2510574ad8128d95a74679466e6223af1bcb518460b87c162fae6469ElMagoDelSiamMozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15inbizio web v0.1.5inbizio web v0.1.5";
+        let login = parse_login(args).expect("inbizio login debe parsear");
+        assert_eq!(login.version, "6000");
+        assert!(login.inbizier_mobile);
+        assert_eq!(login.name, "ElMagoDelSiam");
+        assert_eq!(login.guid[0], 0x00);
+        assert_eq!(login.guid[1], 0x0d);
+        assert_eq!(login.guid[2], 0x7b);
+    }
+
+    #[test]
+    fn parse_login_rejects_short_guid() {
+        // guid de menos de 32 hex chars → inválido.
+        let args = "4,8,5:2000deadbeefAlice";
+        assert!(parse_login(args).is_none());
     }
 
     #[test]
