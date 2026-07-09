@@ -21,12 +21,15 @@ use tracing::{info, warn};
 
 use server_core::{AppContext, LinkEvent, LinkUserSnapshot};
 
+use crate::crypto::{self, LinkCrypto};
 use crate::protocol::{
     read_link_from_stream, write_link_to_stream, LinkMsg, LinkPacketBuilder, LinkUser,
     MSG_LINK_PROTO,
 };
 
 const LINK_PACKET_HEADER_LEN: usize = 3;
+/// Versión de protocolo Link (sb0t `Settings.LINK_PROTO`).
+const LINK_PROTO: u16 = 500;
 
 /// Estado de un LinkClient.
 pub struct LinkClient {
@@ -103,52 +106,21 @@ impl LinkClient {
             .await
             .map_err(|e| format!("error conectando: {}", e))?;
 
-        // Calcular SHA1(name + guid.reverse()) — igual que el sb0t original
+        // Credentials = SHA1(reverse(name ++ guid)) — 20 bytes, paridad
+        // exacta con sb0t LeafOutbound.LeafLogin.
         let name = self.app.settings.room_name.clone();
-        let guid = self.app.settings.guid.clone();
+        let my_guid = crypto::guid_bytes_from_string(&self.app.settings.guid);
+        let credentials = crypto::credentials(&name, &my_guid);
 
-        // Si el guid es corto, lo hasheamos a 16 bytes (sb0t original)
-        let guid_bytes: [u8; 16] = if guid.len() >= 16 {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(&guid.as_bytes()[..16]);
-            arr
-        } else {
-            use sha1::{Digest, Sha1};
-            let mut hasher = Sha1::new();
-            hasher.update(guid.as_bytes());
-            let result = hasher.finalize();
-            // El sb0t usa solo los primeros 16 bytes del SHA1
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(&result[..16]);
-            arr
-        };
-
-        let mut guid_rev = guid_bytes;
-        guid_rev.reverse();
-        let mut combined = Vec::new();
-        combined.extend_from_slice(name.as_bytes());
-        combined.extend_from_slice(&guid_rev);
-        use sha1::{Digest, Sha1};
-        let mut hasher = Sha1::new();
-        hasher.update(&combined);
-        let sha1_digest = hasher.finalize();
-        // El sb0t original usa solo los primeros 16 bytes del SHA1
-        let mut login_hash = [0u8; 16];
-        login_hash.copy_from_slice(&sha1_digest[..16]);
-
-        // Enviar LeafLogin envuelto en MSG_LINK_PROTO
+        // Enviar LeafLogin: credentials(20) + LINK_PROTO(u16) + port(u16).
+        // El login nunca va encriptado.
         let mut b = LinkPacketBuilder::new();
-        b.write_string(&name);
-        b.write_guid(&login_hash);
-        b.write_u16(MSG_LINK_PROTO as u16);
+        b.write_bytes(&credentials);
+        b.write_u16(LINK_PROTO);
         b.write_u16(self.app.settings.port);
         let login_payload = {
-            let mut tmp = Vec::new();
             let packet = b.build_link_packet(LinkMsg::LeafLogin);
-            // El packet tiene: u16 len + u8 op + args
-            // Necesitamos solo los args (sin u16 len + u8 op)
-            tmp.extend_from_slice(&packet[LINK_PACKET_HEADER_LEN..]);
-            tmp
+            packet[LINK_PACKET_HEADER_LEN..].to_vec()
         };
 
         let mut stream = stream;
@@ -156,19 +128,28 @@ impl LinkClient {
             .await
             .map_err(|e| format!("error enviando login: {}", e))?;
 
-        // Leer HubAck
+        // Leer HubAck. sb0t/cifrado: 48 bytes de key+IV ofuscados. Legacy
+        // Astra: 1 byte de status. Distinguimos por longitud del payload.
         let (op, payload) = read_link_from_stream(&mut stream)
             .await
             .map_err(|e| format!("error leyendo ACK: {}", e))?;
         if op != LinkMsg::HubAck {
             return Err(format!("esperado HubAck, recibí {:?}", op));
         }
-        let mut r = crate::protocol::LinkPacketReader::from_payload(&payload);
-        let ack_status = r.read_u8().map_err(|e| format!("ACK malformado: {}", e))?;
-        if ack_status != 1 {
-            return Err(format!("login rechazado: status={}", ack_status));
-        }
-        info!("link client: ACK recibido, leyendo userlist...");
+        let crypto: Option<LinkCrypto> = if payload.len() >= 48 {
+            let mut obf = [0u8; 48];
+            obf.copy_from_slice(&payload[..48]);
+            let c = LinkCrypto::from_obfuscated(&obf, &my_guid);
+            info!("link client: ACK cifrado recibido, sesión AES-256 establecida");
+            Some(c)
+        } else {
+            let status = payload.first().copied().unwrap_or(0);
+            if status != 1 {
+                return Err(format!("login rechazado: status={}", status));
+            }
+            info!("link client: ACK legacy recibido (sin cifrado)");
+            None
+        };
 
         // Leer userlist
         loop {
@@ -177,7 +158,7 @@ impl LinkClient {
                 .map_err(|e| format!("error leyendo userlist: {}", e))?;
             match op {
                 LinkMsg::UserlistItem => {
-                    if let Some(user) = parse_userlist_item(&payload) {
+                    if let Some(user) = parse_userlist_item(&payload, crypto) {
                         info!("link client: user del hub: {}", user.name);
                         self.peer_users.lock().push(user);
                     }
@@ -198,7 +179,7 @@ impl LinkClient {
         // Loop de keep-alive: enviar ping cada 30s, esperar pong
         let mut ping_timer = interval(Duration::from_secs(30));
         ping_timer.tick().await; // primer tick inmediato
-        sync_local_users_to_hub(&self.app, &mut stream).await?;
+        sync_local_users_to_hub(&self.app, &mut stream, crypto).await?;
         let mut link_events = self.app.subscribe_link_events();
 
         loop {
@@ -221,7 +202,7 @@ impl LinkClient {
                     };
                     if op == LinkMsg::HubPong {
                         // OK, pong recibido
-                    } else if handle_incoming_link_message(&self.app, self, op, &payload) {
+                    } else if handle_incoming_link_message(&self.app, self, op, &payload, crypto) {
                         // mensaje aplicado localmente
                     } else {
                         warn!("link client: opcode no manejado: {:?}", op);
@@ -230,7 +211,7 @@ impl LinkClient {
                 event = link_events.recv() => {
                     match event {
                         Ok(event) => {
-                            if let Err(e) = send_link_event(&mut stream, &event).await {
+                            if let Err(e) = send_link_event(&mut stream, &event, crypto).await {
                                 return Err(format!("error reenviando evento Link al hub: {}", e));
                             }
                         }
@@ -250,8 +231,8 @@ impl LinkClient {
     }
 }
 
-fn build_leaf_join_payload(user: &server_core::user_pool::AresUser) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_leaf_join_payload(user: &server_core::user_pool::AresUser, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(&user.name.read()); // org_name
     b.write_string(&user.name.read()); // name
     b.write_string(&user.version);
@@ -283,6 +264,7 @@ fn build_leaf_join_payload(user: &server_core::user_pool::AresUser) -> Vec<u8> {
 async fn sync_local_users_to_hub(
     app: &AppContext,
     stream: &mut TcpStream,
+    crypto: Option<LinkCrypto>,
 ) -> Result<(), String> {
     let current_users: Vec<std::sync::Arc<server_core::user_pool::AresUser>> = app
         .user_pool
@@ -292,7 +274,7 @@ async fn sync_local_users_to_hub(
         .collect();
 
     for user in &current_users {
-        let payload = build_leaf_join_payload(user);
+        let payload = build_leaf_join_payload(user, crypto);
         write_link_to_stream(&mut *stream, LinkMsg::LeafJoin, &payload)
             .await
             .map_err(|e| format!("error enviando LeafJoin inicial: {}", e))?;
@@ -301,8 +283,8 @@ async fn sync_local_users_to_hub(
     Ok(())
 }
 
-fn parse_userlist_item(payload: &[u8]) -> Option<LinkUser> {
-    let mut r = crate::protocol::LinkPacketReader::from_payload(payload);
+fn parse_userlist_item(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<LinkUser> {
+    let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let org_name = r.read_string().ok()?;
     let name = r.read_string().ok()?;
     let version = r.read_string().ok()?;
@@ -359,10 +341,11 @@ fn handle_incoming_link_message(
     client: &LinkClient,
     op: LinkMsg,
     payload: &[u8],
+    crypto: Option<LinkCrypto>,
 ) -> bool {
     match op {
         LinkMsg::LeafJoin => {
-            if let Some(user) = parse_userlist_item(payload) {
+            if let Some(user) = parse_userlist_item(payload, crypto) {
                 client.peer_users.lock().push(user.clone());
                 broadcast_to_local_users(app, build_server_join_from_link_user(&user));
                 true
@@ -371,7 +354,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::NickChanged => {
-            if let Some((old_name, user)) = parse_link_nick_changed_payload(payload) {
+            if let Some((old_name, user)) = parse_link_nick_changed_payload(payload, crypto) {
                 {
                     let mut peer_users = client.peer_users.lock();
                     peer_users.retain(|item| !item.name.eq_ignore_ascii_case(&old_name));
@@ -385,7 +368,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::VroomChanged => {
-            if let Some(user) = parse_userlist_item(payload) {
+            if let Some(user) = parse_userlist_item(payload, crypto) {
                 {
                     let mut peer_users = client.peer_users.lock();
                     peer_users.retain(|item| !item.name.eq_ignore_ascii_case(&user.name));
@@ -399,7 +382,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::CustomName => {
-            if let Some((name, custom_name)) = parse_link_custom_name_payload(payload) {
+            if let Some((name, custom_name)) = parse_link_custom_name_payload(payload, crypto) {
                 let mut peer_users = client.peer_users.lock();
                 if let Some(existing) = peer_users.iter_mut().find(|item| item.name.eq_ignore_ascii_case(&name)) {
                     existing.custom_name = custom_name;
@@ -410,7 +393,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::UserUpdated => {
-            if let Some(user) = parse_userlist_item(payload) {
+            if let Some(user) = parse_userlist_item(payload, crypto) {
                 {
                     let mut peer_users = client.peer_users.lock();
                     if let Some(existing) = peer_users.iter_mut().find(|item| item.name.eq_ignore_ascii_case(&user.name)) {
@@ -426,7 +409,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::Part => {
-            if let Some(name) = parse_link_part_name(payload) {
+            if let Some(name) = parse_link_part_name(payload, crypto) {
                 client.peer_users.lock().retain(|user| !user.name.eq_ignore_ascii_case(&name));
                 broadcast_to_local_users(app, build_server_part_for_name(&name));
                 true
@@ -435,7 +418,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::PublicText => {
-            if let Some((from, text)) = parse_link_chat_payload(payload) {
+            if let Some((from, text)) = parse_link_chat_payload(payload, crypto) {
                 broadcast_to_local_users(app, server_core::outbound::build_public(&from, &text));
                 true
             } else {
@@ -443,7 +426,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::EmoteText => {
-            if let Some((from, text)) = parse_link_chat_payload(payload) {
+            if let Some((from, text)) = parse_link_chat_payload(payload, crypto) {
                 broadcast_to_local_users(app, server_core::outbound::build_emote(&from, &text));
                 true
             } else {
@@ -451,7 +434,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::PrivateText => {
-            if let Some((from, to, text)) = parse_link_private_payload(payload) {
+            if let Some((from, to, text)) = parse_link_private_payload(payload, crypto) {
                 if let Some(target) = app.user_pool.get_by_name(&to) {
                     if target
                         .ignore_list
@@ -474,7 +457,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::PrivateIgnored => {
-            if let Some((from, to)) = parse_link_private_ignored_payload(payload) {
+            if let Some((from, to)) = parse_link_private_ignored_payload(payload, crypto) {
                 if let Some(local_from) = app.user_pool.get_by_name(&from) {
                     let mut w = proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::ServerIsIgnoringYou);
                     w.write_string(&to).ok();
@@ -486,7 +469,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::PublicToUser => {
-            if let Some((from, to, text)) = parse_link_private_payload(payload) {
+            if let Some((from, to, text)) = parse_link_private_payload(payload, crypto) {
                 if let Some(target) = app.user_pool.get_by_name(&to) {
                     let _ = target.send(server_core::outbound::build_public(&from, &text));
                 }
@@ -496,7 +479,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::EmoteToUser => {
-            if let Some((from, to, text)) = parse_link_private_payload(payload) {
+            if let Some((from, to, text)) = parse_link_private_payload(payload, crypto) {
                 if let Some(target) = app.user_pool.get_by_name(&to) {
                     let _ = target.send(server_core::outbound::build_emote(&from, &text));
                 }
@@ -506,7 +489,7 @@ fn handle_incoming_link_message(
             }
         }
         LinkMsg::PersonalMessage => {
-            if let Some((name, text)) = parse_link_chat_payload(payload) {
+            if let Some((name, text)) = parse_link_chat_payload(payload, crypto) {
                 let mut w = proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::PersonalMessage);
                 w.write_string(&name).ok();
                 w.write_string(&text).ok();
@@ -528,43 +511,43 @@ fn handle_incoming_link_message(
     }
 }
 
-async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent) -> Result<(), String> {
+async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent, crypto: Option<LinkCrypto>) -> Result<(), String> {
     let (msg, payload) = match event {
         LinkEvent::Join { origin, user } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::LeafJoin, build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin))
+            (LinkMsg::LeafJoin, build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin, crypto))
         }
         LinkEvent::UserUpdated { origin, user } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::UserUpdated, build_leaf_join_payload_from_snapshot(user, LinkMsg::UserUpdated))
+            (LinkMsg::UserUpdated, build_leaf_join_payload_from_snapshot(user, LinkMsg::UserUpdated, crypto))
         }
         LinkEvent::NickChanged { origin, old_name, user } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::NickChanged, build_nick_changed_payload(old_name, user))
+            (LinkMsg::NickChanged, build_nick_changed_payload(old_name, user, crypto))
         }
         LinkEvent::VroomChanged { origin, user } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::VroomChanged, build_leaf_join_payload_from_snapshot(user, LinkMsg::VroomChanged))
+            (LinkMsg::VroomChanged, build_leaf_join_payload_from_snapshot(user, LinkMsg::VroomChanged, crypto))
         }
         LinkEvent::CustomName { origin, name, custom_name } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::CustomName, build_custom_name_payload(name, custom_name.as_deref()))
+            (LinkMsg::CustomName, build_custom_name_payload(name, custom_name.as_deref(), crypto))
         }
         LinkEvent::Part { origin, name } => {
             if origin.is_some() {
                 return Ok(());
             }
-            let mut b = LinkPacketBuilder::new();
+            let mut b = LinkPacketBuilder::new_with_crypto(crypto);
             b.write_string(name);
             (LinkMsg::Part, b.build_link_packet(LinkMsg::Part)[LINK_PACKET_HEADER_LEN..].to_vec())
         }
@@ -572,43 +555,43 @@ async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent) -> Result<()
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::PublicText, build_chat_payload(from, text, LinkMsg::PublicText))
+            (LinkMsg::PublicText, build_chat_payload(from, text, LinkMsg::PublicText, crypto))
         }
         LinkEvent::Emote { origin, from, text } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::EmoteText, build_chat_payload(from, text, LinkMsg::EmoteText))
+            (LinkMsg::EmoteText, build_chat_payload(from, text, LinkMsg::EmoteText, crypto))
         }
         LinkEvent::Private { origin, from, to, text } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::PrivateText, build_private_payload(from, to, text))
+            (LinkMsg::PrivateText, build_private_payload(from, to, text, crypto))
         }
         LinkEvent::PublicToUser { origin, from, to, text } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::PublicToUser, build_private_payload(from, to, text))
+            (LinkMsg::PublicToUser, build_private_payload(from, to, text, crypto))
         }
         LinkEvent::EmoteToUser { origin, from, to, text } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::EmoteToUser, build_private_payload(from, to, text))
+            (LinkMsg::EmoteToUser, build_private_payload(from, to, text, crypto))
         }
         LinkEvent::PrivateIgnored { origin, from, to } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::PrivateIgnored, build_private_ignored_payload(from, to))
+            (LinkMsg::PrivateIgnored, build_private_ignored_payload(from, to, crypto))
         }
         LinkEvent::PersonalMessage { origin, name, text } => {
             if origin.is_some() {
                 return Ok(());
             }
-            (LinkMsg::PersonalMessage, build_chat_payload(name, text, LinkMsg::PersonalMessage))
+            (LinkMsg::PersonalMessage, build_chat_payload(name, text, LinkMsg::PersonalMessage, crypto))
         }
         LinkEvent::Raw { origin, msg, payload } => {
             if origin.is_some() {
@@ -647,8 +630,8 @@ pub(crate) fn is_passthrough_opcode(op: LinkMsg) -> bool {
     )
 }
 
-fn build_leaf_join_payload_from_snapshot(user: &LinkUserSnapshot, msg: LinkMsg) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_leaf_join_payload_from_snapshot(user: &LinkUserSnapshot, msg: LinkMsg, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(&user.org_name);
     b.write_string(&user.name);
     b.write_string(&user.version);
@@ -674,79 +657,79 @@ fn build_leaf_join_payload_from_snapshot(user: &LinkUserSnapshot, msg: LinkMsg) 
     b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
-fn build_chat_payload(from: &str, text: &str, msg: LinkMsg) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_chat_payload(from: &str, text: &str, msg: LinkMsg, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(from);
     b.write_string(text);
     b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
-fn build_nick_changed_payload(old_name: &str, user: &LinkUserSnapshot) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_nick_changed_payload(old_name: &str, user: &LinkUserSnapshot, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(old_name);
-    b.write_bytes(&build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin));
+    b.write_bytes(&build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin, crypto));
     b.build_link_packet(LinkMsg::NickChanged)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
-fn build_custom_name_payload(name: &str, custom_name: Option<&str>) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_custom_name_payload(name: &str, custom_name: Option<&str>, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(name);
     b.write_string(custom_name.unwrap_or(""));
     b.build_link_packet(LinkMsg::CustomName)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
-fn build_private_payload(from: &str, to: &str, text: &str) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_private_payload(from: &str, to: &str, text: &str, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(from);
     b.write_string(to);
     b.write_string(text);
     b.build_link_packet(LinkMsg::PrivateText)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
-fn build_private_ignored_payload(from: &str, to: &str) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_private_ignored_payload(from: &str, to: &str, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(from);
     b.write_string(to);
     b.build_link_packet(LinkMsg::PrivateIgnored)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
-fn parse_link_chat_payload(payload: &[u8]) -> Option<(String, String)> {
-    let mut r = crate::protocol::LinkPacketReader::from_payload(payload);
+fn parse_link_chat_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, String)> {
+    let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let from = r.read_string().ok()?;
     let text = r.read_string().ok()?;
     Some((from, text))
 }
 
-fn parse_link_private_payload(payload: &[u8]) -> Option<(String, String, String)> {
-    let mut r = crate::protocol::LinkPacketReader::from_payload(payload);
+fn parse_link_private_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, String, String)> {
+    let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let from = r.read_string().ok()?;
     let to = r.read_string().ok()?;
     let text = r.read_string().ok()?;
     Some((from, to, text))
 }
 
-fn parse_link_private_ignored_payload(payload: &[u8]) -> Option<(String, String)> {
-    let mut r = crate::protocol::LinkPacketReader::from_payload(payload);
+fn parse_link_private_ignored_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, String)> {
+    let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let from = r.read_string().ok()?;
     let to = r.read_string().ok()?;
     Some((from, to))
 }
 
-fn parse_link_part_name(payload: &[u8]) -> Option<String> {
-    let mut r = crate::protocol::LinkPacketReader::from_payload(payload);
+fn parse_link_part_name(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<String> {
+    let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
     r.read_string().ok()
 }
 
-fn parse_link_nick_changed_payload(payload: &[u8]) -> Option<(String, LinkUser)> {
-    let mut r = crate::protocol::LinkPacketReader::from_payload(payload);
+fn parse_link_nick_changed_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, LinkUser)> {
+    let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let old_name = r.read_string().ok()?;
     let remaining = r.read_bytes(r.remaining()).ok()?;
-    let user = parse_userlist_item(&remaining)?;
+    let user = parse_userlist_item(&remaining, crypto)?;
     Some((old_name, user))
 }
 
-fn parse_link_custom_name_payload(payload: &[u8]) -> Option<(String, Option<String>)> {
-    let mut r = crate::protocol::LinkPacketReader::from_payload(payload);
+fn parse_link_custom_name_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, Option<String>)> {
+    let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let name = r.read_string().ok()?;
     let custom_name = r.read_string().ok()?;
     let custom_name = if custom_name.is_empty() { None } else { Some(custom_name) };

@@ -27,6 +27,7 @@ use crate::protocol::{
     LinkUser,
 };
 use crate::client::is_passthrough_opcode;
+use crate::crypto::{self, LinkCrypto};
 
 const UNSPECIFIED_IPV4: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 const LINK_PACKET_HEADER_LEN: usize = 3;
@@ -98,14 +99,13 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
         return Err(format!("esperado LeafLogin, recibí {:?}", op));
     }
 
+    // El LeafLogin nunca va encriptado (establece la sesión). El primer
+    // campo es `credentials` (SHA1 de 20 bytes), no un string null-terminated.
     let mut r = crate::protocol::LinkPacketReader::from_payload(&payload);
 
-    let leaf_name = r
-        .read_string()
-        .map_err(|e| format!("error leyendo leaf name: {}", e))?;
-    let _leaf_hash = r
-        .read_guid()
-        .map_err(|e| format!("error leyendo leaf hash: {}", e))?;
+    let credentials = r
+        .read_bytes(20)
+        .map_err(|e| format!("error leyendo credentials: {}", e))?;
     let _link_proto = r
         .read_u16()
         .map_err(|e| format!("error leyendo link_proto: {}", e))?;
@@ -113,14 +113,51 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
         .read_u16()
         .map_err(|e| format!("error leyendo port: {}", e))?;
 
+    // Validar contra la lista de trusted leaves. Si la lista está vacía,
+    // modo legacy: aceptar cualquiera y no encriptar (compat hacia atrás).
+    let trusted = &app.settings.link_trusted_leaves;
+    let (leaf_name, crypto): (String, Option<LinkCrypto>) = if trusted.is_empty() {
+        let name = String::from_utf8_lossy(&credentials)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>();
+        let name = if name.is_empty() { "leaf".to_string() } else { name };
+        warn!("link server: sin trusted leaves configurados → modo legacy sin cifrado");
+        (name, None)
+    } else {
+        let matched = trusted.iter().find(|t| {
+            let guid = crypto::guid_bytes_from_string(&t.guid);
+            crypto::credentials(&t.name, &guid)[..] == credentials[..]
+        });
+        let Some(item) = matched else {
+            // sb0t manda LinkError::Untrusted; nosotros cerramos.
+            return Err("leaf no autorizado (credentials no coinciden)".into());
+        };
+        (item.name.clone(), Some(LinkCrypto::generate()))
+    };
+
     info!(
-        "link server: leaf '{}' (port {}) conectado",
-        leaf_name, leaf_port
+        "link server: leaf '{}' (port {}) conectado{}",
+        leaf_name,
+        leaf_port,
+        if crypto.is_some() { " [cifrado]" } else { " [legacy]" }
     );
 
-    // 2. Enviar HubAck (status = 1)
+    // 2. Enviar HubAck. Con crypto: los 48 bytes de key+IV ofuscados con
+    // MD5(guid_del_leaf) (paridad sb0t HubOutbound.HubAck). Sin crypto:
+    // status=1 legacy.
     let mut b = LinkPacketBuilder::new();
-    b.write_u8(1); // success
+    match &crypto {
+        Some(c) => {
+            let leaf_guid = trusted
+                .iter()
+                .find(|t| t.name == leaf_name)
+                .map(|t| crypto::guid_bytes_from_string(&t.guid))
+                .unwrap_or([0u8; 16]);
+            b.write_bytes(&c.to_obfuscated(&leaf_guid));
+        }
+        None => b.write_u8(1),
+    }
     let ack_packet = b.build_link_packet(LinkMsg::HubAck);
     let ack_payload = ack_packet[3..].to_vec();
     write_link_to_stream(&mut stream, LinkMsg::HubAck, &ack_payload)
@@ -135,7 +172,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
         .filter(|u| u.logged_in)
         .collect();
     for user in &users {
-        let mut b = LinkPacketBuilder::new();
+        let mut b = LinkPacketBuilder::new_with_crypto(crypto);
         b.write_string(&user.name.read()); // org_name
         b.write_string(&user.name.read()); // name
         b.write_string(&user.version);
@@ -203,7 +240,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                 match event {
                     Ok(event) => {
                         if should_forward_event_to_leaf(&event, &leaf_name) {
-                            if send_link_event(&mut stream, &event).await.is_err() {
+                            if send_link_event(&mut stream, &event, crypto).await.is_err() {
                                 info!("link server: leaf '{}' desconectado", leaf_name);
                                 return Ok(());
                             }
@@ -226,7 +263,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                 match op {
                     LinkMsg::LeafPing => {}
                     LinkMsg::NickChanged => {
-                        if let Some((old_name, user)) = parse_link_nick_changed_payload(&payload) {
+                        if let Some((old_name, user)) = parse_link_nick_changed_payload(&payload, crypto) {
                             let part_pkt = build_server_part_for_name(&old_name);
                             let join_pkt = build_server_join_from_link_user(&user);
                             broadcast_to_local_users(&app, part_pkt);
@@ -242,7 +279,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::VroomChanged => {
-                        if let Some(user) = parse_link_user_item(&payload) {
+                        if let Some(user) = parse_link_user_item(&payload, crypto) {
                             let part_pkt = build_server_part_for_name(&user.name);
                             let join_pkt = build_server_join_from_link_user(&user);
                             broadcast_to_local_users(&app, part_pkt);
@@ -257,7 +294,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::Part => {
-                        if let Some(name) = parse_link_part_name(&payload) {
+                        if let Some(name) = parse_link_part_name(&payload, crypto) {
                             let part_pkt = build_server_part_for_name(&name);
                             broadcast_to_local_users(&app, part_pkt);
                             app.publish_link_event(LinkEvent::Part {
@@ -270,7 +307,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::LeafJoin => {
-                        if let Some(user) = parse_link_user_item(&payload) {
+                        if let Some(user) = parse_link_user_item(&payload, crypto) {
                             let join_pkt = build_server_join_from_link_user(&user);
                             broadcast_to_local_users(&app, join_pkt);
                             app.publish_link_event(LinkEvent::Join {
@@ -283,7 +320,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::UserUpdated => {
-                        if let Some(user) = parse_link_user_item(&payload) {
+                        if let Some(user) = parse_link_user_item(&payload, crypto) {
                             let join_pkt = build_server_join_from_link_user(&user);
                             broadcast_to_local_users(&app, join_pkt);
                             app.publish_link_event(LinkEvent::UserUpdated {
@@ -296,7 +333,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::PublicText => {
-                        if let Some((from, text)) = parse_link_chat_payload(&payload) {
+                        if let Some((from, text)) = parse_link_chat_payload(&payload, crypto) {
                             let pkt = server_core::outbound::build_public(&from, &text);
                             broadcast_to_local_users(&app, pkt);
                             app.publish_link_event(LinkEvent::Public {
@@ -309,7 +346,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::EmoteText => {
-                        if let Some((from, text)) = parse_link_chat_payload(&payload) {
+                        if let Some((from, text)) = parse_link_chat_payload(&payload, crypto) {
                             let pkt = server_core::outbound::build_emote(&from, &text);
                             broadcast_to_local_users(&app, pkt);
                             app.publish_link_event(LinkEvent::Emote {
@@ -322,7 +359,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::PrivateText => {
-                        if let Some((from, to, text)) = parse_link_private_payload(&payload) {
+                        if let Some((from, to, text)) = parse_link_private_payload(&payload, crypto) {
                             if let Some(target) = app.user_pool.get_by_name(&to) {
                                 if target
                                     .ignore_list
@@ -357,7 +394,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::PrivateIgnored => {
-                        if let Some((from, to)) = parse_link_private_ignored_payload(&payload) {
+                        if let Some((from, to)) = parse_link_private_ignored_payload(&payload, crypto) {
                             if let Some(local_from) = app.user_pool.get_by_name(&from) {
                                 let mut w = PacketWriter::with_msg(TcpMsg::ServerIsIgnoringYou);
                                 w.write_string(&to).ok();
@@ -373,7 +410,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::PublicToUser => {
-                        if let Some((from, to, text)) = parse_link_private_payload(&payload) {
+                        if let Some((from, to, text)) = parse_link_private_payload(&payload, crypto) {
                             if let Some(target) = app.user_pool.get_by_name(&to) {
                                 let _ = target.send(server_core::outbound::build_public(&from, &text));
                             }
@@ -388,7 +425,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::EmoteToUser => {
-                        if let Some((from, to, text)) = parse_link_private_payload(&payload) {
+                        if let Some((from, to, text)) = parse_link_private_payload(&payload, crypto) {
                             if let Some(target) = app.user_pool.get_by_name(&to) {
                                 let _ = target.send(server_core::outbound::build_emote(&from, &text));
                             }
@@ -403,7 +440,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::PersonalMessage => {
-                        if let Some((name, text)) = parse_link_chat_payload(&payload) {
+                        if let Some((name, text)) = parse_link_chat_payload(&payload, crypto) {
                             let mut w = PacketWriter::with_msg(TcpMsg::PersonalMessage);
                             w.write_string(&name).ok();
                             w.write_string(&text).ok();
@@ -418,7 +455,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                         }
                     }
                     LinkMsg::CustomName => {
-                        if let Some((name, custom_name)) = parse_link_custom_name_payload(&payload) {
+                        if let Some((name, custom_name)) = parse_link_custom_name_payload(&payload, crypto) {
                             app.publish_link_event(LinkEvent::CustomName {
                                 origin: Some(leaf_name.clone()),
                                 name,
@@ -445,8 +482,8 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
     }
 }
 
-fn parse_link_user_item(payload: &[u8]) -> Option<LinkUser> {
-    let mut r = LinkPacketReader::from_payload(payload);
+fn parse_link_user_item(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<LinkUser> {
+    let mut r = LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let org_name = r.read_string().ok()?;
     let name = r.read_string().ok()?;
     let version = r.read_string().ok()?;
@@ -498,43 +535,43 @@ fn parse_link_user_item(payload: &[u8]) -> Option<LinkUser> {
     })
 }
 
-fn parse_link_part_name(payload: &[u8]) -> Option<String> {
-    let mut r = LinkPacketReader::from_payload(payload);
+fn parse_link_part_name(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<String> {
+    let mut r = LinkPacketReader::from_payload_with_crypto(payload, crypto);
     r.read_string().ok()
 }
 
-fn parse_link_chat_payload(payload: &[u8]) -> Option<(String, String)> {
-    let mut r = LinkPacketReader::from_payload(payload);
+fn parse_link_chat_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, String)> {
+    let mut r = LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let from = r.read_string().ok()?;
     let text = r.read_string().ok()?;
     Some((from, text))
 }
 
-fn parse_link_private_payload(payload: &[u8]) -> Option<(String, String, String)> {
-    let mut r = LinkPacketReader::from_payload(payload);
+fn parse_link_private_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, String, String)> {
+    let mut r = LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let from = r.read_string().ok()?;
     let to = r.read_string().ok()?;
     let text = r.read_string().ok()?;
     Some((from, to, text))
 }
 
-fn parse_link_private_ignored_payload(payload: &[u8]) -> Option<(String, String)> {
-    let mut r = LinkPacketReader::from_payload(payload);
+fn parse_link_private_ignored_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, String)> {
+    let mut r = LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let from = r.read_string().ok()?;
     let to = r.read_string().ok()?;
     Some((from, to))
 }
 
-fn parse_link_nick_changed_payload(payload: &[u8]) -> Option<(String, LinkUser)> {
-    let mut r = LinkPacketReader::from_payload(payload);
+fn parse_link_nick_changed_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, LinkUser)> {
+    let mut r = LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let old_name = r.read_string().ok()?;
     let remaining = r.read_bytes(r.remaining()).ok()?;
-    let user = parse_link_user_item(&remaining)?;
+    let user = parse_link_user_item(&remaining, crypto)?;
     Some((old_name, user))
 }
 
-fn parse_link_custom_name_payload(payload: &[u8]) -> Option<(String, Option<String>)> {
-    let mut r = LinkPacketReader::from_payload(payload);
+fn parse_link_custom_name_payload(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<(String, Option<String>)> {
+    let mut r = LinkPacketReader::from_payload_with_crypto(payload, crypto);
     let name = r.read_string().ok()?;
     let custom_name = r.read_string().ok()?;
     let custom_name = if custom_name.is_empty() { None } else { Some(custom_name) };
@@ -587,25 +624,29 @@ fn should_forward_event_to_leaf(event: &LinkEvent, leaf_name: &str) -> bool {
     }
 }
 
-async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent) -> Result<(), String> {
+async fn send_link_event(
+    stream: &mut TcpStream,
+    event: &LinkEvent,
+    crypto: Option<LinkCrypto>,
+) -> Result<(), String> {
     let (msg, payload) = match event {
-        LinkEvent::Join { user, .. } => (LinkMsg::LeafJoin, build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin)),
-        LinkEvent::UserUpdated { user, .. } => (LinkMsg::UserUpdated, build_leaf_join_payload_from_snapshot(user, LinkMsg::UserUpdated)),
-        LinkEvent::NickChanged { old_name, user, .. } => (LinkMsg::NickChanged, build_nick_changed_payload(old_name, user)),
-        LinkEvent::VroomChanged { user, .. } => (LinkMsg::VroomChanged, build_leaf_join_payload_from_snapshot(user, LinkMsg::VroomChanged)),
-        LinkEvent::CustomName { name, custom_name, .. } => (LinkMsg::CustomName, build_custom_name_payload(name, custom_name.as_deref())),
+        LinkEvent::Join { user, .. } => (LinkMsg::LeafJoin, build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin, crypto)),
+        LinkEvent::UserUpdated { user, .. } => (LinkMsg::UserUpdated, build_leaf_join_payload_from_snapshot(user, LinkMsg::UserUpdated, crypto)),
+        LinkEvent::NickChanged { old_name, user, .. } => (LinkMsg::NickChanged, build_nick_changed_payload(old_name, user, crypto)),
+        LinkEvent::VroomChanged { user, .. } => (LinkMsg::VroomChanged, build_leaf_join_payload_from_snapshot(user, LinkMsg::VroomChanged, crypto)),
+        LinkEvent::CustomName { name, custom_name, .. } => (LinkMsg::CustomName, build_custom_name_payload(name, custom_name.as_deref(), crypto)),
         LinkEvent::Part { name, .. } => {
-            let mut b = LinkPacketBuilder::new();
+            let mut b = LinkPacketBuilder::new_with_crypto(crypto);
             b.write_string(name);
             (LinkMsg::Part, b.build_link_packet(LinkMsg::Part)[LINK_PACKET_HEADER_LEN..].to_vec())
         }
-        LinkEvent::Public { from, text, .. } => (LinkMsg::PublicText, build_chat_payload(from, text, LinkMsg::PublicText)),
-        LinkEvent::Emote { from, text, .. } => (LinkMsg::EmoteText, build_chat_payload(from, text, LinkMsg::EmoteText)),
-        LinkEvent::Private { from, to, text, .. } => (LinkMsg::PrivateText, build_private_payload(from, to, text)),
-        LinkEvent::PublicToUser { from, to, text, .. } => (LinkMsg::PublicToUser, build_private_payload(from, to, text)),
-        LinkEvent::EmoteToUser { from, to, text, .. } => (LinkMsg::EmoteToUser, build_private_payload(from, to, text)),
-        LinkEvent::PrivateIgnored { from, to, .. } => (LinkMsg::PrivateIgnored, build_private_ignored_payload(from, to)),
-        LinkEvent::PersonalMessage { name, text, .. } => (LinkMsg::PersonalMessage, build_chat_payload(name, text, LinkMsg::PersonalMessage)),
+        LinkEvent::Public { from, text, .. } => (LinkMsg::PublicText, build_chat_payload(from, text, LinkMsg::PublicText, crypto)),
+        LinkEvent::Emote { from, text, .. } => (LinkMsg::EmoteText, build_chat_payload(from, text, LinkMsg::EmoteText, crypto)),
+        LinkEvent::Private { from, to, text, .. } => (LinkMsg::PrivateText, build_private_payload(from, to, text, crypto)),
+        LinkEvent::PublicToUser { from, to, text, .. } => (LinkMsg::PublicToUser, build_private_payload(from, to, text, crypto)),
+        LinkEvent::EmoteToUser { from, to, text, .. } => (LinkMsg::EmoteToUser, build_private_payload(from, to, text, crypto)),
+        LinkEvent::PrivateIgnored { from, to, .. } => (LinkMsg::PrivateIgnored, build_private_ignored_payload(from, to, crypto)),
+        LinkEvent::PersonalMessage { name, text, .. } => (LinkMsg::PersonalMessage, build_chat_payload(name, text, LinkMsg::PersonalMessage, crypto)),
         LinkEvent::Raw { msg, payload, .. } => {
             let Some(link_msg) = LinkMsg::from_u8(*msg) else {
                 return Ok(());
@@ -617,8 +658,8 @@ async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent) -> Result<()
     write_link_to_stream(stream, msg, &payload).await.map_err(|e| e.to_string())
 }
 
-fn build_leaf_join_payload_from_snapshot(user: &LinkUserSnapshot, msg: LinkMsg) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_leaf_join_payload_from_snapshot(user: &LinkUserSnapshot, msg: LinkMsg, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(&user.org_name);
     b.write_string(&user.name);
     b.write_string(&user.version);
@@ -644,36 +685,36 @@ fn build_leaf_join_payload_from_snapshot(user: &LinkUserSnapshot, msg: LinkMsg) 
     b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
-fn build_nick_changed_payload(old_name: &str, user: &LinkUserSnapshot) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_nick_changed_payload(old_name: &str, user: &LinkUserSnapshot, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(old_name);
-    b.write_bytes(&build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin));
+    b.write_bytes(&build_leaf_join_payload_from_snapshot(user, LinkMsg::LeafJoin, crypto));
     b.build_link_packet(LinkMsg::NickChanged)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
 
-fn build_chat_payload(from: &str, text: &str, msg: LinkMsg) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_chat_payload(from: &str, text: &str, msg: LinkMsg, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(from);
     b.write_string(text);
     b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec()
 }
-fn build_custom_name_payload(name: &str, custom_name: Option<&str>) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_custom_name_payload(name: &str, custom_name: Option<&str>, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(name);
     b.write_string(custom_name.unwrap_or(""));
     b.build_link_packet(LinkMsg::CustomName)[3..].to_vec()
 }
 
-fn build_private_payload(from: &str, to: &str, text: &str) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_private_payload(from: &str, to: &str, text: &str, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(from);
     b.write_string(to);
     b.write_string(text);
     b.build_link_packet(LinkMsg::PrivateText)[3..].to_vec()
 }
 
-fn build_private_ignored_payload(from: &str, to: &str) -> Vec<u8> {
-    let mut b = LinkPacketBuilder::new();
+fn build_private_ignored_payload(from: &str, to: &str, crypto: Option<LinkCrypto>) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
     b.write_string(from);
     b.write_string(to);
     b.build_link_packet(LinkMsg::PrivateIgnored)[3..].to_vec()
@@ -757,7 +798,7 @@ mod tests {
         b.write_u8(0);
         let packet = b.build_link_packet(LinkMsg::LeafJoin);
 
-        let parsed = parse_link_user_item(&packet[3..]).expect("payload válido");
+        let parsed = parse_link_user_item(&packet[3..], None).expect("payload válido");
         assert_eq!(parsed.name, "Alice");
         assert_eq!(parsed.file_count, 42);
         assert_eq!(parsed.port, 5009);
@@ -768,7 +809,49 @@ mod tests {
         let mut b = LinkPacketBuilder::new();
         b.write_string("Bob");
         let packet = b.build_link_packet(LinkMsg::Part);
-        let name = parse_link_part_name(&packet[3..]).expect("part válido");
+        let name = parse_link_part_name(&packet[3..], None).expect("part válido");
         assert_eq!(name, "Bob");
+    }
+
+    #[test]
+    fn encrypted_userlist_item_roundtrip() {
+        // Con crypto: el builder cifra strings; el parser los descifra.
+        let crypto = Some(LinkCrypto::generate());
+        let mut b = LinkPacketBuilder::new_with_crypto(crypto);
+        b.write_string("Alice");
+        b.write_string("Alice");
+        b.write_string("Ares 2.5");
+        b.write_guid(&[0xAB; 16]);
+        b.write_u16(42);
+        b.write_ip("1.2.3.4".parse().unwrap());
+        b.write_ip("10.0.0.2".parse().unwrap());
+        b.write_u16(5009);
+        b.write_string("");
+        b.write_u8(1);
+        b.write_u8(30);
+        b.write_u8(1);
+        b.write_u8(49);
+        b.write_string("US");
+        b.write_u8(1);
+        b.write_u16(0);
+        b.write_u8(1);
+        b.write_u8(0);
+        b.write_u8(0);
+        b.write_u8(0);
+        b.write_u8(1);
+        b.write_u8(0);
+        let packet = b.build_link_packet(LinkMsg::UserlistItem);
+
+        // El nombre "Alice" no debe aparecer en claro en el payload cifrado.
+        assert!(
+            !packet.windows(5).any(|w| w == b"Alice"),
+            "el nick no debe viajar en claro"
+        );
+
+        let parsed = parse_link_user_item(&packet[3..], crypto).expect("payload válido");
+        assert_eq!(parsed.name, "Alice");
+        assert_eq!(parsed.region, "US");
+        assert_eq!(parsed.file_count, 42);
+        assert_eq!(parsed.port, 5009);
     }
 }
