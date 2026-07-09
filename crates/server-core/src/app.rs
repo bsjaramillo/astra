@@ -452,6 +452,22 @@ impl AppContext {
         log.iter().skip(start).cloned().collect()
     }
 
+    /// Notifica (PM del bot) a los admins suscritos a un feed dado.
+    ///
+    /// `select` elige, para cada usuario, si recibe el mensaje. Se usa para
+    /// `/ipsend`, `/logsend`, `/bansend` (y filtros de nivel/vroom).
+    pub fn notify_subscribers<F>(&self, text: &str, select: F)
+    where
+        F: Fn(&crate::user_pool::AresUser) -> bool,
+    {
+        let pkt = crate::outbound::build_pvt(&self.settings.bot_name, text);
+        for u in self.user_pool.users() {
+            if u.logged_in && select(&u) {
+                let _ = u.send(pkt.clone());
+            }
+        }
+    }
+
     /// Publica un evento para replicación Link.
     pub fn publish_link_event(&self, event: LinkEvent) {
         let _ = self.link_events.send(event);

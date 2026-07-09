@@ -555,11 +555,35 @@ pub fn dispatch_builtin(
             handle_name_filter(ctx, user, args, false);
             (true, vec![])
         }
-        // Comandos que en sb0t dependen de servicios/infra externos que Astra
-        // no incluye (APIs de diccionario, envío a hub linkeado, GeoIP/ASN,
-        // packet spy). Se reconocen y responden honestamente.
-        "define" | "urban" | "ipsend" | "logsend" | "bansend" | "trace" | "vspy" => {
-            handle_unavailable(ctx, user, &cmd);
+        // Suscripciones per-admin a feeds internos (sin infra externa).
+        "vspy" => {
+            handle_subscription(ctx, user, args, Subscription::Vspy);
+            (true, vec![])
+        }
+        "ipsend" => {
+            handle_subscription(ctx, user, args, Subscription::IpSend);
+            (true, vec![])
+        }
+        "logsend" => {
+            handle_subscription(ctx, user, args, Subscription::LogSend);
+            (true, vec![])
+        }
+        "bansend" => {
+            handle_subscription(ctx, user, args, Subscription::BanSend);
+            (true, vec![])
+        }
+        // Comandos que dependen de servicios/datos externos (APIs de
+        // diccionario). Ver handlers dedicados.
+        "define" => {
+            handle_define(ctx, user, args);
+            (true, vec![])
+        }
+        "urban" => {
+            handle_urban(ctx, user, args);
+            (true, vec![])
+        }
+        "trace" => {
+            handle_trace(ctx, user, args);
             (true, vec![])
         }
         // ---- Aliases con los nombres originales de sb0t ----
@@ -886,6 +910,17 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
         &target.name.read(),
         &target.external_ip.to_string(),
     );
+
+    // Feed /bansend a los admins suscritos.
+    let bansend_line = format!(
+        "BANSEND: {} banned {} [{}]",
+        user.name.read(),
+        target.name.read(),
+        target.external_ip
+    );
+    ctx.notify_subscribers(&bansend_line, |u| {
+        u.sub_bansend.load(std::sync::atomic::Ordering::Relaxed)
+    });
 
     // Expulsión inmediata del pool para reflejar el ban en runtime.
     force_part_user(ctx, &target);
@@ -2607,6 +2642,79 @@ fn handle_unlink(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 }
 
+/// Feeds internos a los que un admin puede suscribirse.
+#[derive(Clone, Copy)]
+enum Subscription {
+    Vspy,
+    IpSend,
+    LogSend,
+    BanSend,
+}
+
+/// Toggle de una suscripción per-admin (`/vspy`, `/ipsend`, `/logsend`,
+/// `/bansend`). Cada admin activa/desactiva su propio feed.
+fn handle_subscription(ctx: &AppContext, user: &Arc<AresUser>, args: &str, sub: Subscription) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let (flag, label): (&std::sync::atomic::AtomicBool, &str) = match sub {
+        Subscription::Vspy => (&user.sub_vspy, "vspy"),
+        Subscription::IpSend => (&user.sub_ipsend, "ipsend"),
+        Subscription::LogSend => (&user.sub_logsend, "logsend"),
+        Subscription::BanSend => (&user.sub_bansend, "bansend"),
+    };
+    use std::sync::atomic::Ordering;
+    let now_on = match args.trim().to_ascii_lowercase().as_str() {
+        "on" => true,
+        "off" => false,
+        "" => !flag.load(Ordering::Relaxed), // toggle
+        _ => {
+            send_system_line(ctx, user, &format!("Usage: /{} [on|off]", label));
+            return;
+        }
+    };
+    flag.store(now_on, Ordering::Relaxed);
+    send_system_line(
+        ctx,
+        user,
+        &format!("{} feed {}.", label, if now_on { "enabled" } else { "disabled" }),
+    );
+
+    // Al activar ipsend, volcar las IPs de los usuarios actuales (como sb0t).
+    if now_on {
+        if let Subscription::IpSend = sub {
+            for u in ctx.user_pool.users() {
+                if u.logged_in {
+                    send_system_line(
+                        ctx,
+                        user,
+                        &format!(
+                            "IPSEND: {} {} {} {}",
+                            u.name.read(),
+                            u.external_ip,
+                            u.local_ip,
+                            u.data_port
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn handle_define(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    handle_unavailable(ctx, user, "define");
+}
+
+fn handle_urban(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    handle_unavailable(ctx, user, "urban");
+}
+
+fn handle_trace(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    handle_unavailable(ctx, user, "trace");
+}
+
 /// Comandos reconocidos pero cuya funcionalidad requiere infraestructura
 /// externa que Astra no incluye (ver comentario en el dispatcher).
 fn handle_unavailable(ctx: &AppContext, user: &Arc<AresUser>, cmd: &str) {
@@ -3619,6 +3727,71 @@ mod tests {
     }
 
     #[test]
+    fn builtin_ipsend_subscribe_and_dump() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "ipsend", "on");
+        assert!(alice.sub_ipsend.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut alice_rx), "ipsend feed enabled.");
+        // Volcado inicial: incluye a Bob
+        let mut found_bob = false;
+        while let Ok(pkt) = alice_rx.try_recv() {
+            if pkt[0] == TcpMsg::Pmt as u8 {
+                let (_f, t) = decode_pvt(pkt);
+                if t.contains("IPSEND: Bob 10.0.0.2") {
+                    found_bob = true;
+                }
+            }
+        }
+        assert!(found_bob);
+    }
+
+    #[test]
+    fn builtin_bansend_notifies_subscribers() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "bansend", "on");
+        assert_eq!(next_pvt_text(&mut alice_rx), "bansend feed enabled.");
+
+        // Alice banea a Bob → recibe el aviso bansend + el ack del ban.
+        let _ = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let mut got_bansend = false;
+        while let Ok(pkt) = alice_rx.try_recv() {
+            if pkt[0] == TcpMsg::Pmt as u8 {
+                let (_f, t) = decode_pvt(pkt);
+                if t.starts_with("BANSEND: Alice banned Bob") {
+                    got_bansend = true;
+                }
+            }
+        }
+        assert!(got_bansend);
+    }
+
+    #[test]
+    fn builtin_vspy_toggle() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "vspy", "");
+        assert!(alice.sub_vspy.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut alice_rx), "vspy feed enabled.");
+        let _ = dispatch_builtin(&ctx, &alice, "vspy", "");
+        assert!(!alice.sub_vspy.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
     fn builtin_quarantine_list_and_release() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
@@ -3707,9 +3880,9 @@ mod tests {
         assert!(handled);
         assert!(next_pvt_text(&mut alice_rx).contains("external dictionary"));
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "ipsend", "");
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "loadtemplate", "");
         assert!(handled);
-        assert!(next_pvt_text(&mut alice_rx).contains("link hub"));
+        assert!(next_pvt_text(&mut alice_rx).contains("not available"));
     }
 
     #[test]

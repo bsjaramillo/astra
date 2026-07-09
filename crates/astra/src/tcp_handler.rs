@@ -142,6 +142,23 @@ pub async fn handle_tcp_client(
     // Greet de bienvenida (PM del bot al usuario que entra)
     send_greet(&ctx, &user);
 
+    // Feeds de admin: ipsend (IP del que entra) y logsend (log de join).
+    {
+        let jname = user.name.read().clone();
+        let ipsend_line = format!(
+            "IPSEND: {} {} {} {}",
+            jname, user.external_ip, user.local_ip, user.data_port
+        );
+        let logsend_line = format!("LOG: join {} [{}]", jname, user.external_ip);
+        let self_id = user.id;
+        ctx.notify_subscribers(&ipsend_line, |u| {
+            u.id != self_id && u.sub_ipsend.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        ctx.notify_subscribers(&logsend_line, |u| {
+            u.id != self_id && u.sub_logsend.load(std::sync::atomic::Ordering::Relaxed)
+        });
+    }
+
     // ============================================================
     // Loop de lectura de mensajes
     // ============================================================
@@ -681,6 +698,7 @@ async fn handle_public(
     let pkt = outbound::build_public(&name, &text);
     broadcast_to_room(ctx, user, pkt);
     ctx.record_message(&name, &text, false);
+    vspy_copy(ctx, user, &name, &text);
     ctx.publish_link_event(LinkEvent::Public {
         origin: None,
         from: name.clone(),
@@ -880,6 +898,24 @@ fn broadcast_to_room(ctx: &AppContext, sender: &server_core::user_pool::AresUser
             // (excepto en algunos casos). Aquí también.
             let _ = u.send(pkt.clone());
             let _ = sender_id; // unused but indicates intent
+        }
+    }
+}
+
+/// Envía una copia de un mensaje público/emote a los admins suscritos a
+/// `/vspy` que estén en un vroom DISTINTO al del emisor (monitoreo
+/// cross-vroom, paridad sb0t VSpy).
+fn vspy_copy(ctx: &AppContext, sender: &server_core::user_pool::AresUser, name: &str, text: &str) {
+    let sender_vroom = *sender.vroom.read();
+    let line = format!("[vroom {}] {}: {}", sender_vroom, name, text);
+    let pkt = outbound::build_pvt(&ctx.settings.bot_name, &line);
+    for u in ctx.user_pool.users() {
+        if u.logged_in
+            && u.sub_vspy.load(std::sync::atomic::Ordering::Relaxed)
+            && *u.vroom.read() != sender_vroom
+            && (*u.level.read() as u8) >= server_core::ILevel::Moderator as u8
+        {
+            let _ = u.send(pkt.clone());
         }
     }
 }

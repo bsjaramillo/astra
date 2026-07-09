@@ -100,6 +100,15 @@ pub struct AresUser {
     /// Texto de "echo" (heckle): si está seteado, se le reenvía al usuario
     /// cada vez que habla en público (`/echo`).
     pub echo_text: parking_lot::RwLock<Option<String>>,
+    /// Suscripción `/vspy`: si es admin y lo activó, recibe copia de los
+    /// mensajes de OTROS vrooms.
+    pub sub_vspy: AtomicBool,
+    /// Suscripción `/ipsend`: recibe PM con la IP de quien entra.
+    pub sub_ipsend: AtomicBool,
+    /// Suscripción `/logsend`: recibe un log de eventos de la sala.
+    pub sub_logsend: AtomicBool,
+    /// Suscripción `/bansend`: recibe aviso cuando alguien es baneado/rechazado.
+    pub sub_bansend: AtomicBool,
     /// ¿Cloaked?
     pub cloaked: AtomicBool,
     /// ¿Captcha pendiente?
@@ -190,6 +199,10 @@ impl AresUser {
             kewl: AtomicBool::new(false),
             painted: AtomicBool::new(false),
             echo_text: parking_lot::RwLock::new(None),
+            sub_vspy: AtomicBool::new(false),
+            sub_ipsend: AtomicBool::new(false),
+            sub_logsend: AtomicBool::new(false),
+            sub_bansend: AtomicBool::new(false),
             cloaked: AtomicBool::new(false),
             needs_captcha: AtomicBool::new(false),
             logged_in: false,
