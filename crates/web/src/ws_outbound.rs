@@ -28,25 +28,25 @@ pub fn translate_broadcast(pkt: &Bytes, sender: &AresUser, recipient: &AresUser)
     match TcpMsg::from_u8(opcode) {
         Some(TcpMsg::Public) => {
             let mut r = proto_ares::PacketReader::new(data);
-            let name = r.read_string().ok()?;
-            let text = r.read_string().ok()?;
+            let name = r.read_string_nt().ok()?;
+            let text = r.read_string_nt().ok()?;
             Some(build_public(&name, &text))
         }
         Some(TcpMsg::Emote) => {
             let mut r = proto_ares::PacketReader::new(data);
-            let name = r.read_string().ok()?;
-            let text = r.read_string().ok()?;
+            let name = r.read_string_nt().ok()?;
+            let text = r.read_string_nt().ok()?;
             Some(build_emote(&name, &text))
         }
         Some(TcpMsg::Pmt) => {
             let mut r = proto_ares::PacketReader::new(data);
-            let from = r.read_string().ok()?;
-            let text = r.read_string().ok()?;
+            let from = r.read_string_nt().ok()?;
+            let text = r.read_string_nt().ok()?;
             Some(build_pm(&from, &text))
         }
         Some(TcpMsg::ServerPart) => {
             let mut r = proto_ares::PacketReader::new(data);
-            let name = r.read_string().ok()?;
+            let name = r.read_string_nt().ok()?;
             Some(build_offline(&name))
         }
         Some(TcpMsg::ServerJoin) | Some(TcpMsg::ServerChannelUserList) => {

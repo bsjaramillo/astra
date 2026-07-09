@@ -226,6 +226,17 @@ pub async fn handle_tcp_client(
 /// Task que drena el mpsc y escribe al socket.
 async fn writer_task(mut write_half: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Bytes>) {
     while let Some(data) = rx.recv().await {
+        if data.is_empty() {
+            continue;
+        }
+        // Framing Ares: [size:u16 LE][op][payload], size = largo de op+payload menos 1
+        // (= largo del payload), igual que `ToAresPacket` de sb0t.
+        let size = (data.len() - 1) as u16;
+        let header = size.to_le_bytes();
+        if let Err(e) = write_half.write_all(&header).await {
+            debug!("writer: error escribiendo header: {}", e);
+            break;
+        }
         if let Err(e) = write_half.write_all(&data).await {
             debug!("writer: error escribiendo: {}", e);
             break;
@@ -234,30 +245,51 @@ async fn writer_task(mut write_half: OwnedWriteHalf, mut rx: mpsc::UnboundedRece
     debug!("writer: terminado");
 }
 
-/// Wrapper sobre `OwnedReadHalf` que lee paquetes con framing implícito de Ares.
+/// Wrapper sobre `OwnedReadHalf` que lee paquetes con el framing de Ares:
+/// `[size:u16 LE][op:u8][payload:size]`, donde `size` es la longitud de
+/// `op+payload` menos 1 (es decir, el largo del payload). Acumula bytes para
+/// manejar paquetes partidos o coalescidos por TCP.
 struct PacketReaderStream {
     inner: OwnedReadHalf,
-    buf: Vec<u8>,
+    acc: Vec<u8>,
+    scratch: Vec<u8>,
 }
 
 impl PacketReaderStream {
     fn new(inner: OwnedReadHalf) -> Self {
         Self {
             inner,
-            buf: vec![0u8; 8192],
+            acc: Vec::with_capacity(8192),
+            scratch: vec![0u8; 8192],
         }
     }
 
-    /// Lee un paquete. Retorna `None` en EOF.
+    /// Lee un paquete completo. Retorna un `RawPacket` con `data.is_empty()`
+    /// (EOF) cuando el socket se cierra sin un paquete pendiente.
+    ///
+    /// `data` se entrega como `[op][payload]` (el opcode en `data[0]`), para
+    /// que el resto del handler siga usando `&data[1..]` sin cambios.
     async fn read_packet(&mut self) -> std::io::Result<RawPacket> {
-        let n = self.inner.read(&mut self.buf).await?;
-        if n == 0 {
-            return Ok(RawPacket::eof());
+        loop {
+            // ¿Hay un paquete completo en el buffer acumulado?
+            if self.acc.len() >= 3 {
+                let size = u16::from_le_bytes([self.acc[0], self.acc[1]]) as usize;
+                if self.acc.len() >= size + 3 {
+                    let op = self.acc[2];
+                    let msg = TcpMsg::from_u8(op);
+                    let mut data = Vec::with_capacity(size + 1);
+                    data.push(op);
+                    data.extend_from_slice(&self.acc[3..3 + size]);
+                    self.acc.drain(0..3 + size);
+                    return Ok(RawPacket { msg, data });
+                }
+            }
+            let n = self.inner.read(&mut self.scratch).await?;
+            if n == 0 {
+                return Ok(RawPacket::eof());
+            }
+            self.acc.extend_from_slice(&self.scratch[..n]);
         }
-        let opcode = self.buf[0];
-        let msg = TcpMsg::from_u8(opcode);
-        let data = self.buf[..n].to_vec();
-        Ok(RawPacket { msg, data })
     }
 }
 
@@ -555,21 +587,21 @@ async fn dispatch_message(
         TcpMsg::ClientCommand => {
             // Canal de comandos de Ares (sin '/'). Se rutea a los built-ins.
             let mut r = PacketReader::new(&pkt.data[1..]);
-            if let Ok(cmd_text) = r.read_string() {
+            if let Ok(cmd_text) = r.read_string_nt() {
                 route_command_text(ctx, user, &scripting, &cmd_text);
             }
         }
         TcpMsg::ClientAuthLogin => {
             // Atajo de protocolo para `/login <password>` (sb0t AUTHLOGIN).
             let mut r = PacketReader::new(&pkt.data[1..]);
-            if let Ok(pw) = r.read_string() {
+            if let Ok(pw) = r.read_string_nt() {
                 route_command_text(ctx, user, &scripting, &format!("login {}", pw));
             }
         }
         TcpMsg::ClientAuthRegister => {
             // Atajo de protocolo para `/register <password>` (sb0t AUTHREGISTER).
             let mut r = PacketReader::new(&pkt.data[1..]);
-            if let Ok(pw) = r.read_string() {
+            if let Ok(pw) = r.read_string_nt() {
                 route_command_text(ctx, user, &scripting, &format!("register {}", pw));
             }
         }
@@ -582,7 +614,7 @@ async fn dispatch_message(
             // El payload de ClientBrowse es un string Ares (null-terminated) con
             // un hashlink del archivo que se está compartiendo.
             let mut r = PacketReader::new(&pkt.data[1..]);
-            if let Ok(hashlink) = r.read_string() {
+            if let Ok(hashlink) = r.read_string_nt() {
                 scripting.dispatch(astra_scripting::ScriptEvent::FileReceived {
                     name: user.name.read().clone(),
                     filename: hashlink,
@@ -681,7 +713,7 @@ async fn handle_public(
     scripting: &ScriptHandle,
 ) {
     let mut r = PacketReader::new(data);
-    let text = match r.read_string() {
+    let text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -814,7 +846,7 @@ async fn handle_emote(
     scripting: &astra_scripting::ScriptHandle,
 ) {
     let mut r = PacketReader::new(data);
-    let text = match r.read_string() {
+    let text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -860,11 +892,11 @@ async fn handle_pvt(
     scripting: &astra_scripting::ScriptHandle,
 ) {
     let mut r = PacketReader::new(data);
-    let target_name = match r.read_string() {
+    let target_name = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
     };
-    let text = match r.read_string() {
+    let text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -892,7 +924,7 @@ async fn handle_pvt(
                 .any(|entry| entry.eq_ignore_ascii_case(&from))
         {
             let mut w = PacketWriter::with_msg(TcpMsg::ServerIsIgnoringYou);
-            w.write_string(&target_name).ok();
+            w.write_string_nt(&target_name).ok();
             let _ = user.send(Bytes::copy_from_slice(w.as_bytes()));
             ctx.publish_link_event(LinkEvent::PrivateIgnored {
                 origin: None,
@@ -915,7 +947,7 @@ async fn handle_pvt(
     } else {
         // NoSuch
         let mut w = PacketWriter::with_msg(TcpMsg::ServerNosuch);
-        w.write_string(&format!("User '{}' not found", target_name)).ok();
+        w.write_string_nt(&format!("User '{}' not found", target_name)).ok();
         user.send(Bytes::copy_from_slice(w.as_bytes()));
     }
 }
@@ -926,7 +958,7 @@ fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8])
     let mut r = PacketReader::new(data);
     let mut list = Vec::new();
     while r.remaining() > 0 {
-        let Ok(entry) = r.read_string() else {
+        let Ok(entry) = r.read_string_nt() else {
             break;
         };
         let trimmed = entry.trim();
@@ -943,7 +975,7 @@ fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8])
 /// Maneja MSG_CHAT_CLIENT_PERSONAL_MESSAGE (13).
 async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) {
     let mut r = PacketReader::new(data);
-    let text = match r.read_string() {
+    let text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -952,8 +984,8 @@ async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_
     // Broadcast a la sala: cada uno recibe un "MSG_CHAT_SERVER_PERSONAL_MESSAGE"
     // con el nuevo PM. Lo simplificamos: el server reenvía a cada user.
     let mut w = PacketWriter::with_msg(TcpMsg::PersonalMessage);
-    w.write_string(&user.name.read()).ok();
-    w.write_string(&text).ok();
+    w.write_string_nt(&user.name.read()).ok();
+    w.write_string_nt(&text).ok();
     let pkt = Bytes::copy_from_slice(w.as_bytes());
     broadcast_to_room(ctx, user, pkt);
     ctx.publish_link_event(LinkEvent::PersonalMessage {
@@ -1087,7 +1119,7 @@ fn filter_remove_user(ctx: &AppContext, user: &Arc<server_core::user_pool::AresU
 
 fn server_error_packet(text: &str) -> Bytes {
     let mut w = PacketWriter::with_msg(TcpMsg::ServerError);
-    w.write_string(text).ok();
+    w.write_string_nt(text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -1098,9 +1130,9 @@ async fn send_server_error_to_stream(mut stream: TcpStream, text: &str) -> anyho
 
 fn build_login_ack(user: &server_core::user_pool::AresUser, room_name: &str) -> Bytes {
     let mut w = PacketWriter::with_msg(TcpMsg::ServerLoginAck);
-    w.write_string(&user.name.read()).ok();
-    w.write_string(room_name).ok();
-    w.write_string(&user.version).ok();
+    w.write_string_nt(&user.name.read()).ok();
+    w.write_string_nt(room_name).ok();
+    w.write_string_nt(&user.version).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -1119,7 +1151,7 @@ fn build_my_features(user: &server_core::user_pool::AresUser) -> Bytes {
     }
 
     let mut w = PacketWriter::with_msg(TcpMsg::ServerMyFeatures);
-    w.write_string(&format!("Astra {} - chat server", env!("CARGO_PKG_VERSION"))).ok();
+    w.write_string_nt(&format!("Astra {} - chat server", env!("CARGO_PKG_VERSION"))).ok();
     w.write_u8(flag).ok();
     w.write_u8(63).ok();
     w.write_u8(0).ok();

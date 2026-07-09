@@ -95,8 +95,8 @@ pub fn run_command(ctx: &Arc<AppContext>, line: &str) -> Vec<String> {
     while let Ok(pkt) = rx.try_recv() {
         if !pkt.is_empty() && pkt[0] == TcpMsg::Pmt as u8 {
             let mut r = PacketReader::new(&pkt[1..]);
-            let _from = r.read_string().ok();
-            if let Ok(text) = r.read_string() {
+            let _from = r.read_string_nt().ok();
+            if let Ok(text) = r.read_string_nt() {
                 out.push(text);
             }
         }

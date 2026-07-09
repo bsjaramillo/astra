@@ -146,12 +146,12 @@ pub fn parse_login(data: &[u8]) -> Result<LoginData, LoginError> {
 
     r.skip(4).map_err(|source| LoginError::Read { field: "skip4", source })?;
 
-    let org_name = r.read_string().map_err(|source| LoginError::Read { field: "org_name", source })?;
+    let org_name = r.read_string_nt().map_err(|source| LoginError::Read { field: "org_name", source })?;
     if org_name.is_empty() {
         return Err(LoginError::InvalidName(org_name));
     }
 
-    let version = r.read_string().map_err(|source| LoginError::Read { field: "version", source })?;
+    let version = r.read_string_nt().map_err(|source| LoginError::Read { field: "version", source })?;
     let is_ares = version.starts_with("Ares 2.") || version.starts_with("Ares_2.");
     let is_cbot = version.starts_with("cb0t ");
 
@@ -166,7 +166,7 @@ pub fn parse_login(data: &[u8]) -> Result<LoginData, LoginError> {
     let age: u8 = r.read_u8().map_err(|source| LoginError::Read { field: "age", source })?;
     let sex: u8 = r.read_u8().map_err(|source| LoginError::Read { field: "sex", source })?;
     let country: u8 = r.read_u8().map_err(|source| LoginError::Read { field: "country", source })?;
-    let mut region = r.read_string().map_err(|source| LoginError::Read { field: "region", source })?;
+    let mut region = r.read_string_nt().map_err(|source| LoginError::Read { field: "region", source })?;
     if region.len() > 30 {
         region.truncate(30);
     }
@@ -281,8 +281,8 @@ mod tests {
         w.write_ipv4(node_ip).unwrap();
         w.write_u16_le(node_port).unwrap();
         w.write_bytes(&[0, 0, 0, 0]).unwrap(); // skip 4
-        w.write_string(name).unwrap();
-        w.write_string(version).unwrap();
+        w.write_string_nt(name).unwrap();
+        w.write_string_nt(version).unwrap();
         w.write_ipv4(local_ip).unwrap();
         w.write_bytes(&[0, 0, 0, 0]).unwrap(); // skip 4
         w.write_u8(3).unwrap(); // browsable (> 2)
@@ -292,7 +292,7 @@ mod tests {
         w.write_u8(25).unwrap(); // age
         w.write_u8(1).unwrap(); // sex (male)
         w.write_u8(49).unwrap(); // country
-        w.write_string("US").unwrap(); // region
+        w.write_string_nt("US").unwrap(); // region
         if let Some(vc) = voice_byte {
             w.write_u8(vc).unwrap();
         }
@@ -379,8 +379,8 @@ mod tests {
         w.write_ipv4(Ipv4Addr::LOCALHOST).unwrap();
         w.write_u16_le(5009).unwrap();
         w.write_bytes(&[0; 4]).unwrap();
-        w.write_string("Eve").unwrap();
-        w.write_string("Ares 2.1.0").unwrap();
+        w.write_string_nt("Eve").unwrap();
+        w.write_string_nt("Ares 2.1.0").unwrap();
         w.write_ipv4(Ipv4Addr::LOCALHOST).unwrap();
         w.write_bytes(&[0; 4]).unwrap();
         w.write_u8(1).unwrap();
@@ -390,7 +390,7 @@ mod tests {
         w.write_u8(0).unwrap();
         w.write_u8(0).unwrap();
         w.write_u8(0).unwrap();
-        w.write_string("").unwrap();
+        w.write_string_nt("").unwrap();
         let bytes = w.into_bytes();
         let login = parse_login(&bytes).unwrap();
         assert!(login.crypto);
@@ -408,8 +408,8 @@ mod tests {
         w.write_ipv4(Ipv4Addr::LOCALHOST).unwrap();
         w.write_u16_le(5009).unwrap();
         w.write_bytes(&[0; 4]).unwrap();
-        w.write_string("X").unwrap();
-        w.write_string("Ares 2.1.0").unwrap();
+        w.write_string_nt("X").unwrap();
+        w.write_string_nt("Ares 2.1.0").unwrap();
         w.write_ipv4(Ipv4Addr::LOCALHOST).unwrap();
         w.write_bytes(&[0; 4]).unwrap();
         w.write_u8(1).unwrap();
@@ -419,7 +419,7 @@ mod tests {
         w.write_u8(0).unwrap();
         w.write_u8(0).unwrap();
         w.write_u8(0).unwrap();
-        w.write_string(&long_region).unwrap();
+        w.write_string_nt(&long_region).unwrap();
         let bytes = w.into_bytes();
         let login = parse_login(&bytes).unwrap();
         assert_eq!(login.region.len(), 30);

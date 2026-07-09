@@ -146,6 +146,30 @@ impl<'a> PacketReader<'a> {
         Ok(String::from_utf8(bytes.to_vec())?)
     }
 
+    /// Lee una string null-terminated: bytes UTF-8 hasta el `0x00` (que se
+    /// consume). Si no hay null, lee hasta el final. Es el formato de un
+    /// cliente Ares TCP **sin cifrar** (ver `TCPPacketReader.ReadString(IClient)`
+    /// rama no cifrada de sb0t).
+    pub fn read_string_nt(&mut self) -> ReadResult<String> {
+        let start = self.pos;
+        let end = self.data[start..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|rel| start + rel);
+        match end {
+            Some(nul) => {
+                let s = String::from_utf8(self.data[start..nul].to_vec())?;
+                self.pos = nul + 1; // consume el null
+                Ok(s)
+            }
+            None => {
+                let s = String::from_utf8(self.data[start..].to_vec())?;
+                self.pos = self.data.len();
+                Ok(s)
+            }
+        }
+    }
+
     /// Lee 16 bytes en bruto y los devuelve como un `Guid` Ares (aplica MD5).
     pub fn read_guid(&mut self) -> ReadResult<Guid> {
         self.check(16)?;
@@ -221,6 +245,22 @@ mod tests {
     fn read_u16_le() {
         let mut r = PacketReader::new(&[0x34, 0x12]);
         assert_eq!(r.read_u16_le().unwrap(), 0x1234);
+    }
+
+    #[test]
+    fn read_string_nt_basic() {
+        // "Alice\0Bob\0" + un byte binario suelto
+        let mut r = PacketReader::new(b"Alice\x00Bob\x00\x07");
+        assert_eq!(r.read_string_nt().unwrap(), "Alice");
+        assert_eq!(r.read_string_nt().unwrap(), "Bob");
+        assert_eq!(r.read_u8().unwrap(), 0x07);
+    }
+
+    #[test]
+    fn read_string_nt_no_terminator_reads_to_end() {
+        let mut r = PacketReader::new(b"tail");
+        assert_eq!(r.read_string_nt().unwrap(), "tail");
+        assert_eq!(r.remaining(), 0);
     }
 
     #[test]

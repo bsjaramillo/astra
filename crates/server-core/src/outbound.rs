@@ -72,14 +72,14 @@ pub fn build_join_or_userlist(user: &AresUser) -> Bytes {
     write_ip(&mut w, &user.node_ip);
     w.write_u16_le(user.node_port).ok();
     w.write_u8(0).ok(); // reservado
-    w.write_string(&user.name.read()).ok();
+    w.write_string_nt(&user.name.read()).ok();
     write_ip(&mut w, &user.local_ip);
     w.write_u8(user.browsable as u8).ok();
     w.write_u8(level_to_u8(&*user.level.read())).ok();
     w.write_u8(user.age).ok();
     w.write_u8(user.sex).ok();
     w.write_u8(user.country).ok();
-    w.write_string(&user.region).ok();
+    w.write_string_nt(&user.region).ok();
     w.write_u8(build_features(user)).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
@@ -89,7 +89,7 @@ pub fn build_join_or_userlist(user: &AresUser) -> Bytes {
 /// Formato: `str name`
 pub fn build_part(user: &AresUser) -> Bytes {
     let mut w = PacketWriter::with_msg(TcpMsg::ServerPart);
-    w.write_string(&user.name.read()).ok();
+    w.write_string_nt(&user.name.read()).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -104,14 +104,14 @@ pub fn build_userlist_item(user: &AresUser) -> Bytes {
     write_ip(&mut w, &user.node_ip);
     w.write_u16_le(user.node_port).ok();
     w.write_u8(0).ok();
-    w.write_string(&user.name.read()).ok();
+    w.write_string_nt(&user.name.read()).ok();
     write_ip(&mut w, &user.local_ip);
     w.write_u8(user.browsable as u8).ok();
     w.write_u8(level_to_u8(&*user.level.read())).ok();
     w.write_u8(user.age).ok();
     w.write_u8(user.sex).ok();
     w.write_u8(user.country).ok();
-    w.write_string(&user.region).ok();
+    w.write_string_nt(&user.region).ok();
     w.write_u8(build_features(user)).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
@@ -158,14 +158,14 @@ pub fn build_userlist_bot(bot_name: &str) -> Bytes {
     w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
     w.write_u16_le(0).ok();
     w.write_u8(0).ok();
-    w.write_string(bot_name).ok();
+    w.write_string_nt(bot_name).ok();
     w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
     w.write_u8(1).ok();
     w.write_u8(3).ok(); // level 3
     w.write_u8(0).ok();
     w.write_u8(0).ok();
     w.write_u8(0).ok();
-    w.write_string("").ok();
+    w.write_string_nt("").ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -181,14 +181,14 @@ pub fn build_userlist_end() -> Bytes {
 /// Topic (enviado al unirse).
 pub fn build_topic_first(text: &str) -> Bytes {
     let mut w = PacketWriter::with_msg(TcpMsg::ServerTopicFirst);
-    w.write_string(text).ok();
+    w.write_string_nt(text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
 /// Topic (broadcast cuando alguien lo cambia).
 pub fn build_topic(text: &str) -> Bytes {
     let mut w = PacketWriter::with_msg(TcpMsg::ServerTopic);
-    w.write_string(text).ok();
+    w.write_string_nt(text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -201,8 +201,8 @@ pub fn build_redirect(ip: std::net::IpAddr, port: u16, room_name: &str) -> Bytes
     write_ip(&mut w, &ip);
     w.write_u16_le(port).ok();
     write_ip(&mut w, &ip);
-    w.write_string(room_name).ok();
-    w.write_string("Redirecting...").ok();
+    w.write_string_nt(room_name).ok();
+    w.write_string_nt("Redirecting...").ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -212,8 +212,8 @@ pub fn build_redirect(ip: std::net::IpAddr, port: u16, room_name: &str) -> Bytes
 pub fn build_public(from_name: &str, text: &str) -> Bytes {
     let text = truncate_message(text, 300);
     let mut w = PacketWriter::with_msg(TcpMsg::Public);
-    w.write_string(from_name).ok();
-    w.write_string(&text).ok();
+    w.write_string_nt(from_name).ok();
+    w.write_string_nt(&text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -223,8 +223,8 @@ pub fn build_public(from_name: &str, text: &str) -> Bytes {
 pub fn build_emote(from_name: &str, text: &str) -> Bytes {
     let text = truncate_message(text, 300);
     let mut w = PacketWriter::with_msg(TcpMsg::Emote);
-    w.write_string(from_name).ok();
-    w.write_string(&text).ok();
+    w.write_string_nt(from_name).ok();
+    w.write_string_nt(&text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -234,8 +234,8 @@ pub fn build_emote(from_name: &str, text: &str) -> Bytes {
 pub fn build_pvt(from_name: &str, text: &str) -> Bytes {
     let text = truncate_message(text, 300);
     let mut w = PacketWriter::with_msg(TcpMsg::Pmt);
-    w.write_string(from_name).ok();
-    w.write_string(&text).ok();
+    w.write_string_nt(from_name).ok();
+    w.write_string_nt(&text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -251,8 +251,8 @@ pub fn build_opchange(is_op: bool) -> Bytes {
 /// URL tag de la sala (enviado al unirse).
 pub fn build_url(addr: &str, text: &str) -> Bytes {
     let mut w = PacketWriter::with_msg(TcpMsg::ServerUrl);
-    w.write_string(addr).ok();
-    w.write_string(text).ok();
+    w.write_string_nt(addr).ok();
+    w.write_string_nt(text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
@@ -310,32 +310,27 @@ mod tests {
         let u = make_test_user();
         let pkt = build_part(&u);
         assert_eq!(pkt[0], TcpMsg::ServerPart as u8);
-        // Después del opcode: i32 len(5) + "Alice"
-        assert_eq!(&pkt[1..5], &[0x05, 0x00, 0x00, 0x00]);
-        assert_eq!(&pkt[5..], b"Alice");
+        // Strings null-terminated (formato Ares sin cifrar): "Alice\0"
+        assert_eq!(&pkt[1..], b"Alice\x00");
     }
 
     #[test]
     fn public_packet_format() {
         let pkt = build_public("Alice", "hello");
         assert_eq!(pkt[0], TcpMsg::Public as u8);
-        // string 1: len(5) + "Alice"
-        assert_eq!(&pkt[1..5], &[0x05, 0x00, 0x00, 0x00]);
-        assert_eq!(&pkt[5..10], b"Alice");
-        // string 2: len(5) + "hello"
-        assert_eq!(&pkt[10..14], &[0x05, 0x00, 0x00, 0x00]);
-        assert_eq!(&pkt[14..], b"hello");
+        // Dos strings null-terminated consecutivas: "Alice\0hello\0"
+        assert_eq!(&pkt[1..], b"Alice\x00hello\x00");
     }
 
     #[test]
     fn truncate_long_message() {
         let long = "a".repeat(1000);
         let pkt = build_public("A", &long);
-        // Después del opcode + 1 string, debería haber un i32=300 + 300 'a's
-        let text_len_offset = 1 + 4 + 1; // opcode + str1 len + str1
-        let len_bytes = &pkt[text_len_offset..text_len_offset + 4];
-        let len = i32::from_le_bytes(len_bytes.try_into().unwrap());
-        assert_eq!(len, 300);
+        // Tras opcode + "A\0", el texto se trunca a 300 chars, luego null.
+        // pkt = [op]"A\0"("a"*300)"\0"
+        let text = &pkt[1 + 2..]; // salta opcode + "A\0"
+        let nul = text.iter().position(|&b| b == 0).unwrap();
+        assert_eq!(nul, 300);
     }
 
     #[test]

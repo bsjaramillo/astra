@@ -500,7 +500,7 @@ fn kick_user_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
             // Kick best-effort: enviar ServerError, remover del pool. El
             // TCP handler verá el cierre del socket y limpiará.
             let mut w = proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::ServerError);
-            w.write_string("You have been kicked from the room.").ok();
+            w.write_string_nt("You have been kicked from the room.").ok();
             let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
             let uid = u.id;
             app.user_pool.remove(uid);
@@ -924,7 +924,7 @@ fn channels_kick_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Res
     // Notificar al user
     use proto_ares::TcpMsg;
     let mut w = proto_ares::PacketWriter::with_msg(TcpMsg::ServerError);
-    w.write_string(&format!("You have been kicked from vroom {}.", vroom_id)).ok();
+    w.write_string_nt(&format!("You have been kicked from vroom {}.", vroom_id)).ok();
     let _ = target.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
     Ok(JsValue::from(true))
 }

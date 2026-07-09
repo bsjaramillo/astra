@@ -139,6 +139,15 @@ impl PacketWriter {
         Ok(self)
     }
 
+    /// Escribe una string null-terminated: `UTF8 + 0x00`, sin prefijo de
+    /// longitud. Es el formato de un cliente Ares TCP **sin cifrar** (ver
+    /// `TCPPacketWriter.WriteString` rama no cifrada de sb0t).
+    pub fn write_string_nt(&mut self, s: &str) -> WriteResult<&mut Self> {
+        self.buf.extend_from_slice(s.as_bytes());
+        self.buf.push(0);
+        Ok(self)
+    }
+
     /// Escribe 16 bytes de GUID.
     pub fn write_guid(&mut self, guid: &super::Guid) -> WriteResult<&mut Self> {
         self.buf.extend_from_slice(guid.as_bytes());

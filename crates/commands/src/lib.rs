@@ -3244,15 +3244,15 @@ mod tests {
     fn decode_pvt(pkt: bytes::Bytes) -> (String, String) {
         assert_eq!(pkt[0], TcpMsg::Pmt as u8);
         let mut r = PacketReader::new(&pkt[1..]);
-        let from = r.read_string().expect("from");
-        let text = r.read_string().expect("text");
+        let from = r.read_string_nt().expect("from");
+        let text = r.read_string_nt().expect("text");
         (from, text)
     }
 
     fn decode_topic(pkt: bytes::Bytes) -> String {
         assert_eq!(pkt[0], TcpMsg::ServerTopic as u8);
         let mut r = PacketReader::new(&pkt[1..]);
-        r.read_string().expect("topic")
+        r.read_string_nt().expect("topic")
     }
 
     fn next_pvt_text(rx: &mut mpsc::UnboundedReceiver<bytes::Bytes>) -> String {
@@ -4427,8 +4427,8 @@ mod tests {
         let pkt = bob_rx.try_recv().expect("announce");
         assert_eq!(pkt[0], TcpMsg::Public as u8);
         let mut r = PacketReader::new(&pkt[1..]);
-        let from = r.read_string().unwrap();
-        let text = r.read_string().unwrap();
+        let from = r.read_string_nt().unwrap();
+        let text = r.read_string_nt().unwrap();
         assert_eq!(from, "Astra");
         assert_eq!(text, "server reboot soon");
     }
