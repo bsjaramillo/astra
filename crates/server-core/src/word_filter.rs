@@ -134,7 +134,7 @@ impl WordFilterManager {
 ///
 /// Un patrón sin comodines matchea si aparece como subcadena. Con comodines,
 /// el patrón se ancla al inicio de cada posición y `*` consume cualquier cosa.
-fn matches_pattern(pattern: &str, text: &str) -> bool {
+pub(crate) fn matches_pattern(pattern: &str, text: &str) -> bool {
     if !pattern.contains('*') && !pattern.contains('?') {
         return text.contains(pattern);
     }

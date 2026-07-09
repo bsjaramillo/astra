@@ -110,6 +110,15 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/lower <nick> - force a user's text to lowercase (/unlower)",
     "/kewltext <nick> - leetspeak a user's text (/unkewltext)",
     "/paint <nick> - decorate a user's text (/unpaint)",
+    "/clearscreen - clear everyone's chat",
+    "/clock [on|off] - show a clock in the topic",
+    "/idle [on|off] - toggle idle monitoring",
+    "/locate <nick> - show a user's country/region",
+    "/listquarantined - list quarantined users",
+    "/unquarantine <nick|index> - release a quarantined user",
+    "/listpasswords - list registered accounts (owner)",
+    "/joinfilter [add|del <pat>|list] - filter nicks at login",
+    "/filefilter [add|del <pat>|list] - filter shared file names",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -513,6 +522,107 @@ pub fn dispatch_builtin(
             handle_text_effect(ctx, user, args, TextEffect::Paint, false);
             (true, vec![])
         }
+        "clearscreen" => {
+            handle_clearscreen(ctx, user, args);
+            (true, vec![])
+        }
+        "clock" | "idle" => {
+            // Toggles de sala persistidos (el efecto de clock lo aplica una task).
+            handle_room_flag(ctx, user, &cmd, args);
+            (true, vec![])
+        }
+        "locate" => {
+            handle_locate(ctx, user, args);
+            (true, vec![])
+        }
+        "listquarantined" => {
+            handle_listquarantined(ctx, user, args);
+            (true, vec![])
+        }
+        "unquarantine" => {
+            handle_unquarantine(ctx, user, args);
+            (true, vec![])
+        }
+        "listpasswords" | "autologins" => {
+            handle_listpasswords(ctx, user, args);
+            (true, vec![])
+        }
+        "joinfilter" | "joinfilters" => {
+            handle_name_filter(ctx, user, args, true);
+            (true, vec![])
+        }
+        "filefilter" | "filefilters" => {
+            handle_name_filter(ctx, user, args, false);
+            (true, vec![])
+        }
+        // Comandos que en sb0t dependen de servicios/infra externos que Astra
+        // no incluye (APIs de diccionario, envío a hub linkeado, GeoIP/ASN,
+        // packet spy). Se reconocen y responden honestamente.
+        "define" | "urban" | "ipsend" | "logsend" | "bansend" | "trace" | "vspy" => {
+            handle_unavailable(ctx, user, &cmd);
+            (true, vec![])
+        }
+        // ---- Aliases con los nombres originales de sb0t ----
+        "greetmsg" => {
+            handle_greets(ctx, user, args);
+            (true, vec![])
+        }
+        "addgreetmsg" | "pmgreetmsg" => {
+            handle_addgreet(ctx, user, args);
+            (true, vec![])
+        }
+        "remgreetmsg" => {
+            handle_remgreet(ctx, user, args);
+            (true, vec![])
+        }
+        "listgreetmsg" => {
+            handle_listgreets(ctx, user, args);
+            (true, vec![])
+        }
+        "customname" => {
+            handle_cname(ctx, user, args);
+            (true, vec![])
+        }
+        "uncustomname" => {
+            handle_cname(ctx, user, "-");
+            (true, vec![])
+        }
+        "listbans" => {
+            handle_banlist(ctx, user, args);
+            (true, vec![])
+        }
+        "wordfilters" => {
+            handle_listfilters(ctx, user, args);
+            (true, vec![])
+        }
+        "filter" => {
+            handle_filter_dispatch(ctx, user, args);
+            (true, vec![])
+        }
+        "addtopic" => {
+            handle_topic(ctx, user, args);
+            (true, vec![])
+        }
+        "remtopic" => {
+            handle_topic(ctx, user, "-");
+            (true, vec![])
+        }
+        "viewmotd" | "loadmotd" => {
+            handle_motd(ctx, user, "");
+            (true, vec![])
+        }
+        "link" => {
+            handle_link(ctx, user, args);
+            (true, vec![])
+        }
+        "unlink" => {
+            handle_unlink(ctx, user, args);
+            (true, vec![])
+        }
+        "loadtemplate" => {
+            handle_unavailable(ctx, user, "loadtemplate");
+            (true, vec![])
+        }
         _ => (false, vec![]),
     }
 }
@@ -704,7 +814,12 @@ fn handle_topic(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         return;
     }
 
-    let new_topic = truncate_text(args.trim(), 300);
+    // "-" limpia el topic (paridad con /remtopic).
+    let new_topic = if args.trim() == "-" {
+        String::new()
+    } else {
+        truncate_text(args.trim(), 300)
+    };
     ctx.set_room_topic(new_topic.clone());
     broadcast_topic(ctx, &new_topic);
     send_system_line(ctx, user, "Topic updated.");
@@ -2268,6 +2383,247 @@ fn handle_cloak(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 }
 
 // ============================================================================
+// Cuentas / quarantine / filtros de nombre / misc (Tanda 7)
+// ============================================================================
+
+fn handle_clearscreen(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    // Envía líneas en blanco a todos para "limpiar" la pantalla (paridad sb0t).
+    let blank = outbound::build_public(" ", " ");
+    for u in ctx.user_pool.users() {
+        if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
+        for _ in 0..50 {
+            let _ = u.send(blank.clone());
+        }
+    }
+    send_system_line(ctx, user, "Screen cleared.");
+}
+
+fn handle_locate(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let target_name = args.trim();
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /locate <nick>");
+        return;
+    }
+    let Some(t) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    let region = if t.region.is_empty() { "unknown".to_string() } else { t.region.clone() };
+    send_system_line(
+        ctx,
+        user,
+        &format!(
+            "'{}' ip={} country={} region={}",
+            t.name.read(),
+            t.external_ip,
+            t.country,
+            region
+        ),
+    );
+}
+
+fn handle_listquarantined(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let q: Vec<String> = ctx
+        .user_pool
+        .users()
+        .into_iter()
+        .filter(|u| u.quarantined.load(std::sync::atomic::Ordering::Relaxed))
+        .map(|u| u.name.read().clone())
+        .collect();
+    if q.is_empty() {
+        send_system_line(ctx, user, "No quarantined users.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Quarantined ({}):", q.len()));
+    for (i, name) in q.iter().enumerate() {
+        send_system_line(ctx, user, &format!("{} - {}", i, name));
+    }
+}
+
+fn handle_unquarantine(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let target = args.trim();
+    if target.is_empty() {
+        send_system_line(ctx, user, "Usage: /unquarantine <nick|index>");
+        return;
+    }
+    let q: Vec<_> = ctx
+        .user_pool
+        .users()
+        .into_iter()
+        .filter(|u| u.quarantined.load(std::sync::atomic::Ordering::Relaxed))
+        .collect();
+    let found = if let Ok(idx) = target.parse::<usize>() {
+        q.get(idx).cloned()
+    } else {
+        q.into_iter().find(|u| u.name.read().eq_ignore_ascii_case(target))
+    };
+    match found {
+        Some(u) => {
+            u.quarantined.store(false, std::sync::atomic::Ordering::Relaxed);
+            u.needs_captcha.store(false, std::sync::atomic::Ordering::Relaxed);
+            send_system_line(ctx, user, &format!("Un-quarantined '{}'.", u.name.read()));
+        }
+        None => send_system_line(ctx, user, "No matching quarantined user."),
+    }
+}
+
+fn handle_listpasswords(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let accounts = ctx.db.list_accounts().unwrap_or_default();
+    if accounts.is_empty() {
+        send_system_line(ctx, user, "No registered accounts.");
+        return;
+    }
+    send_system_line(ctx, user, &format!("Accounts ({}):", accounts.len()));
+    for (name, level) in &accounts {
+        send_system_line(ctx, user, &format!("{} (level {})", name, level));
+    }
+}
+
+/// Handler compartido de `/joinfilter` y `/filefilter`.
+/// Subcomandos: `add <pat>`, `del <pat>`, `list` (o vacío = list).
+fn handle_name_filter(ctx: &AppContext, user: &Arc<AresUser>, args: &str, is_join: bool) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let mgr = if is_join { &ctx.join_filters } else { &ctx.file_filters };
+    let label = if is_join { "join" } else { "file" };
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let sub = parts.next().unwrap_or("").to_ascii_lowercase();
+    let rest = parts.next().unwrap_or("").trim();
+    match sub.as_str() {
+        "add" if !rest.is_empty() => {
+            if mgr.add(rest) {
+                send_system_line(ctx, user, &format!("{} filter added: {}", label, rest.to_ascii_lowercase()));
+            } else {
+                send_system_line(ctx, user, "Filter already exists (or invalid).");
+            }
+        }
+        "del" | "rem" | "remove" if !rest.is_empty() => {
+            if mgr.remove(rest) {
+                send_system_line(ctx, user, &format!("{} filter removed.", label));
+            } else {
+                send_system_line(ctx, user, "No matching filter.");
+            }
+        }
+        "" | "list" => {
+            let list = mgr.list();
+            if list.is_empty() {
+                send_system_line(ctx, user, &format!("No {} filters.", label));
+                return;
+            }
+            send_system_line(ctx, user, &format!("{} filters ({}):", label, list.len()));
+            for p in &list {
+                send_system_line(ctx, user, &format!("  {}", p));
+            }
+        }
+        _ => send_system_line(
+            ctx,
+            user,
+            &format!("Usage: /{}filter [add <pat>|del <pat>|list]", label),
+        ),
+    }
+}
+
+/// `/filter [add <pat> [accion]|del <pat>|list]` — dispatcher estilo sb0t
+/// para el word filter (alias de addfilter/remfilter/listfilters).
+fn handle_filter_dispatch(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let sub = parts.next().unwrap_or("").to_ascii_lowercase();
+    let rest = parts.next().unwrap_or("").trim();
+    match sub.as_str() {
+        "add" => handle_addfilter(ctx, user, rest),
+        "del" | "rem" | "remove" => handle_remfilter(ctx, user, rest),
+        "" | "list" => handle_listfilters(ctx, user, ""),
+        _ => send_system_line(ctx, user, "Usage: /filter [add <word> [block|kick|ban]|del <word>|list]"),
+    }
+}
+
+/// `/link <name> <server> <port>` — solicita crear un link a otro server.
+fn handle_link(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() < 3 {
+        send_system_line(ctx, user, "Usage: /link <name> <server> <port>");
+        return;
+    }
+    let Ok(port) = parts[2].parse::<u16>() else {
+        send_system_line(ctx, user, "Invalid port.");
+        return;
+    };
+    let req = server_core::LinkRequest::CreateLink {
+        name: parts[0].to_string(),
+        server: parts[1].to_string(),
+        port,
+    };
+    if ctx.link_requests.send(req).is_ok() {
+        send_system_line(ctx, user, &format!("Link request to {}:{} queued.", parts[1], port));
+    } else {
+        send_system_line(ctx, user, "Link subsystem is not running.");
+    }
+}
+
+/// `/unlink <name>` — solicita desconectar un link.
+fn handle_unlink(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let name = args.trim();
+    if name.is_empty() {
+        send_system_line(ctx, user, "Usage: /unlink <name>");
+        return;
+    }
+    let req = server_core::LinkRequest::DisconnectLink { name: name.to_string() };
+    if ctx.link_requests.send(req).is_ok() {
+        send_system_line(ctx, user, &format!("Unlink request for '{}' queued.", name));
+    } else {
+        send_system_line(ctx, user, "Link subsystem is not running.");
+    }
+}
+
+/// Comandos reconocidos pero cuya funcionalidad requiere infraestructura
+/// externa que Astra no incluye (ver comentario en el dispatcher).
+fn handle_unavailable(ctx: &AppContext, user: &Arc<AresUser>, cmd: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let why = match cmd {
+        "define" | "urban" => "requires an external dictionary service",
+        "ipsend" | "logsend" | "bansend" => "requires a connected link hub",
+        "trace" | "vspy" => "requires packet-tracing support",
+        _ => "is not available in this build",
+    };
+    send_system_line(ctx, user, &format!("/{} {}.", cmd, why));
+}
+
+// ============================================================================
 // Efectos de texto per-usuario (Tanda 6) — Moderator+
 // ============================================================================
 
@@ -3260,6 +3616,100 @@ mod tests {
 
         let _ = dispatch_builtin(&ctx, &alice, "customnames", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob → BobbyTables");
+    }
+
+    #[test]
+    fn builtin_quarantine_list_and_release() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Admin;
+        bob.quarantined.store(true, std::sync::atomic::Ordering::Relaxed);
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "listquarantined", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Quarantined (1):");
+        assert_eq!(next_pvt_text(&mut alice_rx), "0 - Bob");
+
+        let _ = dispatch_builtin(&ctx, &alice, "unquarantine", "Bob");
+        assert!(!bob.quarantined.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut alice_rx), "Un-quarantined 'Bob'.");
+    }
+
+    #[test]
+    fn builtin_listpasswords_owner_only() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin; // no alcanza (owner)
+        ctx.user_pool.add(alice.clone());
+        let _ = dispatch_builtin(&ctx, &alice, "listpasswords", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Owner required.");
+
+        *alice.level.write() = ILevel::Owner;
+        ctx.accounts.register("Bob", &[9u8; 16], "pw", ILevel::Moderator as u8).unwrap();
+        let _ = dispatch_builtin(&ctx, &alice, "listpasswords", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Accounts (1):");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Bob (level 50)");
+    }
+
+    #[test]
+    fn builtin_joinfilter_add_and_match() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "joinfilter", "add spam*");
+        assert_eq!(next_pvt_text(&mut alice_rx), "join filter added: spam*");
+        assert!(ctx.join_filters.matches("SpamBot99"));
+        assert!(!ctx.join_filters.matches("Alice"));
+
+        let _ = dispatch_builtin(&ctx, &alice, "joinfilter", "list");
+        assert_eq!(next_pvt_text(&mut alice_rx), "join filters (1):");
+    }
+
+    #[test]
+    fn builtin_locate_and_clearscreen() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "locate", "Bob");
+        assert!(next_pvt_text(&mut alice_rx).starts_with("'Bob' ip=10.0.0.2"));
+
+        let _ = dispatch_builtin(&ctx, &alice, "clearscreen", "");
+        // Muchas líneas en blanco + el ack final "Screen cleared."
+        let last = {
+            let mut t = String::new();
+            while let Ok(pkt) = alice_rx.try_recv() {
+                if pkt[0] == TcpMsg::Pmt as u8 {
+                    let (_f, txt) = decode_pvt(pkt);
+                    t = txt;
+                }
+            }
+            t
+        };
+        assert_eq!(last, "Screen cleared.");
+    }
+
+    #[test]
+    fn builtin_unavailable_commands_respond() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "define", "word");
+        assert!(handled);
+        assert!(next_pvt_text(&mut alice_rx).contains("external dictionary"));
+
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "ipsend", "");
+        assert!(handled);
+        assert!(next_pvt_text(&mut alice_rx).contains("link hub"));
     }
 
     #[test]

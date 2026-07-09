@@ -38,6 +38,8 @@ pub const FLAG_DEFAULTS: &[(&str, bool)] = &[
     ("roomsearch", true),
     ("avatars", true),
     ("stealth", false),
+    ("clock", false),
+    ("idle", false),
 ];
 
 /// Manager de flags de sala: cache en memoria + persistencia SQLite.

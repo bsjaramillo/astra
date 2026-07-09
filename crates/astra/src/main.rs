@@ -405,6 +405,29 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Clock de sala (cada 60s): si el flag `clock` está on, difunde la hora
+    // como topic (paridad con sb0t Topics.EnableClock).
+    let clock_ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if clock_ctx.room_flags.get("clock") {
+                let now = chrono::Utc::now().format("%H:%M UTC").to_string();
+                let base = clock_ctx.settings.room_topic.clone();
+                let topic = format!("{} [{}]", base, now);
+                clock_ctx.set_room_topic(topic.clone());
+                let pkt = server_core::outbound::build_topic(&topic);
+                for u in clock_ctx.user_pool.users() {
+                    if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = u.send(pkt.clone());
+                    }
+                }
+            }
+        }
+    });
+
     // Stats reporter (cada 30s) + cleanup periódico
     let stats_ctx = ctx.clone();
     let stats_scripting = scripting.clone();

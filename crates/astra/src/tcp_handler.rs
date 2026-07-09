@@ -326,6 +326,13 @@ async fn process_handshake(
                         return Ok(None);
                     }
 
+                    // Join filter (patrón de nick)
+                    if ctx.join_filters.matches(&login.org_name) {
+                        warn!("REJECTED (join filter): peer={} name='{}'", peer, login.org_name);
+                        let _ = tx.send(server_error_packet("Your nickname is not allowed here"));
+                        return Ok(None);
+                    }
+
                     // Join-flood
                     if ctx.user_history.is_join_flooding(external_ip, now_ms) {
                         warn!("REJECTED (join-flood): peer={}", peer);

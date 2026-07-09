@@ -224,6 +224,12 @@ impl Database {
                 value INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS name_filters (
+                kind TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                PRIMARY KEY (kind, pattern)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -452,6 +458,20 @@ impl Database {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
         }
+    }
+
+    /// Lista todas las cuentas registradas como `(name, level)`.
+    pub fn list_accounts(&self) -> DbResult<Vec<(String, u8)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT name, level FROM accounts ORDER BY level DESC, name")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u8))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     // ========================================================================
@@ -1062,6 +1082,43 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
         })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ========================================================================
+    // Name filters (join / file) — patrones por tipo
+    // ========================================================================
+
+    /// Agrega un patrón de filtro de nombre para un `kind` (`join`/`file`).
+    pub fn add_name_filter(&self, kind: &str, pattern: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO name_filters (kind, pattern) VALUES (?1, ?2)",
+            params![kind, pattern],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Elimina un patrón. Retorna `true` si existía.
+    pub fn remove_name_filter(&self, kind: &str, pattern: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "DELETE FROM name_filters WHERE kind = ?1 AND pattern = ?2",
+            params![kind, pattern],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Lista los patrones de un `kind`.
+    pub fn list_name_filters(&self, kind: &str) -> DbResult<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT pattern FROM name_filters WHERE kind = ?1 ORDER BY pattern")?;
+        let rows = stmt.query_map(params![kind], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);

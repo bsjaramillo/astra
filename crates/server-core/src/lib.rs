@@ -87,10 +87,14 @@ pub mod text_effects;
 /// Flags de sala (toggles caps/scribbles/audios/... on|off).
 pub mod room_flags;
 
+/// Filtros de nombre (join / file).
+pub mod name_filters;
+
 /// Re-exports comunes.
 pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use greets::{GreetContext, GreetManager};
 pub use ip_bans::{AsnBanManager, RangeBanManager};
+pub use name_filters::NameFilterManager;
 pub use room_flags::RoomFlags;
 pub use room::Room;
 pub use stats::Stats;
