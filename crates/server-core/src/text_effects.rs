@@ -20,6 +20,18 @@ pub fn apply_punish_effects(user: &AresUser, text: &str) -> String {
     out
 }
 
+/// ¿El texto está "gritado" (mayoría de letras en mayúscula y con
+/// suficiente longitud)? Usado por el caps-monitoring de sala.
+pub fn is_shouting(text: &str) -> bool {
+    let letters: Vec<char> = text.chars().filter(|c| c.is_alphabetic()).collect();
+    if letters.len() < 5 {
+        return false;
+    }
+    let upper = letters.iter().filter(|c| c.is_uppercase()).count();
+    // Más del 70% de las letras en mayúscula.
+    upper * 10 >= letters.len() * 7
+}
+
 /// "Kiddie speak": alterna mayúsculas/minúsculas de forma tosca y estira
 /// vocales, imitando el efecto `Kiddied` de sb0t (burla del texto).
 pub fn kiddy_transform(text: &str) -> String {
@@ -73,5 +85,15 @@ mod tests {
     #[test]
     fn kiddy_transform_keeps_non_alpha() {
         assert_eq!(kiddy_transform("a b1c"), "a B1c");
+    }
+
+    #[test]
+    fn shouting_detection() {
+        assert!(is_shouting("HELLO EVERYONE"));
+        assert!(!is_shouting("hello everyone"));
+        assert!(!is_shouting("HI")); // muy corto
+        assert!(is_shouting("STOP IT NOW")); // todo mayúsculas
+        assert!(!is_shouting("STOP it now")); // 4/9 mayúsculas → no
+        assert!(!is_shouting("Hello There Friend")); // title case, no grito
     }
 }

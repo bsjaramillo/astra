@@ -97,7 +97,7 @@ pub struct AresUser {
     /// cada vez que habla en público (`/echo`).
     pub echo_text: parking_lot::RwLock<Option<String>>,
     /// ¿Cloaked?
-    pub cloaked: bool,
+    pub cloaked: AtomicBool,
     /// ¿Captcha pendiente?
     pub needs_captcha: AtomicBool,
     /// ¿Logged in?
@@ -184,7 +184,7 @@ impl AresUser {
             kiddied: AtomicBool::new(false),
             lowered: AtomicBool::new(false),
             echo_text: parking_lot::RwLock::new(None),
-            cloaked: false,
+            cloaked: AtomicBool::new(false),
             needs_captcha: AtomicBool::new(false),
             logged_in: false,
             registered: false,

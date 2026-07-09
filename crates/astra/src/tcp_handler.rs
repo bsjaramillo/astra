@@ -491,6 +491,10 @@ async fn dispatch_message(
             handle_ignore_list(user, &pkt.data[1..]);
         }
         TcpMsg::Avatar => {
+            // Gate de sala: si los avatares están deshabilitados, se ignora.
+            if !ctx.room_flags.get("avatars") {
+                return Ok(());
+            }
             publish_raw_link(ctx, LINK_MSG_AVATAR, &pkt.data[1..]);
             // Avatar: el payload completo (sin opcode) son los bytes PNG.
             // Guardar en user.avatar (set real, no solo notificar).
@@ -532,6 +536,11 @@ async fn dispatch_message(
             publish_raw_link(ctx, LINK_MSG_CUSTOM_DATA_ALL, &pkt.data[1..]);
         }
         TcpMsg::ClientScribbleRoomFirst => {
+            // Gate de sala: si los scribbles están deshabilitados, se descarta.
+            if !ctx.room_flags.get("scribbles") {
+                debug!("scribble de '{}' bloqueado (flag de sala)", user.name.read());
+                return Ok(());
+            }
             // Gate real: el script puede cancelar el scribble retornando false
             // desde onScribbleCheck. Si cancela, no se reenvía al link ni a la sala.
             let allow = scripting.check_scribble(&user.name.read(), false);
@@ -542,6 +551,9 @@ async fn dispatch_message(
             }
         }
         TcpMsg::ClientScribbleRoomChunk => {
+            if !ctx.room_flags.get("scribbles") {
+                return Ok(());
+            }
             // Chunks siempre se reenvían (asumiendo que First pasó el gate).
             // Para gate por-chunk, se necesitaría trackear el state de cada scribble.
             publish_raw_link(ctx, LINK_MSG_SCRIBBLE_LEAF, &pkt.data[1..]);
@@ -645,7 +657,13 @@ async fn handle_public(
     }
 
     // Efectos de castigo por-usuario (/kiddy, /lower).
-    let text = server_core::text_effects::apply_punish_effects(user, &text);
+    let mut text = server_core::text_effects::apply_punish_effects(user, &text);
+
+    // Caps monitoring de sala: los mensajes TODO-EN-MAYÚSCULAS se bajan a
+    // minúsculas (paridad sb0t CapsMonitoring).
+    if ctx.room_flags.get("caps") && server_core::text_effects::is_shouting(&text) {
+        text = text.to_lowercase();
+    }
 
     // Hook onTextBefore: si algún script retorna false, cancelar el broadcast
     if !scripting.check_text_before(&name, &text) {

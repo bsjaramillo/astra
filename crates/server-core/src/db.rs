@@ -219,6 +219,11 @@ impl Database {
                 asn INTEGER NOT NULL PRIMARY KEY
             );
 
+            CREATE TABLE IF NOT EXISTS room_flags (
+                key TEXT NOT NULL PRIMARY KEY,
+                value INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -1033,6 +1038,35 @@ impl Database {
     pub fn clear_bans(&self) -> DbResult<usize> {
         let conn = self.conn.lock();
         Ok(conn.execute("DELETE FROM bans", [])?)
+    }
+
+    // ========================================================================
+    // Room flags (toggles de sala persistidos)
+    // ========================================================================
+
+    /// Setea (upsert) un flag de sala.
+    pub fn set_room_flag(&self, key: &str, value: bool) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO room_flags (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![key, value as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Lee todos los flags de sala persistidos como `(key, value)`.
+    pub fn list_room_flags(&self) -> DbResult<Vec<(String, bool)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT key, value FROM room_flags")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 }
 

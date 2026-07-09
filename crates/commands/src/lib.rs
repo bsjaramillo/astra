@@ -93,6 +93,20 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/redirect <nick> <ip:port> - redirect a user to another server",
     "/disableadmins - disable admin commands (owner)",
     "/enableadmins - re-enable admin commands (owner)",
+    "/roomflags - show all room permission flags",
+    "/caps [on|off] - lowercase shouted messages",
+    "/scribbles [on|off] - allow room scribbles",
+    "/avatars [on|off] - allow avatars",
+    "/audios [on|off] - allow voice messages",
+    "/buzzes [on|off] - allow buzzes",
+    "/colors [on|off] - allow colored text",
+    "/anon [on|off] - monitor anonymous users",
+    "/general [on|off] - general chat toggle",
+    "/sharefiles [on|off] - monitor file sharing",
+    "/roomsearch [on|off] - list room in UDP search",
+    "/stealth [on|off] - hide admin identity in actions",
+    "/disableavatar [on|off] - disable avatars",
+    "/cloak [on|off] - cloak yourself in admin actions",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -452,6 +466,24 @@ pub fn dispatch_builtin(
         }
         "enableadmins" => {
             handle_disableadmins(ctx, user, false);
+            (true, vec![])
+        }
+        // Flags de sala (toggles on|off). `disableavatar` mapea a `avatars`.
+        "caps" | "anon" | "general" | "audios" | "buzzes" | "scribbles" | "colors"
+        | "sharefiles" | "roomsearch" | "avatars" | "stealth" => {
+            handle_room_flag(ctx, user, &cmd, args);
+            (true, vec![])
+        }
+        "disableavatar" => {
+            handle_disableavatar(ctx, user, args);
+            (true, vec![])
+        }
+        "roomflags" => {
+            handle_roomflags(ctx, user, args);
+            (true, vec![])
+        }
+        "cloak" => {
+            handle_cloak(ctx, user, args);
             (true, vec![])
         }
         _ => (false, vec![]),
@@ -2116,6 +2148,90 @@ fn handle_disableadmins(ctx: &AppContext, user: &Arc<AresUser>, disable: bool) {
     );
 }
 
+// ============================================================================
+// Flags de sala (Tanda 5) — requiere Admin+
+// ============================================================================
+
+fn handle_room_flag(ctx: &AppContext, user: &Arc<AresUser>, flag: &str, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    match args.trim().to_ascii_lowercase().as_str() {
+        "on" => {
+            ctx.room_flags.set(flag, true);
+            send_system_line(ctx, user, &format!("Room flag '{}' enabled.", flag));
+        }
+        "off" => {
+            ctx.room_flags.set(flag, false);
+            send_system_line(ctx, user, &format!("Room flag '{}' disabled.", flag));
+        }
+        "" => {
+            let state = if ctx.room_flags.get(flag) { "on" } else { "off" };
+            send_system_line(ctx, user, &format!("Room flag '{}' is {}.", flag, state));
+        }
+        _ => send_system_line(ctx, user, &format!("Usage: /{} [on|off]", flag)),
+    }
+}
+
+/// `/disableavatar [on|off]` — alias invertido del flag `avatars`
+/// (`on` = deshabilitar avatares).
+fn handle_disableavatar(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    match args.trim().to_ascii_lowercase().as_str() {
+        "on" => {
+            ctx.room_flags.set("avatars", false);
+            send_system_line(ctx, user, "Avatars disabled.");
+        }
+        "off" => {
+            ctx.room_flags.set("avatars", true);
+            send_system_line(ctx, user, "Avatars enabled.");
+        }
+        "" => {
+            let disabled = !ctx.room_flags.get("avatars");
+            send_system_line(ctx, user, &format!("Avatars are {}.", if disabled { "disabled" } else { "enabled" }));
+        }
+        _ => send_system_line(ctx, user, "Usage: /disableavatar [on|off]"),
+    }
+}
+
+fn handle_roomflags(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    send_system_line(ctx, user, "Room flags:");
+    for (name, value) in ctx.room_flags.list() {
+        send_system_line(ctx, user, &format!("{} = {}", name, if value { "on" } else { "off" }));
+    }
+}
+
+/// `/cloak [on|off]` — flag per-usuario que oculta al admin en las acciones.
+fn handle_cloak(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    match args.trim().to_ascii_lowercase().as_str() {
+        "on" => {
+            user.cloaked.store(true, std::sync::atomic::Ordering::Relaxed);
+            send_system_line(ctx, user, "Cloak enabled.");
+        }
+        "off" => {
+            user.cloaked.store(false, std::sync::atomic::Ordering::Relaxed);
+            send_system_line(ctx, user, "Cloak disabled.");
+        }
+        "" => {
+            let on = user.cloaked.load(std::sync::atomic::Ordering::Relaxed);
+            send_system_line(ctx, user, &format!("Cloak is {}.", if on { "on" } else { "off" }));
+        }
+        _ => send_system_line(ctx, user, "Usage: /cloak [on|off]"),
+    }
+}
+
 /// Formatea un timestamp epoch-ms como tiempo relativo ("5m ago", etc.).
 fn format_time_ago(last_seen_ms: i64) -> String {
     let now_ms = server_core::time::unix_time() as i64;
@@ -3063,6 +3179,78 @@ mod tests {
 
         let _ = dispatch_builtin(&ctx, &alice, "customnames", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob → BobbyTables");
+    }
+
+    #[test]
+    fn builtin_room_flags_toggle() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        // caps default off
+        let _ = dispatch_builtin(&ctx, &alice, "caps", "on");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'caps' enabled.");
+        assert!(ctx.room_flags.get("caps"));
+
+        let _ = dispatch_builtin(&ctx, &alice, "scribbles", "off");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'scribbles' disabled.");
+        assert!(!ctx.room_flags.get("scribbles"));
+
+        let _ = dispatch_builtin(&ctx, &alice, "audios", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'audios' is on.");
+    }
+
+    #[test]
+    fn builtin_disableavatar_inverts_flag() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        assert!(ctx.room_flags.get("avatars"));
+        let _ = dispatch_builtin(&ctx, &alice, "disableavatar", "on");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Avatars disabled.");
+        assert!(!ctx.room_flags.get("avatars"));
+    }
+
+    #[test]
+    fn builtin_roomflags_lists_all() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "roomflags", "");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room flags:");
+        // Una línea por cada flag definido.
+        let mut count = 0;
+        while alice_rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert_eq!(count, server_core::room_flags::FLAG_DEFAULTS.len());
+    }
+
+    #[test]
+    fn builtin_cloak_toggles() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "cloak", "on");
+        assert!(alice.cloaked.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(next_pvt_text(&mut alice_rx), "Cloak enabled.");
+    }
+
+    #[test]
+    fn builtin_room_flag_requires_admin() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        let _ = dispatch_builtin(&ctx, &alice, "caps", "on");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use super::db::Database;
 use super::greets::GreetManager;
 use super::idle::IdleManager;
 use super::ip_bans::{AsnBanManager, RangeBanManager};
+use super::room_flags::RoomFlags;
 use super::urls::UrlManager;
 use super::word_filter::WordFilterManager;
 use super::security::SecurityManager;
@@ -294,6 +295,8 @@ pub struct AppContext {
     pub range_bans: Arc<RangeBanManager>,
     /// ASN bans.
     pub asn_bans: Arc<AsnBanManager>,
+    /// Flags de sala (toggles caps/scribbles/audios/...).
+    pub room_flags: Arc<RoomFlags>,
     /// Log reciente de acciones de ban para `/banstats`: `(banner, target, ip)`.
     pub ban_log: parking_lot::Mutex<std::collections::VecDeque<(String, String, String)>>,
     /// Si está activo, los comandos admin se ignoran salvo para el Owner
@@ -344,6 +347,7 @@ impl AppContext {
         let urls = Arc::new(UrlManager::new(db.clone()));
         let range_bans = Arc::new(RangeBanManager::new(db.clone()));
         let asn_bans = Arc::new(AsnBanManager::new(db.clone()));
+        let room_flags = Arc::new(RoomFlags::new(db.clone()));
         let (link_events, _) = broadcast::channel(1024);
         Self {
             settings: Arc::new(settings),
@@ -362,6 +366,7 @@ impl AppContext {
             urls,
             range_bans,
             asn_bans,
+            room_flags,
             ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             admins_disabled: std::sync::atomic::AtomicBool::new(false),
             udp_nodes: parking_lot::RwLock::new(Vec::new()),
