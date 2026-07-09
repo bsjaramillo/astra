@@ -110,6 +110,37 @@ pub fn run_command(ctx: &Arc<AppContext>, line: &str) -> Vec<String> {
     out
 }
 
+/// Lee el contenido del `astra.toml` para editarlo en el panel.
+///
+/// Si el archivo existe, retorna su texto tal cual. Si no (o no se conoce
+/// la ruta), serializa los `Settings` actuales a TOML como punto de partida.
+pub fn read_settings(ctx: &AppContext) -> String {
+    if let Some(path) = ctx.config_path() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            return text;
+        }
+    }
+    toml::to_string_pretty(&*ctx.settings)
+        .unwrap_or_else(|_| "# could not serialize current settings".to_string())
+}
+
+/// Valida y persiste el TOML editado en el archivo de config.
+///
+/// Valida que parsee como `Settings` antes de escribir. Retorna `Err` con un
+/// mensaje si el TOML es inválido o no se conoce la ruta del config. **El
+/// cambio requiere reiniciar** para aplicarse (los settings vivos ya se
+/// tomaron al arranque).
+pub fn write_settings(ctx: &AppContext, toml_text: &str) -> Result<(), String> {
+    // Validar que sea un Settings válido.
+    toml::from_str::<server_core::settings::Settings>(toml_text)
+        .map_err(|e| format!("invalid TOML: {}", e))?;
+    let path = ctx
+        .config_path()
+        .ok_or_else(|| "no config file path known (started without --config)".to_string())?;
+    std::fs::write(&path, toml_text).map_err(|e| format!("write failed: {}", e))?;
+    Ok(())
+}
+
 /// Escapa una string para incrustarla en JSON.
 fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -322,6 +353,47 @@ mod tests {
         let ctx = ctx_with_owner("secret");
         let out = run_command(&ctx, "/notarealcommand");
         assert!(out.iter().any(|l| l.contains("Unknown command")));
+    }
+
+    #[test]
+    fn settings_read_serializes_current_when_no_file() {
+        let ctx = ctx_with_owner("secret");
+        // Sin config_path → serializa los Settings actuales a TOML.
+        let toml = read_settings(&ctx);
+        assert!(toml.contains("owner_password"));
+        assert!(toml.contains("room_name"));
+    }
+
+    #[test]
+    fn settings_write_validates_and_persists() {
+        let dir = std::env::temp_dir().join(format!("astra_admin_settings_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("astra.toml");
+
+        let ctx = ctx_with_owner("secret");
+        ctx.set_config_path(path.clone());
+
+        // TOML válido → se escribe.
+        let good = toml::to_string_pretty(&*ctx.settings).unwrap();
+        assert!(write_settings(&ctx, &good).is_ok());
+        assert!(path.exists());
+
+        // TOML inválido → error, no se escribe basura.
+        let err = write_settings(&ctx, "this is not valid toml {{{");
+        assert!(err.is_err());
+
+        // Ahora read_settings devuelve el archivo escrito.
+        let read = read_settings(&ctx);
+        assert!(read.contains("room_name"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn settings_write_without_path_errors() {
+        let ctx = ctx_with_owner("secret");
+        let good = toml::to_string_pretty(&*ctx.settings).unwrap();
+        assert!(write_settings(&ctx, &good).is_err());
     }
 
     #[test]

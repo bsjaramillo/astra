@@ -285,6 +285,21 @@ async fn handle_admin_route(
             let body = format!("{{\"output\":[{}]}}", arr.join(","));
             send_http_json(stream, 200, &body).await?;
         }
+        ("GET", "/admin/settings") => {
+            let toml = crate::admin::read_settings(ctx);
+            let body = format!("{{\"toml\":\"{}\"}}", json_escape(&toml));
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/settings") if m.eq_ignore_ascii_case("POST") => {
+            let toml = json_field(&req.body, "toml").unwrap_or_default();
+            match crate::admin::write_settings(ctx, &toml) {
+                Ok(()) => send_http_json(stream, 200, "{\"ok\":true}").await?,
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
         _ => {
             send_http_json(stream, 404, "{\"error\":\"not found\"}").await?;
         }

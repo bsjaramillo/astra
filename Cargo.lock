@@ -284,6 +284,7 @@ dependencies = [
  "sha1",
  "tokio",
  "tokio-tungstenite",
+ "toml",
  "tracing",
  "uuid",
 ]

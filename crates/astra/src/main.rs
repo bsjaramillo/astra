@@ -164,6 +164,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Crear contexto de aplicación
     let ctx = Arc::new(AppContext::new(settings.clone(), db.clone()));
+    // Registrar la ruta del config para que el panel admin pueda editarlo.
+    ctx.set_config_path(cli.config.clone());
     info!(
         "contexto de aplicación inicializado ({} bans cargados)",
         ctx.bans.len()

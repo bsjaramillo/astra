@@ -150,6 +150,7 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
   <button data-tab="room">Room</button>
   <button data-tab="filters">Filters</button>
   <button data-tab="accounts">Accounts</button>
+  <button data-tab="settings">Settings</button>
   <button data-tab="console">Console</button>
 </nav>
 <main id="view"></main>
@@ -197,7 +198,7 @@ function render(){
   const v = document.getElementById("view");
   v.innerHTML = ({
     dashboard: renderDashboard, users: renderUsers, bans: renderBans,
-    room: renderRoom, filters: renderFilters, accounts: renderAccounts, console: renderConsole
+    room: renderRoom, filters: renderFilters, accounts: renderAccounts, settings: renderSettings, console: renderConsole
   }[TAB] || renderDashboard)();
   wire();
 }
@@ -290,6 +291,29 @@ function renderAccounts(){
     <p class="muted">Grant/revoke apply to online users (see Users tab).</p></div>`;
 }
 
+function renderSettings(){
+  return `<div class="card"><h2>Server configuration (astra.toml)</h2>
+    <p class="muted">Edit the raw config. Changes are validated and written to the file.
+    <b>A server restart is required</b> for startup settings (port, security thresholds, etc.) to take effect.
+    Live things (room flags, greets, bans) are better changed from the other tabs.</p>
+    <textarea id="tomlEd" spellcheck="false" style="width:100%;height:52vh;font-family:ui-monospace,monospace;font-size:12px" placeholder="loading…"></textarea>
+    <div class="row" style="margin-top:8px"><button id="tomlSave">Save to astra.toml</button>
+    <button id="tomlReload">Reload</button><span id="tomlMsg" class="muted"></span></div></div>`;
+}
+async function loadSettings(){
+  const r = await api("/admin/settings");
+  const el = document.getElementById("tomlEd");
+  if(!el) return;
+  if(r.ok){ const j = await r.json(); el.value = j.toml || ""; }
+  else { el.value = "# failed to load settings"; }
+}
+async function saveSettings(){
+  const el = document.getElementById("tomlEd"); const msg = document.getElementById("tomlMsg");
+  const r = await api("/admin/settings", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({toml:el.value})});
+  if(r.ok){ msg.textContent = "✓ Saved. Restart the server to apply."; msg.style.color="var(--ok)"; }
+  else { const j = await r.json().catch(()=>({error:"error"})); msg.textContent = "✕ "+(j.error||"error"); msg.style.color="var(--danger)"; }
+}
+
 let CONSOLE_LOG = "";
 function renderConsole(){
   return `<div class="card"><h2>Command console</h2>
@@ -321,6 +345,7 @@ function wire(){
   if(g("greetToggle"))g("greetToggle").onclick=()=>run(`/greets ${STATE.greetsEnabled?"off":"on"}`);
   if(g("faddBtn"))g("faddBtn").onclick=()=>run(`/addfilter ${g("fpat").value} ${g("fact").value}`);
   if(g("cmdRun")){const runc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=runc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")runc();};}
+  if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
 }
 
 document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>{
@@ -340,7 +365,7 @@ async function login(){
   document.getElementById("login").classList.add("hidden");
   document.getElementById("app").classList.remove("hidden");
   await refresh();
-  if(!window._poll) window._poll=setInterval(()=>{ if(TAB!=="console") refresh(); },5000);
+  if(!window._poll) window._poll=setInterval(()=>{ if(TAB!=="console"&&TAB!=="settings") refresh(); },5000);
 }
 function logout(){ TOKEN=null; sessionStorage.removeItem("astra_token"); location.reload(); }
 document.getElementById("loginBtn").onclick=login;
@@ -349,7 +374,7 @@ document.getElementById("pw").onkeydown=e=>{if(e.key==="Enter")login();};
 // Auto-login si hay token guardado.
 (async()=>{ const t=sessionStorage.getItem("astra_token"); if(t){TOKEN=t; const r=await api("/admin/state"); if(r.ok){
   document.getElementById("login").classList.add("hidden"); document.getElementById("app").classList.remove("hidden");
-  STATE=await r.json(); render(); refresh(); if(!window._poll) window._poll=setInterval(()=>{if(TAB!=="console")refresh();},5000);
+  STATE=await r.json(); render(); refresh(); if(!window._poll) window._poll=setInterval(()=>{if(TAB!=="console"&&TAB!=="settings")refresh();},5000);
 } else { TOKEN=null; sessionStorage.removeItem("astra_token"); } }})();
 </script>
 </body>

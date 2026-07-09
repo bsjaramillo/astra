@@ -310,6 +310,9 @@ pub struct AppContext {
     /// Si está activo, los comandos admin se ignoran salvo para el Owner
     /// (`/disableadmins`). Paridad con `Settings.DisableAdmins` de sb0t.
     pub admins_disabled: std::sync::atomic::AtomicBool,
+    /// Ruta del archivo de config (`astra.toml`) para que el panel admin
+    /// pueda leerlo/escribirlo. `None` si se arrancó sin archivo.
+    pub config_path: RwLock<Option<std::path::PathBuf>>,
     /// Snapshot de nodos UDP conocidos (name, port, user_count).
     /// Actualizado por `UdpNodeManager` cuando se agregan/actualizan nodos.
     pub udp_nodes: parking_lot::RwLock<Vec<(String, u16, u32)>>,
@@ -383,6 +386,7 @@ impl AppContext {
             geoip,
             ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             admins_disabled: std::sync::atomic::AtomicBool::new(false),
+            config_path: RwLock::new(None),
             udp_nodes: parking_lot::RwLock::new(Vec::new()),
             link_servers: parking_lot::RwLock::new(Vec::new()),
             link_users: parking_lot::RwLock::new(Vec::new()),
@@ -418,6 +422,16 @@ impl AppContext {
     /// Actualiza el status de la sala.
     pub fn set_room_status(&self, status: impl Into<String>) {
         *self.room_status.write() = status.into();
+    }
+
+    /// Registra la ruta del archivo de config (para el panel admin).
+    pub fn set_config_path(&self, path: std::path::PathBuf) {
+        *self.config_path.write() = Some(path);
+    }
+
+    /// Ruta del archivo de config, si se conoce.
+    pub fn config_path(&self) -> Option<std::path::PathBuf> {
+        self.config_path.read().clone()
     }
 
     /// Registra un mensaje en el historial reciente (ring buffer acotado).
