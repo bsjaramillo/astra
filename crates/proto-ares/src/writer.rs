@@ -16,6 +16,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use byteorder::{LittleEndian, WriteBytesExt};
 
+use super::crypto::AresCrypto;
 use super::messages::TcpMsg;
 
 /// Error al escribir un paquete Ares.
@@ -31,6 +32,8 @@ pub type WriteResult<T> = Result<T, WriteError>;
 /// Escritor de paquetes con buffer interno.
 pub struct PacketWriter {
     buf: Vec<u8>,
+    /// Si está seteado, `write_string_nt` cifra el string (cliente Ares cifrado).
+    crypto: Option<AresCrypto>,
 }
 
 impl Default for PacketWriter {
@@ -42,19 +45,32 @@ impl Default for PacketWriter {
 impl PacketWriter {
     /// Crea un escritor vacío.
     pub fn new() -> Self {
-        Self { buf: Vec::new() }
+        Self {
+            buf: Vec::new(),
+            crypto: None,
+        }
     }
 
     /// Crea un escritor con capacidad pre-reservada.
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             buf: Vec::with_capacity(cap),
+            crypto: None,
         }
     }
 
     /// Crea un escritor que ya comienza con el opcode del mensaje.
     pub fn with_msg(msg: TcpMsg) -> Self {
         let mut w = Self::new();
+        w.write_u8(msg as u8);
+        w
+    }
+
+    /// Como [`with_msg`](Self::with_msg) pero con cifrado de strings activado
+    /// si `crypto` es `Some` (cliente Ares que negoció cifrado).
+    pub fn with_msg_crypto(msg: TcpMsg, crypto: Option<AresCrypto>) -> Self {
+        let mut w = Self::new();
+        w.crypto = crypto;
         w.write_u8(msg as u8);
         w
     }
@@ -139,11 +155,22 @@ impl PacketWriter {
         Ok(self)
     }
 
-    /// Escribe una string null-terminated: `UTF8 + 0x00`, sin prefijo de
-    /// longitud. Es el formato de un cliente Ares TCP **sin cifrar** (ver
-    /// `TCPPacketWriter.WriteString` rama no cifrada de sb0t).
+    /// Escribe una string en el formato del cliente Ares:
+    /// - sin cifrado (por defecto): `UTF8 + 0x00` (null-terminated, sin prefijo);
+    /// - con cifrado (si el writer tiene `crypto`): `u16 len + AES(UTF8) + 0x00`.
+    ///
+    /// Réplica de `TCPPacketWriter.WriteString(client, text, true)` de sb0t.
     pub fn write_string_nt(&mut self, s: &str) -> WriteResult<&mut Self> {
-        self.buf.extend_from_slice(s.as_bytes());
+        match self.crypto {
+            Some(crypto) => {
+                let cipher = crypto.encrypt(s.as_bytes());
+                self.write_u16_le(cipher.len() as u16)?;
+                self.buf.extend_from_slice(&cipher);
+            }
+            None => {
+                self.buf.extend_from_slice(s.as_bytes());
+            }
+        }
         self.buf.push(0);
         Ok(self)
     }

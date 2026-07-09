@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod crypto;
 pub mod messages;
 pub mod packet;
 pub mod reader;
@@ -22,6 +23,7 @@ pub mod udp_packets;
 
 mod guid;
 
+pub use crypto::{d67, e67, AresCrypto};
 pub use guid::Guid;
 pub use messages::{TcpMsg, UdpMsg};
 pub use packet::Packet;

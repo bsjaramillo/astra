@@ -411,8 +411,7 @@ fn send_pm_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
     let text = args.get(2).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
         if let Some(target) = app.user_pool.get_by_name(&to) {
-            let pkt = server_core::outbound::build_pvt(&from, &text);
-            let _ = target.send(Bytes::copy_from_slice(&pkt));
+            let _ = target.send_pvt(&from, &text);
             Ok(JsValue::from(true))
         } else {
             Ok(JsValue::from(false))
@@ -499,7 +498,10 @@ fn kick_user_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
         if let Some(u) = app.user_pool.get_by_name(&name) {
             // Kick best-effort: enviar ServerError, remover del pool. El
             // TCP handler verá el cierre del socket y limpiará.
-            let mut w = proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::ServerError);
+            let mut w = proto_ares::PacketWriter::with_msg_crypto(
+                proto_ares::TcpMsg::ServerError,
+                u.ares_crypto,
+            );
             w.write_string_nt("You have been kicked from the room.").ok();
             let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
             let uid = u.id;
@@ -923,7 +925,7 @@ fn channels_kick_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Res
     *target.vroom.write() = 0;
     // Notificar al user
     use proto_ares::TcpMsg;
-    let mut w = proto_ares::PacketWriter::with_msg(TcpMsg::ServerError);
+    let mut w = proto_ares::PacketWriter::with_msg_crypto(TcpMsg::ServerError, target.ares_crypto);
     w.write_string_nt(&format!("You have been kicked from vroom {}.", vroom_id)).ok();
     let _ = target.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
     Ok(JsValue::from(true))

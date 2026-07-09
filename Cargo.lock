@@ -2322,10 +2322,13 @@ dependencies = [
 name = "proto-ares"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "byteorder",
  "bytes",
+ "cbc",
  "criterion",
  "md-5",
+ "rand 0.8.6",
  "thiserror 1.0.69",
  "tracing",
 ]

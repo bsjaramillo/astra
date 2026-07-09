@@ -127,8 +127,7 @@ pub async fn handle_tcp_client(
     send_initial_state(&ctx, &user, &scripting).await;
 
     // Broadcast del JOIN a los usuarios existentes
-    let join_pkt = outbound::build_join_or_userlist(&user);
-    broadcast_to_room(&ctx, &user, join_pkt);
+    broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
     ctx.publish_link_event(LinkEvent::Join {
         origin: None,
         user: LinkUserSnapshot::from_user(&user),
@@ -200,8 +199,7 @@ pub async fn handle_tcp_client(
     ctx.idle.forget(user_id);
 
     // Broadcast del PART
-    let part_pkt = outbound::build_part(&user_arc);
-    broadcast_to_room(&ctx, &user_arc, part_pkt);
+    broadcast_to_room(&ctx, &user_arc, |c| outbound::build_part_c(&user_arc, c));
     ctx.publish_link_event(LinkEvent::Part {
         origin: None,
         name: user_name.clone(),
@@ -405,10 +403,16 @@ async fn process_handshake(
                     }
 
                     // Construir usuario
+                    let wants_crypto = login.crypto; // crypto == 250 en el login
                     let id = ctx.user_pool.next_id();
                     let mut user = server_core::login::build_ares_user(id, external_ip, login);
                     user.sender = Some(tx.clone());
                     user.logged_in = true;  // marcar ANTES de envolver en Arc
+                    // Cifrado del cliente Ares: generamos key/IV; se los mandamos
+                    // ofuscados en el CryptoKey antes del LoginAck.
+                    if wants_crypto {
+                        user.ares_crypto = Some(proto_ares::AresCrypto::generate());
+                    }
                     let user_arc = Arc::new(user);
 
                     // Captcha gate (chequear ANTES de add_user, para que la
@@ -437,6 +441,12 @@ async fn process_handshake(
                         user_arc.guid.iter().map(|b| format!("{:02x}", b)).collect::<String>()
                     );
 
+                    // Cliente cifrado: primero el CryptoKey (ofuscado con el
+                    // GUID); a partir de acá todos los strings van cifrados.
+                    if let Some(crypto) = user_arc.ares_crypto {
+                        tx.send(build_crypto_key(&crypto, &user_arc.guid))?;
+                    }
+
                     // Paquetes de bienvenida (LoginAck + MyFeatures)
                     tx.send(build_login_ack(&user_arc, &ctx.settings.room_name))?;
                     tx.send(build_my_features(&user_arc))?;
@@ -456,8 +466,7 @@ async fn process_handshake(
                             "Welcome! Please type this code to enter: {}  (PM it back to {})",
                             visual, ctx.settings.bot_name
                         );
-                        let pkt = outbound::build_pvt(&ctx.settings.bot_name, &prompt);
-                        let _ = user_arc.send(pkt);
+                        let _ = user_arc.send_pvt(&ctx.settings.bot_name, &prompt);
                         info!(
                             "CAPTCHA issued: id={} ip={} word={}",
                             user_arc.id, peer.ip(), challenge.word
@@ -489,18 +498,19 @@ async fn send_initial_state(
     scripting: &astra_scripting::ScriptHandle,
 ) {
     let user_id = user.id;
+    let crypto = user.ares_crypto; // cifra los strings si el cliente lo negoció
 
     // Topic
-    let _ = user.send(outbound::build_topic_first(&ctx.current_room_topic()));
+    let _ = user.send(outbound::build_topic_first_c(&ctx.current_room_topic(), crypto));
 
     // Bot fantasma
-    let _ = user.send(outbound::build_userlist_bot(&ctx.settings.bot_name));
+    let _ = user.send(outbound::build_userlist_bot_c(&ctx.settings.bot_name, crypto));
 
     // Userlist de todos los usuarios conectados
     let others = ctx.user_pool.users();
     for other in others {
         if other.id != user_id && other.logged_in {
-            let _ = user.send(outbound::build_userlist_item(&other));
+            let _ = user.send(outbound::build_userlist_item_c(&other, crypto));
             // Evento de scripting por cada user en la userlist
             scripting.dispatch(astra_scripting::ScriptEvent::UserList {
                 name: other.name.read().clone(),
@@ -509,7 +519,7 @@ async fn send_initial_state(
         }
     }
 
-    // End of userlist
+    // End of userlist (sin strings: cifrado-invariante)
     let _ = user.send(outbound::build_userlist_end());
     scripting.dispatch(astra_scripting::ScriptEvent::UserListEnd {
         name: user.name.read().clone(),
@@ -547,8 +557,7 @@ async fn dispatch_message(
         TcpMsg::ClientUpdateStatus => {
             debug!("update status de id={}", user.id);
             // Por ahora: reenvía el status (broadcast del join refresh)
-            let join_pkt = outbound::build_join_or_userlist(user);
-            broadcast_to_room(ctx, user, join_pkt);
+            broadcast_to_room(ctx, user, |c| outbound::build_join_or_userlist_c(user, c));
             ctx.publish_link_event(LinkEvent::UserUpdated {
                 origin: None,
                 user: LinkUserSnapshot::from_user(user),
@@ -586,21 +595,21 @@ async fn dispatch_message(
         }
         TcpMsg::ClientCommand => {
             // Canal de comandos de Ares (sin '/'). Se rutea a los built-ins.
-            let mut r = PacketReader::new(&pkt.data[1..]);
+            let mut r = PacketReader::new_crypto(&pkt.data[1..], user.ares_crypto);
             if let Ok(cmd_text) = r.read_string_nt() {
                 route_command_text(ctx, user, &scripting, &cmd_text);
             }
         }
         TcpMsg::ClientAuthLogin => {
             // Atajo de protocolo para `/login <password>` (sb0t AUTHLOGIN).
-            let mut r = PacketReader::new(&pkt.data[1..]);
+            let mut r = PacketReader::new_crypto(&pkt.data[1..], user.ares_crypto);
             if let Ok(pw) = r.read_string_nt() {
                 route_command_text(ctx, user, &scripting, &format!("login {}", pw));
             }
         }
         TcpMsg::ClientAuthRegister => {
             // Atajo de protocolo para `/register <password>` (sb0t AUTHREGISTER).
-            let mut r = PacketReader::new(&pkt.data[1..]);
+            let mut r = PacketReader::new_crypto(&pkt.data[1..], user.ares_crypto);
             if let Ok(pw) = r.read_string_nt() {
                 route_command_text(ctx, user, &scripting, &format!("register {}", pw));
             }
@@ -613,7 +622,7 @@ async fn dispatch_message(
             publish_raw_link(ctx, LINK_MSG_BROWSE, &pkt.data[1..]);
             // El payload de ClientBrowse es un string Ares (null-terminated) con
             // un hashlink del archivo que se está compartiendo.
-            let mut r = PacketReader::new(&pkt.data[1..]);
+            let mut r = PacketReader::new_crypto(&pkt.data[1..], user.ares_crypto);
             if let Ok(hashlink) = r.read_string_nt() {
                 scripting.dispatch(astra_scripting::ScriptEvent::FileReceived {
                     name: user.name.read().clone(),
@@ -736,12 +745,13 @@ fn vc_relay_public(
 /// Retransmite voz privada a un target. `inner = [targetName\0][voice]`.
 fn vc_relay_private(
     ctx: &AppContext,
-    _sender: &Arc<server_core::user_pool::AresUser>,
+    sender: &Arc<server_core::user_pool::AresUser>,
     sender_name: &str,
     op: TcpMsg,
     inner: &[u8],
 ) {
-    let mut r = PacketReader::new(inner);
+    // El nombre del target va cifrado si el emisor negoció cifrado.
+    let mut r = PacketReader::new_crypto(inner, sender.ares_crypto);
     let target_name = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
@@ -811,7 +821,7 @@ async fn handle_public(
     data: &[u8],
     scripting: &ScriptHandle,
 ) {
-    let mut r = PacketReader::new(data);
+    let mut r = PacketReader::new_crypto(data, user.ares_crypto);
     let text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
@@ -823,11 +833,10 @@ async fn handle_public(
     // Si tiene captcha pendiente, no puede hablar en público.
     // (Sí puede ejecutar /help y otros built-ins, así que permitimos esos.)
     if user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed) && !text.trim_start().starts_with('/') {
-        let pkt = outbound::build_pvt(
+        let _ = user.send_pvt(
             &ctx.settings.bot_name,
             "Please solve the captcha before chatting. Check your PMs.",
         );
-        let _ = user.send(pkt);
         return;
     }
 
@@ -862,11 +871,10 @@ async fn handle_public(
     // Muzzled: puede ejecutar comandos pero no hablar en público.
     // (is_muzzled auto-expira los muzzles temporales de /mtimeout)
     if user.is_muzzled() {
-        let pkt = outbound::build_pvt(
+        let _ = user.send_pvt(
             &ctx.settings.bot_name,
             "You are muzzled and cannot chat in public.",
         );
-        let _ = user.send(pkt);
         return;
     }
 
@@ -880,7 +888,7 @@ async fn handle_public(
 
     // Echo heckle (/echo): reenvía el texto configurado solo a este usuario.
     if let Some(echo) = user.echo_text.read().clone() {
-        let _ = user.send(outbound::build_pvt(&ctx.settings.bot_name, &echo));
+        let _ = user.send_pvt(&ctx.settings.bot_name, &echo);
     }
 
     // Efectos de castigo por-usuario (/kiddy, /lower).
@@ -898,8 +906,7 @@ async fn handle_public(
         return;
     }
 
-    let pkt = outbound::build_public(&name, &text);
-    broadcast_to_room(ctx, user, pkt);
+    broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, &text, c));
     ctx.record_message(&name, &text, false);
     vspy_copy(ctx, user, &name, &text);
     ctx.publish_link_event(LinkEvent::Public {
@@ -944,7 +951,7 @@ async fn handle_emote(
     data: &[u8],
     scripting: &astra_scripting::ScriptHandle,
 ) {
-    let mut r = PacketReader::new(data);
+    let mut r = PacketReader::new_crypto(data, user.ares_crypto);
     let text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
@@ -954,11 +961,10 @@ async fn handle_emote(
     }
     // Muzzled: sin voz en público (aplica también a emotes).
     if user.is_muzzled() {
-        let pkt = outbound::build_pvt(
+        let _ = user.send_pvt(
             &ctx.settings.bot_name,
             "You are muzzled and cannot chat in public.",
         );
-        let _ = user.send(pkt);
         return;
     }
 
@@ -968,8 +974,7 @@ async fn handle_emote(
         debug!("onEmoteBefore canceló emote de '{}'", name);
         return;
     }
-    let pkt = outbound::build_emote(&name, &text);
-    broadcast_to_room(ctx, user, pkt);
+    broadcast_to_room(ctx, user, |c| outbound::build_emote_c(&name, &text, c));
     ctx.record_message(&name, &text, true);
     ctx.publish_link_event(LinkEvent::Emote {
         origin: None,
@@ -990,7 +995,7 @@ async fn handle_pvt(
     data: &[u8],
     scripting: &astra_scripting::ScriptHandle,
 ) {
-    let mut r = PacketReader::new(data);
+    let mut r = PacketReader::new_crypto(data, user.ares_crypto);
     let target_name = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
@@ -1022,7 +1027,7 @@ async fn handle_pvt(
                 .iter()
                 .any(|entry| entry.eq_ignore_ascii_case(&from))
         {
-            let mut w = PacketWriter::with_msg(TcpMsg::ServerIsIgnoringYou);
+            let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerIsIgnoringYou, user.ares_crypto);
             w.write_string_nt(&target_name).ok();
             let _ = user.send(Bytes::copy_from_slice(w.as_bytes()));
             ctx.publish_link_event(LinkEvent::PrivateIgnored {
@@ -1031,7 +1036,8 @@ async fn handle_pvt(
                 to: target_name,
             });
         } else {
-            let pkt = outbound::build_pvt(&from, &text);
+            // El PM se cifra con la key del DESTINATARIO.
+            let pkt = outbound::build_pvt_c(&from, &text, target.ares_crypto);
             if !target.send(pkt) {
                 warn!("no se pudo enviar PM de '{}' a '{}'", from, target_name);
             }
@@ -1045,7 +1051,7 @@ async fn handle_pvt(
         });
     } else {
         // NoSuch
-        let mut w = PacketWriter::with_msg(TcpMsg::ServerNosuch);
+        let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerNosuch, user.ares_crypto);
         w.write_string_nt(&format!("User '{}' not found", target_name)).ok();
         user.send(Bytes::copy_from_slice(w.as_bytes()));
     }
@@ -1054,7 +1060,7 @@ async fn handle_pvt(
 /// Maneja MSG_CHAT_CLIENT_IGNORELIST (45).
 /// Formato: lista de strings Ares consecutivas.
 fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) {
-    let mut r = PacketReader::new(data);
+    let mut r = PacketReader::new_crypto(data, user.ares_crypto);
     let mut list = Vec::new();
     while r.remaining() > 0 {
         let Ok(entry) = r.read_string_nt() else {
@@ -1073,7 +1079,7 @@ fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8])
 
 /// Maneja MSG_CHAT_CLIENT_PERSONAL_MESSAGE (13).
 async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) {
-    let mut r = PacketReader::new(data);
+    let mut r = PacketReader::new_crypto(data, user.ares_crypto);
     let text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
@@ -1082,11 +1088,13 @@ async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_
 
     // Broadcast a la sala: cada uno recibe un "MSG_CHAT_SERVER_PERSONAL_MESSAGE"
     // con el nuevo PM. Lo simplificamos: el server reenvía a cada user.
-    let mut w = PacketWriter::with_msg(TcpMsg::PersonalMessage);
-    w.write_string_nt(&user.name.read()).ok();
-    w.write_string_nt(&text).ok();
-    let pkt = Bytes::copy_from_slice(w.as_bytes());
-    broadcast_to_room(ctx, user, pkt);
+    let uname = user.name.read().clone();
+    broadcast_to_room(ctx, user, |c| {
+        let mut w = PacketWriter::with_msg_crypto(TcpMsg::PersonalMessage, c);
+        w.write_string_nt(&uname).ok();
+        w.write_string_nt(&text).ok();
+        Bytes::copy_from_slice(w.as_bytes())
+    });
     ctx.publish_link_event(LinkEvent::PersonalMessage {
         origin: None,
         name: user.name.read().clone(),
@@ -1096,24 +1104,31 @@ async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_
 
 /// Broadcast a todos los usuarios en la misma vroom que `sender`.
 /// `sender` también lo recibe (compat con sb0t original).
-fn broadcast_to_room(ctx: &AppContext, sender: &server_core::user_pool::AresUser, pkt: Bytes) {
-    let sender_id = sender.id;
+/// `build` construye el paquete binario para un destinatario dado su `crypto`
+/// (`None` = plano). Se llama una vez con `None` (paquete compartido para WS y
+/// clientes sin cifrar) y una vez por cada cliente Ares cifrado.
+fn broadcast_to_room<F>(ctx: &AppContext, sender: &server_core::user_pool::AresUser, build: F)
+where
+    F: Fn(server_core::outbound::Crypto) -> Bytes,
+{
     let vroom = *sender.vroom.read();
-    let users = ctx.user_pool.users();
-    for u in users {
+    let plain = build(None);
+    for u in ctx.user_pool.users() {
         if u.logged_in && *u.vroom.read() == vroom && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             if u.web_client {
-                // Cliente web: traducir el binario al formato texto ib0t.
-                if let Some(text) = astra_web::ws_outbound::translate_broadcast(&pkt, sender, &u) {
+                // Cliente web: traducir el binario (plano) al formato texto ib0t.
+                if let Some(text) = astra_web::ws_outbound::translate_broadcast(&plain, sender, &u) {
                     if let Some(tx) = &u.ws_text_sender {
                         let _ = tx.send(text);
                     }
                 }
+            } else if let Some(crypto) = u.ares_crypto {
+                // Cliente Ares cifrado: reconstruir con su key.
+                let _ = u.send(build(Some(crypto)));
             } else {
-                // En el sb0t original el sender también recibe el broadcast.
-                let _ = u.send(pkt.clone());
+                // Cliente Ares sin cifrar: el paquete plano compartido.
+                let _ = u.send(plain.clone());
             }
-            let _ = sender_id; // unused but indicates intent
         }
     }
 }
@@ -1124,14 +1139,13 @@ fn broadcast_to_room(ctx: &AppContext, sender: &server_core::user_pool::AresUser
 fn vspy_copy(ctx: &AppContext, sender: &server_core::user_pool::AresUser, name: &str, text: &str) {
     let sender_vroom = *sender.vroom.read();
     let line = format!("[vroom {}] {}: {}", sender_vroom, name, text);
-    let pkt = outbound::build_pvt(&ctx.settings.bot_name, &line);
     for u in ctx.user_pool.users() {
         if u.logged_in
             && u.sub_vspy.load(std::sync::atomic::Ordering::Relaxed)
             && *u.vroom.read() != sender_vroom
             && (*u.level.read() as u8) >= server_core::ILevel::Moderator as u8
         {
-            let _ = u.send(pkt.clone());
+            let _ = u.send_pvt(&ctx.settings.bot_name, &line);
         }
     }
 }
@@ -1155,7 +1169,7 @@ fn send_greet(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
         region: &user.region,
     };
     let text = server_core::greets::render_greet(&template, &gctx);
-    let _ = user.send(outbound::build_pvt(&ctx.settings.bot_name, &text));
+    let _ = user.send_pvt(&ctx.settings.bot_name, &text);
 }
 
 /// Aplica la acción de un word filter a un mensaje bloqueado: notifica al
@@ -1168,10 +1182,10 @@ fn apply_filter_action(
 ) {
     use server_core::FilterAction;
     // Aviso al emisor de que su mensaje fue bloqueado.
-    let _ = user.send(outbound::build_pvt(
+    let _ = user.send_pvt(
         &ctx.settings.bot_name,
         "Your message was blocked by a word filter.",
-    ));
+    );
 
     match action {
         FilterAction::Block => {
@@ -1198,12 +1212,11 @@ fn apply_filter_action(
 
 /// Remueve un usuario del pool y difunde su PART (mismo patrón que `/kick`).
 fn filter_remove_user(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>) {
-    let part_pkt = outbound::build_part(user);
     ctx.user_pool.remove(user.id);
     ctx.stats.on_user_part();
     for u in ctx.user_pool.users() {
         if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = u.send(part_pkt.clone());
+            let _ = u.send(outbound::build_part_c(user, u.ares_crypto));
         }
     }
     ctx.publish_link_event(LinkEvent::Part {
@@ -1227,8 +1240,25 @@ async fn send_server_error_to_stream(mut stream: TcpStream, text: &str) -> anyho
     Ok(())
 }
 
+/// Construye el CryptoKey (`MSG_CHAT_SERVER_CRYPTO_KEY`, op 230) envuelto en
+/// ADVANCED_FEATURES: `[250][innerSize:u16][230][IV++Key ofuscado con e67]`.
+/// El framing externo lo agrega la writer task. El blob va SIN cifrar AES
+/// (el cliente aún no tiene la key); solo ofuscado con su GUID.
+fn build_crypto_key(crypto: &proto_ares::AresCrypto, guid: &[u8; 16]) -> Bytes {
+    let obf = crypto.to_obfuscated(guid);
+    let mut inner = PacketWriter::with_msg(TcpMsg::ServerCryptoKey);
+    inner.write_bytes(&obf).ok();
+    let inner_bytes = inner.into_bytes(); // [230][48 bytes]
+    let inner_size = (inner_bytes.len() - 1) as u16;
+
+    let mut outer = PacketWriter::with_msg(TcpMsg::AdvancedFeatures);
+    outer.write_u16_le(inner_size).ok();
+    outer.write_bytes(&inner_bytes).ok();
+    Bytes::copy_from_slice(outer.as_bytes())
+}
+
 fn build_login_ack(user: &server_core::user_pool::AresUser, room_name: &str) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerLoginAck);
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerLoginAck, user.ares_crypto);
     w.write_string_nt(&user.name.read()).ok();
     w.write_string_nt(room_name).ok();
     w.write_string_nt(&user.version).ok();
@@ -1249,7 +1279,7 @@ fn build_my_features(user: &server_core::user_pool::AresUser) -> Bytes {
         flag |= SERVER_SUPPORTS_HTML;
     }
 
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerMyFeatures);
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerMyFeatures, user.ares_crypto);
     w.write_string_nt(&format!("Astra {} - chat server", env!("CARGO_PKG_VERSION"))).ok();
     w.write_u8(flag).ok();
     w.write_u8(63).ok();

@@ -181,10 +181,24 @@ Revisión exhaustiva sb0t↔Astra + implementación de gaps encontrados.
   (+ flag pm_blocked), rempassword, unecho, unkiddy, viewfilter, y aliases
   planos de sb0t (addwordfilter/addjoinfilter/addfilefilter + rem*).
 
+### Cifrado del cliente Ares (crypto=250) — IMPLEMENTADO
+
+Handshake AES completo (paridad `Crypto.cs` / `TCPOutbound.CryptoKey`):
+- Al login con `crypto=250`, el server genera key AES-256 + IV y los manda en
+  `MSG_CHAT_SERVER_CRYPTO_KEY` (op 230, envuelto en ADVANCED_FEATURES 250), con
+  `IV++Key` ofuscado con `e67` sobre el GUID (MD5) del cliente.
+- Desde ahí **todos los strings** viajan cifrados AES-256-CBC/PKCS7 como
+  `u16 len + ciphertext + null`; los campos binarios en claro.
+- `proto_ares::AresCrypto` + `PacketWriter::with_msg_crypto` / `read_string_nt`
+  crypto-aware; builders `_c` (variante cifrada) + helpers `AresUser::send_pvt/
+  send_public/send_emote`. Broadcasts por-destinatario (cada cliente cifrado
+  recibe su copia con su key; los sin cifrar y WS comparten el paquete plano).
+- Verificado E2E: cliente Python que des-ofusca con `d67`+MD5(guid), descifra
+  LoginAck/features/topic y hace round-trip de público cifrado. Sin regresión
+  en clientes sin cifrar ni WS.
+
 ### Diferido (requiere infraestructura mayor)
 
-- **Cifrado del cliente Ares** (crypto=250): necesita el handshake AES/RSA de
-  Ares (CryptoKey). Hoy solo se soportan clientes sin cifrar (null-terminated).
 - **Comandos host\*** (hostban/hostkick/hostkill/hostmuzzle/hostclone/hostcban/
   hostunban/hostunmuzzle): operan sobre toda la red enlazada; requieren
   propagación de acciones admin por el hub.

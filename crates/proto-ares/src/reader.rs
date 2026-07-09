@@ -15,6 +15,7 @@ use std::string::FromUtf8Error;
 
 use byteorder::ByteOrder;
 
+use super::crypto::AresCrypto;
 use super::Guid;
 
 /// Error al leer un paquete Ares.
@@ -47,12 +48,28 @@ pub type ReadResult<T> = Result<T, ReadError>;
 pub struct PacketReader<'a> {
     data: &'a [u8],
     pos: usize,
+    /// Si está seteado, `read_string_nt` desencripta el string.
+    crypto: Option<AresCrypto>,
 }
 
 impl<'a> PacketReader<'a> {
     /// Crea un nuevo lector sobre el slice de bytes.
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            crypto: None,
+        }
+    }
+
+    /// Como [`new`](Self::new) pero con desencriptado de strings si `crypto`
+    /// es `Some` (cliente Ares que negoció cifrado).
+    pub fn new_crypto(data: &'a [u8], crypto: Option<AresCrypto>) -> Self {
+        Self {
+            data,
+            pos: 0,
+            crypto,
+        }
     }
 
     /// Bytes que quedan por leer.
@@ -151,6 +168,27 @@ impl<'a> PacketReader<'a> {
     /// cliente Ares TCP **sin cifrar** (ver `TCPPacketReader.ReadString(IClient)`
     /// rama no cifrada de sb0t).
     pub fn read_string_nt(&mut self) -> ReadResult<String> {
+        // Cliente cifrado: [u16 len][AES(cipher)][opcional 0x00].
+        if let Some(crypto) = self.crypto {
+            let len = self.read_u16_le()? as usize;
+            if len > self.remaining() {
+                return Err(ReadError::Underflow {
+                    needed: len,
+                    pos: self.pos,
+                    remaining: self.remaining(),
+                });
+            }
+            let cipher = &self.data[self.pos..self.pos + len];
+            self.pos += len;
+            // sb0t consume un null final si lo hay.
+            if self.pos < self.data.len() && self.data[self.pos] == 0 {
+                self.pos += 1;
+            }
+            let plain = crypto
+                .decrypt(cipher)
+                .ok_or(ReadError::InvalidStringLength(len as i32))?;
+            return Ok(String::from_utf8(plain)?);
+        }
         let start = self.pos;
         let end = self.data[start..]
             .iter()
@@ -261,6 +299,24 @@ mod tests {
         let mut r = PacketReader::new(b"tail");
         assert_eq!(r.read_string_nt().unwrap(), "tail");
         assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn encrypted_string_roundtrip() {
+        use crate::crypto::AresCrypto;
+        use crate::writer::PacketWriter;
+        let crypto = AresCrypto::generate();
+        // Escribe [op][str1 cifrado][u8=7][str2 cifrado] con cifrado activo.
+        let mut w = PacketWriter::with_msg_crypto(crate::TcpMsg::Public, Some(crypto));
+        w.write_string_nt("hola mundo").unwrap();
+        w.write_u8(7).unwrap();
+        w.write_string_nt("otro").unwrap();
+        let bytes = w.into_bytes();
+
+        let mut r = PacketReader::new_crypto(&bytes[1..], Some(crypto));
+        assert_eq!(r.read_string_nt().unwrap(), "hola mundo");
+        assert_eq!(r.read_u8().unwrap(), 7);
+        assert_eq!(r.read_string_nt().unwrap(), "otro");
     }
 
     #[test]

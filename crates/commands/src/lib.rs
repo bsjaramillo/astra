@@ -769,12 +769,10 @@ fn handle_nick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     let mut part_user = AresUser::new(user.id, user.external_ip, user.guid);
     part_user.logged_in = true;
     *part_user.name.write() = old_name.clone();
-    let part_pkt = outbound::build_part(&part_user);
-    let join_pkt = outbound::build_join_or_userlist(user);
     for other in ctx.user_pool.users() {
         if other.logged_in && *other.vroom.read() == *user.vroom.read() && !other.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = other.send(part_pkt.clone());
-            let _ = other.send(join_pkt.clone());
+            let _ = other.send(outbound::build_part_c(&part_user, other.ares_crypto));
+            let _ = other.send(outbound::build_join_or_userlist_c(user, other.ares_crypto));
         }
     }
 
@@ -811,18 +809,16 @@ fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 
     *user.vroom.write() = new_vroom;
 
-    let part_pkt = outbound::build_part(&part_user);
-    let join_pkt = outbound::build_join_or_userlist(user);
     for other in ctx.user_pool.users() {
         if !other.logged_in || other.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
         let other_vroom = *other.vroom.read();
         if other_vroom == old_vroom {
-            let _ = other.send(part_pkt.clone());
+            let _ = other.send(outbound::build_part_c(&part_user, other.ares_crypto));
         }
         if other_vroom == new_vroom {
-            let _ = other.send(join_pkt.clone());
+            let _ = other.send(outbound::build_join_or_userlist_c(user, other.ares_crypto));
         }
     }
 
@@ -1231,7 +1227,6 @@ fn handle_pmall(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 
     let from = user.name.read().clone();
-    let pkt = outbound::build_pvt(&from, text);
     let mut count = 0usize;
     for other in ctx.user_pool.users() {
         if !other.logged_in
@@ -1240,7 +1235,7 @@ fn handle_pmall(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         {
             continue;
         }
-        let _ = other.send(pkt.clone());
+        let _ = other.send_pvt(&from, text);
         count += 1;
     }
     send_system_line(ctx, user, &format!("PM sent to {} user(s).", count));
@@ -1260,7 +1255,7 @@ fn handle_opmsg(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 
     let from = user.name.read().clone();
     let line = format!("[ops] {}: {}", from, text);
-    let pkt = outbound::build_pvt(&ctx.settings.bot_name, &line);
+    let bot = ctx.settings.bot_name.clone();
     for other in ctx.user_pool.users() {
         if !other.logged_in
             || other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
@@ -1268,7 +1263,7 @@ fn handle_opmsg(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
             continue;
         }
         if (*other.level.read() as u8) >= ILevel::Moderator as u8 {
-            let _ = other.send(pkt.clone());
+            let _ = other.send_pvt(&bot, &line);
         }
     }
 }
@@ -1348,7 +1343,7 @@ fn handle_whisper(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         return;
     };
     let from = user.name.read().clone();
-    let _ = target.send(outbound::build_pvt(&from, text));
+    let _ = target.send_pvt(&from, text);
     send_system_line(ctx, user, &format!("Whispered to '{}'.", target_name));
 }
 
@@ -2184,18 +2179,16 @@ fn handle_move(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     *part_user.vroom.write() = old_vroom;
     *target.vroom.write() = new_vroom;
 
-    let part_pkt = outbound::build_part(&part_user);
-    let join_pkt = outbound::build_join_or_userlist(&target);
     for other in ctx.user_pool.users() {
         if !other.logged_in || other.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
         let ov = *other.vroom.read();
         if ov == old_vroom {
-            let _ = other.send(part_pkt.clone());
+            let _ = other.send(outbound::build_part_c(&part_user, other.ares_crypto));
         }
         if ov == new_vroom {
-            let _ = other.send(join_pkt.clone());
+            let _ = other.send(outbound::build_join_or_userlist_c(&target, other.ares_crypto));
         }
     }
     ctx.publish_link_event(server_core::LinkEvent::VroomChanged {
@@ -2238,15 +2231,13 @@ fn handle_changename(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     let mut part_user = AresUser::new(target.id, target.external_ip, target.guid);
     part_user.logged_in = true;
     *part_user.name.write() = old_name.clone();
-    let part_pkt = outbound::build_part(&part_user);
-    let join_pkt = outbound::build_join_or_userlist(&target);
     for other in ctx.user_pool.users() {
         if other.logged_in
             && *other.vroom.read() == *target.vroom.read()
             && !other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
         {
-            let _ = other.send(part_pkt.clone());
-            let _ = other.send(join_pkt.clone());
+            let _ = other.send(outbound::build_part_c(&part_user, other.ares_crypto));
+            let _ = other.send(outbound::build_join_or_userlist_c(&target, other.ares_crypto));
         }
     }
     ctx.publish_link_event(server_core::LinkEvent::NickChanged {
@@ -2336,10 +2327,10 @@ fn handle_announce(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         return;
     }
     // El bot lo dice en público a toda la sala.
-    let pkt = outbound::build_public(&ctx.settings.bot_name, text);
+    let bot = ctx.settings.bot_name.clone();
     for u in ctx.user_pool.users() {
         if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = u.send(pkt.clone());
+            let _ = u.send_public(&bot, text);
         }
     }
 }
@@ -2391,15 +2382,14 @@ fn handle_clone(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     };
     // Difunde un mensaje público/emote como si lo dijera el target.
     let name = target.name.read().clone();
-    let pkt = if let Some(emote) = text.strip_prefix("/me ") {
-        outbound::build_emote(&name, emote)
-    } else {
-        outbound::build_public(&name, text)
-    };
+    let emote = text.strip_prefix("/me ");
     let vroom = *target.vroom.read();
     for u in ctx.user_pool.users() {
         if u.logged_in && *u.vroom.read() == vroom && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = u.send(pkt.clone());
+            match emote {
+                Some(e) => { let _ = u.send_emote(&name, e); }
+                None => { let _ = u.send_public(&name, text); }
+            }
         }
     }
     send_system_line(ctx, user, &format!("Cloned message as '{}'.", target_name));
@@ -2493,7 +2483,7 @@ fn handle_redirect(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Invalid ip:port.");
         return;
     };
-    let _ = target.send(outbound::build_redirect(ip, port, &ctx.settings.room_name));
+    let _ = target.send(outbound::build_redirect_c(ip, port, &ctx.settings.room_name, target.ares_crypto));
     send_system_line(ctx, user, &format!("Redirected '{}' to {}:{}.", target_name, ip, port));
 }
 
@@ -2604,13 +2594,12 @@ fn handle_clearscreen(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         return;
     }
     // Envía líneas en blanco a todos para "limpiar" la pantalla (paridad sb0t).
-    let blank = outbound::build_public(" ", " ");
     for u in ctx.user_pool.users() {
         if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
         for _ in 0..50 {
-            let _ = u.send(blank.clone());
+            let _ = u.send_public(" ", " ");
         }
     }
     send_system_line(ctx, user, "Screen cleared.");
@@ -2990,15 +2979,12 @@ where
                 let result = make().await;
                 let text = result.unwrap_or_else(|| "Lookup failed (service unavailable).".to_string());
                 for line in text.lines() {
-                    let _ = user.send(server_core::outbound::build_pvt(&bot, line));
+                    let _ = user.send_pvt(&bot, line);
                 }
             });
         }
         Err(_) => {
-            let _ = user.send(server_core::outbound::build_pvt(
-                &bot,
-                "Lookup requires the async runtime (unavailable here).",
-            ));
+            let _ = user.send_pvt(&bot, "Lookup requires the async runtime (unavailable here).");
         }
     }
 }
@@ -3138,10 +3124,8 @@ fn guid_to_hex(guid: &[u8; 16]) -> String {
 }
 
 fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
-    let part_pkt = outbound::build_part(target);
-    let tname = target.name.read();
+    let tname = target.name.read().clone();
     let ws_part = format!("OFFLINE:{}:{}", tname.chars().count(), tname);
-    drop(tname);
 
     ctx.user_pool.remove(target.id);
     ctx.stats.on_user_part();
@@ -3150,23 +3134,24 @@ fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
         if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
-        let _ = u.send(part_pkt.clone());
         if let Some(tx) = &u.ws_text_sender {
             let _ = tx.send(ws_part.clone());
+        } else {
+            let _ = u.send(outbound::build_part_c(target, u.ares_crypto));
         }
     }
 }
 
 fn broadcast_topic(ctx: &AppContext, text: &str) {
-    let pkt = outbound::build_topic(text);
     let ws_msg = format!("TOPIC:{}:{}", text.chars().count(), text);
     for u in ctx.user_pool.users() {
         if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
-        let _ = u.send(pkt.clone());
         if let Some(tx) = &u.ws_text_sender {
             let _ = tx.send(ws_msg.clone());
+        } else {
+            let _ = u.send(outbound::build_topic_c(text, u.ares_crypto));
         }
     }
 }
@@ -3180,8 +3165,7 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 
 fn send_system_line(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     let from = &ctx.settings.bot_name;
-    let pkt = outbound::build_pvt(from, text);
-    let _ = user.send(pkt);
+    let _ = user.send_pvt(from, text);
 }
 
 /// Helper: parsea y dispatcha un mensaje en un solo paso.

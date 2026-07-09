@@ -6,9 +6,13 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use bytes::Bytes;
-use proto_ares::{PacketWriter, TcpMsg};
+use proto_ares::{AresCrypto, PacketWriter, TcpMsg};
 
 use crate::user_pool::AresUser;
+
+/// Crypto del destinatario para cifrar los strings de un paquete. `None` =
+/// cliente sin cifrar (o WS): strings null-terminated en claro.
+pub type Crypto = Option<AresCrypto>;
 
 /// Flags de capabilities de un cliente (byte de features en JOIN/USERLIST).
 pub mod features {
@@ -64,7 +68,12 @@ pub fn build_features(user: &AresUser) -> u8 {
 /// u8   features
 /// ```
 pub fn build_join_or_userlist(user: &AresUser) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerJoin);
+    build_join_or_userlist_c(user, None)
+}
+
+/// Variante con cifrado para el destinatario (`crypto`).
+pub fn build_join_or_userlist_c(user: &AresUser, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerJoin, crypto);
     w.write_u16_le(user.file_count).ok();
     w.write_u32_le(0).ok(); // reservado
     write_ip(&mut w, &user.external_ip);
@@ -88,7 +97,12 @@ pub fn build_join_or_userlist(user: &AresUser) -> Bytes {
 ///
 /// Formato: `str name`
 pub fn build_part(user: &AresUser) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerPart);
+    build_part_c(user, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_part_c(user: &AresUser, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerPart, crypto);
     w.write_string_nt(&user.name.read()).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
@@ -96,7 +110,12 @@ pub fn build_part(user: &AresUser) -> Bytes {
 /// Construye un USERLIST (un usuario en la lista).
 /// Es el mismo formato que JOIN.
 pub fn build_userlist_item(user: &AresUser) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerChannelUserList);
+    build_userlist_item_c(user, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_userlist_item_c(user: &AresUser, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerChannelUserList, crypto);
     w.write_u16_le(user.file_count).ok();
     w.write_u32_le(0).ok();
     write_ip(&mut w, &user.external_ip);
@@ -150,7 +169,12 @@ fn level_to_u8(level: &crate::types::ILevel) -> u8 {
 /// str  "" (region)
 /// ```
 pub fn build_userlist_bot(bot_name: &str) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerChannelUserList);
+    build_userlist_bot_c(bot_name, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_userlist_bot_c(bot_name: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerChannelUserList, crypto);
     w.write_u16_le(0).ok();
     w.write_u32_le(0).ok();
     w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
@@ -180,14 +204,24 @@ pub fn build_userlist_end() -> Bytes {
 
 /// Topic (enviado al unirse).
 pub fn build_topic_first(text: &str) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerTopicFirst);
+    build_topic_first_c(text, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_topic_first_c(text: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerTopicFirst, crypto);
     w.write_string_nt(text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
 
 /// Topic (broadcast cuando alguien lo cambia).
 pub fn build_topic(text: &str) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerTopic);
+    build_topic_c(text, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_topic_c(text: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerTopic, crypto);
     w.write_string_nt(text).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
@@ -197,7 +231,12 @@ pub fn build_topic(text: &str) -> Bytes {
 /// Formato sb0t: `ip, u16 port, ip, str room_name, str "Redirecting..."`.
 /// El cliente Ares cierra y se reconecta al `ip:port` indicado.
 pub fn build_redirect(ip: std::net::IpAddr, port: u16, room_name: &str) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerRedirect);
+    build_redirect_c(ip, port, room_name, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_redirect_c(ip: std::net::IpAddr, port: u16, room_name: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerRedirect, crypto);
     write_ip(&mut w, &ip);
     w.write_u16_le(port).ok();
     write_ip(&mut w, &ip);
@@ -210,8 +249,13 @@ pub fn build_redirect(ip: std::net::IpAddr, port: u16, room_name: &str) -> Bytes
 ///
 /// Formato: `str name, str text`
 pub fn build_public(from_name: &str, text: &str) -> Bytes {
+    build_public_c(from_name, text, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_public_c(from_name: &str, text: &str, crypto: Crypto) -> Bytes {
     let text = truncate_message(text, 300);
-    let mut w = PacketWriter::with_msg(TcpMsg::Public);
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::Public, crypto);
     w.write_string_nt(from_name).ok();
     w.write_string_nt(&text).ok();
     Bytes::copy_from_slice(w.as_bytes())
@@ -221,8 +265,13 @@ pub fn build_public(from_name: &str, text: &str) -> Bytes {
 ///
 /// Formato: `str name, str text`
 pub fn build_emote(from_name: &str, text: &str) -> Bytes {
+    build_emote_c(from_name, text, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_emote_c(from_name: &str, text: &str, crypto: Crypto) -> Bytes {
     let text = truncate_message(text, 300);
-    let mut w = PacketWriter::with_msg(TcpMsg::Emote);
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::Emote, crypto);
     w.write_string_nt(from_name).ok();
     w.write_string_nt(&text).ok();
     Bytes::copy_from_slice(w.as_bytes())
@@ -232,8 +281,13 @@ pub fn build_emote(from_name: &str, text: &str) -> Bytes {
 ///
 /// Formato: `str from_name, str text`
 pub fn build_pvt(from_name: &str, text: &str) -> Bytes {
+    build_pvt_c(from_name, text, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_pvt_c(from_name: &str, text: &str, crypto: Crypto) -> Bytes {
     let text = truncate_message(text, 300);
-    let mut w = PacketWriter::with_msg(TcpMsg::Pmt);
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::Pmt, crypto);
     w.write_string_nt(from_name).ok();
     w.write_string_nt(&text).ok();
     Bytes::copy_from_slice(w.as_bytes())

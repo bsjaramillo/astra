@@ -123,6 +123,9 @@ pub struct AresUser {
     pub connected: bool,
     /// ¿Encrypted?
     pub encrypted: bool,
+    /// Material de cifrado AES del cliente Ares (si negoció `crypto=250`).
+    /// Se setea en el login antes de envolver en `Arc`; inmutable después.
+    pub ares_crypto: Option<proto_ares::AresCrypto>,
     /// Fuente.
     pub font: IFont,
     /// Custom name.
@@ -213,6 +216,7 @@ impl AresUser {
             idle: false,
             connected: true,
             encrypted: false,
+            ares_crypto: None,
             font: IFont::default(),
             custom_name: parking_lot::RwLock::new(None),
             personal_message: parking_lot::Mutex::new(String::new()),
@@ -252,6 +256,22 @@ impl AresUser {
         } else {
             false
         }
+    }
+
+    /// Envía un PM al cliente, cifrando los strings con su key si negoció
+    /// cifrado (Ares `crypto=250`). Usar en vez de `send(build_pvt(...))`.
+    pub fn send_pvt(&self, from: &str, text: &str) -> bool {
+        self.send(crate::outbound::build_pvt_c(from, text, self.ares_crypto))
+    }
+
+    /// Como [`send_pvt`](Self::send_pvt) pero para un mensaje público.
+    pub fn send_public(&self, from: &str, text: &str) -> bool {
+        self.send(crate::outbound::build_public_c(from, text, self.ares_crypto))
+    }
+
+    /// Como [`send_pvt`](Self::send_pvt) pero para un emote.
+    pub fn send_emote(&self, from: &str, text: &str) -> bool {
+        self.send(crate::outbound::build_emote_c(from, text, self.ares_crypto))
     }
 }
 
