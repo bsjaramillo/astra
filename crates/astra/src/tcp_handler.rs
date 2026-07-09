@@ -350,6 +350,17 @@ async fn process_handshake(
                         return Ok(None);
                     }
 
+                    // ASN ban (requiere base GeoIP-ASN cargada; si no, no-op)
+                    if !ctx.asn_bans.is_empty() {
+                        if let Some(asn) = ctx.geoip.lookup_asn(external_ip) {
+                            if ctx.asn_bans.is_banned(asn) {
+                                warn!("REJECTED (ASN ban {}): peer={}", asn, peer);
+                                let _ = tx.send(server_error_packet("You are banned from this room"));
+                                return Ok(None);
+                            }
+                        }
+                    }
+
                     // Join-flood
                     if ctx.user_history.is_join_flooding(external_ip, now_ms) {
                         warn!("REJECTED (join-flood): peer={}", peer);

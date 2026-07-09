@@ -90,9 +90,13 @@ pub mod room_flags;
 /// Filtros de nombre (join / file).
 pub mod name_filters;
 
+/// Resolución GeoIP / ASN via bases MMDB opcionales.
+pub mod geoip;
+
 /// Re-exports comunes.
 pub use app::{AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use greets::{GreetContext, GreetManager};
+pub use geoip::GeoIp;
 pub use ip_bans::{AsnBanManager, RangeBanManager};
 pub use name_filters::NameFilterManager;
 pub use room_flags::RoomFlags;

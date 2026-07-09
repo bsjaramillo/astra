@@ -2711,8 +2711,52 @@ fn handle_urban(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     handle_unavailable(ctx, user, "urban");
 }
 
-fn handle_trace(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
-    handle_unavailable(ctx, user, "trace");
+/// `/trace <nick|ip>` — geolocaliza una IP usando la base GeoIP (si está
+/// cargada). Sin base, degrada a mostrar el país del login (como /locate).
+fn handle_trace(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_system_line(ctx, user, "Usage: /trace <nick|ip>");
+        return;
+    }
+    // Resolver el arg a una IP (nick online o IP literal).
+    let (ip, who) = if let Ok(ip) = arg.parse::<IpAddr>() {
+        (ip, arg.to_string())
+    } else if let Some(t) = ctx.user_pool.get_by_name(arg) {
+        (t.external_ip, t.name.read().clone())
+    } else {
+        send_system_line(ctx, user, "User not found (or invalid IP).");
+        return;
+    };
+
+    if !ctx.geoip.has_city() {
+        send_system_line(
+            ctx,
+            user,
+            "/trace requires a GeoIP database. Place a city.mmdb (MaxMind GeoLite2 or DB-IP Lite) in the data dir.",
+        );
+        return;
+    }
+    match ctx.geoip.lookup_city(ip) {
+        Some(g) => {
+            let parts = [
+                g.city.clone(),
+                g.region.clone(),
+                g.country.clone().or(g.country_code.clone()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            let loc = if parts.is_empty() { "unknown".to_string() } else { parts.join(", ") };
+            let asn = ctx.geoip.lookup_asn(ip).map(|a| format!(" ASN{}", a)).unwrap_or_default();
+            send_system_line(ctx, user, &format!("TRACE {} [{}]: {}{}", who, ip, loc, asn));
+        }
+        None => send_system_line(ctx, user, &format!("TRACE {} [{}]: no data.", who, ip)),
+    }
 }
 
 /// Comandos reconocidos pero cuya funcionalidad requiere infraestructura
@@ -3775,6 +3819,17 @@ mod tests {
             }
         }
         assert!(got_bansend);
+    }
+
+    #[test]
+    fn builtin_trace_without_geoip_is_honest() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "trace", "8.8.8.8");
+        assert!(next_pvt_text(&mut alice_rx).contains("requires a GeoIP database"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use super::captcha::CaptchaManager;
 use super::db::Database;
 use super::greets::GreetManager;
 use super::idle::IdleManager;
+use super::geoip::GeoIp;
 use super::ip_bans::{AsnBanManager, RangeBanManager};
 use super::name_filters::NameFilterManager;
 use super::room_flags::RoomFlags;
@@ -302,6 +303,8 @@ pub struct AppContext {
     pub join_filters: Arc<NameFilterManager>,
     /// Filtros de nombres de archivo (`/filefilter`).
     pub file_filters: Arc<NameFilterManager>,
+    /// Resolución GeoIP/ASN (bases MMDB opcionales en `data_dir`).
+    pub geoip: Arc<GeoIp>,
     /// Log reciente de acciones de ban para `/banstats`: `(banner, target, ip)`.
     pub ban_log: parking_lot::Mutex<std::collections::VecDeque<(String, String, String)>>,
     /// Si está activo, los comandos admin se ignoran salvo para el Owner
@@ -355,6 +358,7 @@ impl AppContext {
         let room_flags = Arc::new(RoomFlags::new(db.clone()));
         let join_filters = Arc::new(NameFilterManager::new(db.clone(), "join"));
         let file_filters = Arc::new(NameFilterManager::new(db.clone(), "file"));
+        let geoip = Arc::new(GeoIp::load(std::path::Path::new(&settings.data_dir)));
         let (link_events, _) = broadcast::channel(1024);
         Self {
             settings: Arc::new(settings),
@@ -376,6 +380,7 @@ impl AppContext {
             room_flags,
             join_filters,
             file_filters,
+            geoip,
             ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             admins_disabled: std::sync::atomic::AtomicBool::new(false),
             udp_nodes: parking_lot::RwLock::new(Vec::new()),
