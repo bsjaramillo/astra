@@ -93,5 +93,6 @@ tag:
 	git add Cargo.toml
 	git commit -m "chore: bump version to $(VERSION)"
 	git tag -a "$(VERSION)" -m "Release $(VERSION)"
+	git push
 	git push origin "$(VERSION)"
 	@echo "Tag $(VERSION) pusheado. El workflow publicará binarios e imágenes Docker."
