@@ -1,0 +1,28 @@
+{
+  "Count": 20,
+  "Source": "http://chatrooms.mywire.org/rooms.json",
+  "FetchedAt": "2026-06-27",
+  "Note": "Subset del original (92 rooms) para tests. En producción, regenerar ejecutando el script de seeding o descargar el JSON completo.",
+  "Items": [
+    {"port": 3724, "users": 22, "name": "Anime 420 Ares", "topic": "Anime 420 room", "servidor": "sb0t 5.43.5", "externalIp": "18.118.100.161", "lastUpdate": 1782601259732},
+    {"port": 54321, "users": 21, "name": "Mayores de 20 Amistad", "topic": "Amistad +20", "servidor": "sb0t 5.43.5", "externalIp": "49.13.65.180", "lastUpdate": 1782601353059},
+    {"port": 54321, "users": 19, "name": "La Caja de Pandora", "topic": "Pandora 24/7", "servidor": "sb0t 5.43.5", "externalIp": "65.21.240.33", "lastUpdate": 1782601353024},
+    {"port": 10000, "users": 17, "name": "Infinito", "topic": "Infinito chat", "servidor": "sb0t 5.43.5", "externalIp": "212.100.173.105", "lastUpdate": 1782601211791},
+    {"port": 11000, "users": 16, "name": "Arana's Community", "topic": "Arana's community channel", "servidor": "sb0t 5.43.5", "externalIp": "173.208.251.68", "lastUpdate": 1782601307591},
+    {"port": 10000, "users": 14, "name": "Brasil Heineken", "topic": "Brasil Heineken 24/7", "servidor": "Sb0t Flags Edition", "externalIp": "163.176.241.96", "lastUpdate": 1782601355644},
+    {"port": 55555, "users": 12, "name": "Love-Hate Shack", "topic": "Love-Hate Shack chat", "servidor": "sb0t 5.43.5", "externalIp": "100.8.72.86", "lastUpdate": 1782601307621},
+    {"port": 8000, "users": 11, "name": "Manicōtico Kikyō", "topic": "Venezuela/Mexico", "servidor": "sb0t 5.43.5", "externalIp": "192.99.25.244", "lastUpdate": 1782601307729},
+    {"port": 11000, "users": 9, "name": "Arana's Hangout", "topic": "Arana's hangout", "servidor": "sb0t 5.43.4", "externalIp": "74.91.112.251", "lastUpdate": 1782601307622},
+    {"port": 62175, "users": 9, "name": "Cabaret 24/7", "topic": "Cabaret 24/7", "servidor": "sb0t 5.43.5", "externalIp": "77.42.79.24", "lastUpdate": 1782600534952},
+    {"port": 54321, "users": 7, "name": "Brasil Conectados", "topic": "Brasil online", "servidor": "sb0t 5.43.5", "externalIp": "192.99.25.242", "lastUpdate": 1782601307579},
+    {"port": 10010, "users": 7, "name": "Pasion Latina", "topic": "Chat adulto sin censura", "servidor": "sb0t 5.43.4", "externalIp": "189.173.168.106", "lastUpdate": 1782600630672},
+    {"port": 10000, "users": 6, "name": "Brasil Over Night", "topic": "Brasil night", "servidor": "sb0t 5.43.5", "externalIp": "153.75.247.202", "lastUpdate": 1782601355495},
+    {"port": 5000, "users": 6, "name": "Melmac Amistades Cosmicas", "topic": "Amistades cosmicas", "servidor": "sb0t 5 En Espanol v.36", "externalIp": "186.60.23.53", "lastUpdate": 1782601113138},
+    {"port": 4040, "users": 5, "name": "Almas Gemelas", "topic": "Almas gemelas", "servidor": "Special Edition LLV", "externalIp": "186.61.100.221", "lastUpdate": 1782601355824},
+    {"port": 1000, "users": 5, "name": "The Sandbox", "topic": "The sandbox", "servidor": "lib0t 6.2.1", "externalIp": "173.208.251.70", "externalUpdate": 1782601259409, "lastUpdate": 1782601259409},
+    {"port": 6890, "users": 3, "name": "Amistad y Mas 30-90", "topic": "Amistad 30-90", "servidor": "sb0t 5 En Espanol v.36", "externalIp": "163.245.209.101", "lastUpdate": 1782601355541},
+    {"port": 54321, "users": 1, "name": "The Pulsar Posse", "topic": "The pulsar posse", "servidor": "sb0t 5.41", "externalIp": "192.169.201.123", "lastUpdate": 1782601307397},
+    {"port": 54321, "users": 0, "name": "Coca-Cola Cristiana", "topic": "Coca-Cola cristiana", "servidor": "lib0t 6.2.1", "externalIp": "192.227.224.89", "lastUpdate": 1782601355215},
+    {"port": 54321, "users": 0, "name": "Coca-Cola Mango", "topic": "Coca-Cola mango", "servidor": "sb0t 5.43.5", "externalIp": "198.12.89.209", "lastUpdate": 1782601355229}
+  ]
+}

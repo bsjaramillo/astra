@@ -12,8 +12,9 @@ Cargo.lock.bak
 Thumbs.db
 
 # Local data
-data/
-*.db
+data/*
+!data/scripts/
+!data/seed_rooms.json
 *.sqlite
 *.sqlite3
 *.log
