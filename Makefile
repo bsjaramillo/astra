@@ -81,13 +81,18 @@ docker-run:
 clean:
 	$(CARGO) clean
 
-## tag: crea y pushea un tag de release (uso: make tag VERSION=v0.1.0)
+## tag: actualiza la versión en Cargo.toml, commitea y crea el tag (uso: make tag VERSION=v0.2.0)
 ##      dispara el workflow que publica binarios multi-arch + imágenes Docker.
 .PHONY: tag
 tag:
-	@test -n "$(VERSION)" || { echo "Uso: make tag VERSION=v0.1.0"; exit 1; }
+	@test -n "$(VERSION)" || { echo "Uso: make tag VERSION=v0.2.0"; exit 1; }
 	@echo "$(VERSION)" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+' || { echo "VERSION debe tener forma vMAJOR.MINOR.PATCH"; exit 1; }
 	@git diff --quiet || { echo "Hay cambios sin commitear; commiteá antes de taggear."; exit 1; }
+	$(eval SEMVER := $(patsubst v%,%,$(VERSION)))
+	sed -i 's/^version = "[0-9]*\.[0-9]*\.[0-9]*"/version = "$(SEMVER)"/' Cargo.toml
+	$(CARGO) generate-lockfile --quiet
+	git add Cargo.toml Cargo.lock
+	git commit -m "chore: bump version to $(VERSION)"
 	git tag -a "$(VERSION)" -m "Release $(VERSION)"
 	git push origin "$(VERSION)"
 	@echo "Tag $(VERSION) pusheado. El workflow publicará binarios e imágenes Docker."
