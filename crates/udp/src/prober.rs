@@ -23,12 +23,15 @@ use tracing::{debug, info, warn};
 use crate::manager::UdpNodeManager;
 use crate::protocol;
 
-/// Loop principal del prober. Cada 15 segundos evalúa si hay un nodo
-/// elegible (sin push nuestro en los últimos 15 minutos) y, si lo hay, le
-/// anuncia nuestra existencia.
+/// Loop principal del prober. Cada 1 segundo evalúa si hay un nodo elegible
+/// (sin push nuestro en los últimos 15 minutos) y, si lo hay, le anuncia
+/// nuestra existencia. Cadencia igual a `UdpListener.Timer_1_Second` de sb0t:
+/// con muchos nodos en la lista (cientos), tickear cada 1s es lo que permite
+/// cubrir toda la lista dentro de la ventana de 15 minutos; con un tick más
+/// espaciado, una lista grande tarda mucho más en recibir su primer push.
 pub async fn run_prober(manager: Arc<UdpNodeManager>, socket: Arc<UdpSocket>) {
     info!("UDP prober (push ADDIPS) iniciado");
-    let mut tick = interval(Duration::from_secs(15));
+    let mut tick = interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {

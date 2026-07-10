@@ -438,7 +438,14 @@ async fn main() -> anyhow::Result<()> {
         loop {
             interval.tick().await;
             let udp_info = if let Some(m) = &udp_manager {
-                format!(", udp_nodos={}, udp_rooms={}", m.count_nodes(), m.count_rooms())
+                use std::sync::atomic::Ordering;
+                format!(
+                    ", udp_nodos={}, udp_rooms={}, udp_addips_sent={}, udp_addips_recv={}",
+                    m.count_nodes(),
+                    m.count_rooms(),
+                    m.stats.addips_sent.load(Ordering::Relaxed),
+                    m.stats.addips_recv.load(Ordering::Relaxed),
+                )
             } else {
                 String::new()
             };
