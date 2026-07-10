@@ -22,18 +22,21 @@ COPY crates ./crates
 # Compilar únicamente el binario del server.
 RUN cargo build --release -p astra --bin astra
 
+# Se crea un directorio vacío en builder para pasarlo al runtime
+RUN mkdir -p /app/data
+
 # -------- Stage 2: runtime --------
 # distroless cc-debian12: chico, seguro, sin shell ni package manager.
 FROM gcr.io/distroless/cc-debian12:nonroot
 
 WORKDIR /app
 
-# Binario + datos iniciales (scripts de ejemplo, etc.).
-# El data dir se copia como `nonroot` (UID 65532) para que el usuario del
-# contenedor pueda escribir la DB SQLite. Al montar un volumen vacío encima,
-# Docker hereda esta propiedad, así que el volumen queda escribible.
+# Binario + directorio data vacío
+# Se copia el dir vacío desde el builder como `nonroot` (UID 65532) para que
+# el usuario pueda escribir la DB SQLite. Al montar un volumen vacío, Docker hereda
+# estos permisos.
 COPY --from=builder /app/target/release/astra /app/astra
-COPY --chown=65532:65532 data /app/data
+COPY --from=builder --chown=65532:65532 /app/data /app/data
 
 # Astra multiplexa TCP (Ares), WebSocket (web/admin), Link y UDP en un solo
 # puerto lógico (5009 por defecto).
