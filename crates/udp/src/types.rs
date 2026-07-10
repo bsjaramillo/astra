@@ -117,10 +117,6 @@ pub struct UdpStats {
     pub sendnodes_recv: std::sync::atomic::AtomicU64,
     /// Cantidad de ACKNODES enviados
     pub acknodes_sent: std::sync::atomic::AtomicU64,
-    /// Cantidad de probes enviados
-    pub probes_sent: std::sync::atomic::AtomicU64,
-    /// Cantidad de probes exitosos
-    pub probes_ok: std::sync::atomic::AtomicU64,
 }
 
 impl UdpStats {
@@ -140,15 +136,13 @@ impl UdpStats {
         self.ackips_recv.store(0, Ordering::Relaxed);
         self.sendnodes_recv.store(0, Ordering::Relaxed);
         self.acknodes_sent.store(0, Ordering::Relaxed);
-        self.probes_sent.store(0, Ordering::Relaxed);
-        self.probes_ok.store(0, Ordering::Relaxed);
     }
 
     /// Log resumen de stats.
     pub fn log_summary(&self) {
         use std::sync::atomic::Ordering;
         tracing::info!(
-            "UDP stats: SENDINFO={} ACKINFO={} ADDIPS={}/{} ACKIPS={}/{} SENDNODES={} ACKNODES={} probes={}/{}",
+            "UDP stats: SENDINFO={} ACKINFO={} ADDIPS={}/{} ACKIPS={}/{} SENDNODES={} ACKNODES={}",
             self.sendinfo_recv.load(Ordering::Relaxed),
             self.ackinfo_sent.load(Ordering::Relaxed),
             self.addips_recv.load(Ordering::Relaxed),
@@ -157,8 +151,6 @@ impl UdpStats {
             self.ackips_recv.load(Ordering::Relaxed),
             self.sendnodes_recv.load(Ordering::Relaxed),
             self.acknodes_sent.load(Ordering::Relaxed),
-            self.probes_sent.load(Ordering::Relaxed),
-            self.probes_ok.load(Ordering::Relaxed),
         );
     }
 }
@@ -182,8 +174,8 @@ mod tests {
     #[test]
     fn stats_reset() {
         let s = UdpStats::new();
-        s.probes_sent.fetch_add(5, std::sync::atomic::Ordering::Relaxed);
+        s.addips_sent.fetch_add(5, std::sync::atomic::Ordering::Relaxed);
         s.reset();
-        assert_eq!(s.probes_sent.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(s.addips_sent.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }

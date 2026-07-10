@@ -270,10 +270,21 @@ impl UdpNodeManager {
     /// Devuelve hasta `max` nodos "activos" (con ack > 0 y conexión reciente).
     /// Usado para enviar en ACKINFO / ADDIPS a otros servers.
     pub fn active_nodes(&self, max: usize, now_ms: i64) -> Vec<NodeAddr> {
+        self.active_nodes_impl(None, max, now_ms)
+    }
+
+    /// Como [`active_nodes`](Self::active_nodes), pero excluye `exclude`
+    /// (no tiene sentido anunciarle a un nodo su propia dirección). Paridad
+    /// `UdpNodeManager.GetServers(target_ip, max, time)` de sb0t.
+    pub fn active_nodes_excluding(&self, exclude: IpAddr, max: usize, now_ms: i64) -> Vec<NodeAddr> {
+        self.active_nodes_impl(Some(exclude), max, now_ms)
+    }
+
+    fn active_nodes_impl(&self, exclude: Option<IpAddr>, max: usize, now_ms: i64) -> Vec<NodeAddr> {
         let nodes = self.nodes.read();
         let mut active: Vec<&UdpNode> = nodes
             .iter()
-            .filter(|n| n.ack > 0 && (n.last_connect + 900_000) > now_ms)
+            .filter(|n| Some(n.ip) != exclude && n.ack > 0 && (n.last_connect + 900_000) > now_ms)
             .collect();
         // Orden aleatorio (como el original)
         active.sort_by(|_, _| {

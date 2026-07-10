@@ -9,7 +9,7 @@
 //! - [`manager`]: `UdpNodeManager` (in-memory + DB)
 //! - [`seed`]: carga del seed JSON (`data/seed_rooms.json`)
 //! - [`listener`]: task async que recibe/envía paquetes UDP
-//! - [`prober`]: task async que proa nodos periódicamente
+//! - [`prober`]: task async que publica (ADDIPS) nuestra existencia a nodos periódicamente
 //!
 //! ## Uso
 //!
@@ -35,6 +35,6 @@ pub mod types;
 
 pub use listener::{run_listener, UserCountFn};
 pub use manager::{NodeChangeCallback, NodeSnapshot, UdpNodeManager};
-pub use prober::{probe_once, run_prober};
+pub use prober::{push_once, run_prober};
 pub use seed::{load_seed, load_seed_force, validate_seed};
 pub use types::{NodeAddr, UdpChannelItem, UdpNode, UdpStats};
