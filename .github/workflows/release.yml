@@ -5,6 +5,10 @@
 # Construye y publica:
 #   1. Imágenes Docker multi-arch (linux/amd64, linux/arm64) → ghcr.io
 #   2. Binarios estáticos para linux, windows, macos → GitHub Release
+#
+# Tags de pre-release (vX.Y.Z-alpha*, -beta*, -rc*):
+#   - La imagen Docker NO sobreescribe :latest
+#   - El GitHub Release se marca como pre-release automáticamente
 # =============================================================================
 name: release
 
@@ -20,11 +24,37 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # 0. Prepare: extrae versión y detecta si es pre-release
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      is_prerelease: ${{ steps.check.outputs.IS_PRERELEASE }}
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Detect pre-release
+        id: check
+        run: |
+          if echo "${GITHUB_REF#refs/tags/v}" | grep -qE -- '-(alpha|beta|rc)(\.[0-9]+)?$'; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ---------------------------------------------------------------------------
   # 1. Build + push Docker images multi-arch
   # ---------------------------------------------------------------------------
   docker:
     name: docker (linux/${{ matrix.arch }})
     runs-on: ubuntu-latest
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -47,11 +77,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version
-        id: version
+      - name: Compute Docker tags
+        id: docker_tags
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          VERSION=${{ needs.prepare.outputs.version }}
+          REPO=ghcr.io/${{ github.repository_owner }}/astra
+          ARCH=${{ matrix.arch }}
+          # Siempre se publica con la versión exacta
+          TAGS="${REPO}:${VERSION}-${ARCH}"$'\n'"${REPO}:${VERSION}"
+          # Solo se pisa :latest en releases estables
+          if [ "${{ needs.prepare.outputs.is_prerelease }}" != "true" ]; then
+            TAGS="${TAGS}"$'\n'"${REPO}:latest-${ARCH}"$'\n'"${REPO}:latest"
+          fi
+          {
+            echo 'TAGS<<EOF'
+            echo "$TAGS"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -60,16 +102,12 @@ jobs:
           file: ./Dockerfile
           platforms: linux/${{ matrix.arch }}
           push: ${{ github.event_name == 'push' }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}-${{ matrix.arch }}
-            ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}
-            ghcr.io/${{ github.repository_owner }}/astra:latest-${{ matrix.arch }}
-            ghcr.io/${{ github.repository_owner }}/astra:latest
+          tags: ${{ steps.docker_tags.outputs.TAGS }}
           labels: |
             org.opencontainers.image.title=astra
             org.opencontainers.image.description=Ares Galaxy compatible chat server
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -79,6 +117,7 @@ jobs:
   binaries:
     name: binary (${{ matrix.target }})
     runs-on: ubuntu-latest
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -105,12 +144,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Extract version
-        id: version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
       # Instalar target si no está
       - name: Install Rust target
@@ -146,7 +179,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: release
-    needs: [docker, binaries]
+    needs: [prepare, docker, binaries]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -168,29 +201,23 @@ jobs:
           done
           ls -la
 
-      - name: Extract version
-        id: version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: Astra ${{ steps.version.outputs.VERSION }}
+          name: Astra ${{ needs.prepare.outputs.version }}
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
           generate_release_notes: true
           body: |
-            ## Astra Chat Server ${{ steps.version.outputs.VERSION }}
+            ## Astra Chat Server ${{ needs.prepare.outputs.version }}
 
             ### Instalación
 
             #### Opción 1: Docker (recomendado)
 
             ```bash
-            docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}
+            docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
 
             docker run -d \
               --name astra \
@@ -199,13 +226,13 @@ jobs:
               -p 5011:5011 \
               -p 5012:5012/udp \
               -v astra-data:/app/data \
-              ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}
+              ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
             ```
 
             O usando docker compose:
 
             ```bash
-            curl -O https://raw.githubusercontent.com/${{ github.repository_owner }}/astra/${{ steps.version.outputs.VERSION }}/docker-compose.yml
+            curl -O https://raw.githubusercontent.com/${{ github.repository_owner }}/astra/${{ needs.prepare.outputs.version }}/docker-compose.yml
             docker compose up -d
             ```
 
@@ -230,7 +257,7 @@ jobs:
             ### Verificar la imagen Docker
 
             ```bash
-            docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ steps.version.outputs.VERSION }}
+            docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
             docker images --digests ghcr.io/${{ github.repository_owner }}/astra
             ```
           files: |
@@ -238,13 +265,13 @@ jobs:
 
       - name: Generate Docker pull instructions
         run: |
-          cat > dist/DOCKER.md <<'EOF'
+          cat > dist/DOCKER.md << 'EOF'
           # Pull la imagen
 
           ```bash
-          docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ steps.version.outputs.VERSION }}
-          docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ steps.version.outputs.VERSION }}-amd64
-          docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ steps.version.outputs.VERSION }}-arm64
+          docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
+          docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ needs.prepare.outputs.version }}-amd64
+          docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ needs.prepare.outputs.version }}-arm64
           ```
 
           # Verificar
