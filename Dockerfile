@@ -2,7 +2,7 @@
 # Astra Chat Server - Multi-stage Dockerfile
 # =============================================================================
 # Build:  docker build -t astra:local .
-# Multi-arch: docker buildx build --platform linux/amd64,linux/arm64 -t astra .
+# Build: docker buildx build --platform linux/amd64 -t astra .
 # Run:    docker run -p 5009:5009 -p 5009:5009/udp -v astra-data:/app/data astra
 # =============================================================================
 

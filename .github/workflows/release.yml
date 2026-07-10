@@ -58,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -173,7 +173,6 @@ jobs:
           ```bash
           docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
           docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ needs.prepare.outputs.version }}-amd64
-          docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ needs.prepare.outputs.version }}-arm64
           ```
 
           # Verificar
