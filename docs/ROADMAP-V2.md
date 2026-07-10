@@ -52,6 +52,16 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
   probes simultáneos, por encima responde `CHECKFIREWALLBUSY` con nodos
   alternativos. Tests E2E con sockets reales (flujo completo + cookie
   inválido rechazado)
+- [x] **(2026-07-10) Auto-publicación real hacia la red**: el prober mandaba
+  `SENDINFO` (consulta: "¿sos una room?") a los nodos conocidos en vez de
+  `ADDIPS` (anuncio: "acá estoy, agregame"). SENDINFO no hace que nadie nos
+  agregue a su lista de nodos — por eso la sala respondía bien si alguien la
+  consultaba directo, pero nunca llegaba a aparecer en los clientes reales
+  (nadie se enteraba de que existía). Fix en `crates/udp/src/prober.rs`
+  (`push_once`, antes `probe_once`): manda `ADDIPS` con `build_addips`,
+  paridad `UdpListener.Push()` de sb0t. Nuevo `active_nodes_excluding` en el
+  manager (paridad `GetServers(target_ip,...)`). Verificado E2E con un nodo
+  UDP simulado.
 
 ## Fase D — WebSocket completitud ✅ (2026-07-07)
 
