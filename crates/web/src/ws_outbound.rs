@@ -61,10 +61,11 @@ pub fn translate_broadcast(pkt: &Bytes, sender: &AresUser, recipient: &AresUser)
             let level = *sender.level.read() as u8;
             if recipient.inbizier_web || recipient.inbizier_mobile {
                 let pmsg = sender.personal_message.lock().clone();
+                let avatar = crate::handler::avatar_b64_of(sender);
                 Some(build_joininfo(
                     &name,
                     &pmsg,
-                    "",
+                    &avatar,
                     sender.id,
                     level,
                     sender.inbizier_web,

@@ -3277,7 +3277,7 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 
 fn send_system_line(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     let from = &ctx.settings.bot_name;
-    let _ = user.send_pvt(from, text);
+    let _ = user.print(from, text);
 }
 
 /// Helper: parsea y dispatcha un mensaje en un solo paso.

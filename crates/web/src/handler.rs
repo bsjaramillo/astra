@@ -350,6 +350,14 @@ async fn ws_handshake_login(
     if !login.pmsg.is_empty() {
         *user.personal_message.lock() = login.pmsg.clone();
     }
+    // Avatar del login inbizier (campo 7, base64 de la imagen completa).
+    if !login.avatar_b64.is_empty() {
+        use base64::Engine as _;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&login.avatar_b64) {
+            *user.full_avatar.lock() = Some(bytes.clone());
+            *user.avatar.lock() = Some(bytes);
+        }
+    }
 
     let user_arc = Arc::new(user);
     ctx.user_pool.add(user_arc.clone());
@@ -436,22 +444,24 @@ async fn send_initial_state_ws(
     let _ = tx.send(build_topic_first(&room_topic));
 
     // 5) Userlist: bot + usuarios logueados en la misma vroom (incluye self).
-    let emit = |name: &str, pmsg: &str, id: u16, level: u8, iw: bool, im: bool| {
+    let emit = |name: &str, pmsg: &str, avatar: &str, id: u16, level: u8, iw: bool, im: bool| {
         if inbizier {
-            build_userinfo(name, pmsg, "", id, level, iw, im)
+            build_userinfo(name, pmsg, avatar, id, level, iw, im)
         } else {
             build_userlist_item(name, level)
         }
     };
-    let _ = tx.send(emit(&bot_name, "", 0, ILevel::Owner as u8, false, false));
+    let _ = tx.send(emit(&bot_name, "", "", 0, ILevel::Owner as u8, false, false));
     let vroom = *user.vroom.read();
     for other in ctx.user_pool.users() {
         if other.logged_in && *other.vroom.read() == vroom {
             let name = other.name.read().clone();
             let pmsg = other.personal_message.lock().clone();
+            let avatar = avatar_b64_of(&other);
             let _ = tx.send(emit(
                 &name,
                 &pmsg,
+                &avatar,
                 other.id,
                 *other.level.read() as u8,
                 other.inbizier_web,
@@ -461,6 +471,22 @@ async fn send_initial_state_ws(
     }
     // 6) Fin de la userlist.
     let _ = tx.send(build_userlist_end());
+}
+
+/// Base64 del avatar de un usuario para USERINFO/JOININFO (sb0t manda el
+/// FullAvatar a clientes inbizier; cae al avatar chico si no hay).
+pub(crate) fn avatar_b64_of(user: &AresUser) -> String {
+    use base64::Engine as _;
+    let full = user.full_avatar.lock();
+    if let Some(bytes) = full.as_ref() {
+        return base64::engine::general_purpose::STANDARD.encode(bytes);
+    }
+    drop(full);
+    let small = user.avatar.lock();
+    match small.as_ref() {
+        Some(bytes) => base64::engine::general_purpose::STANDARD.encode(bytes),
+        None => String::new(),
+    }
 }
 
 /// Despacha un mensaje entrante del cliente WS.
@@ -481,6 +507,9 @@ async fn dispatch_ws_message(
             debug!("ws PING de id={}", user.id);
         }
         "COMMAND" => handle_ws_command(ctx, user, args),
+        "PM" => handle_ws_pm(ctx, user, args),
+        "PERMSG" => handle_ws_permsg(ctx, user, args),
+        "AVATAR" => handle_ws_avatar(ctx, user, args),
         _ => {
             debug!("ws mensaje {} no procesado de id={}", ident, user.id);
         }
@@ -488,9 +517,10 @@ async fn dispatch_ws_message(
     Ok(())
 }
 
-/// Ejecuta un comando recibido por el ident `COMMAND` (sin '/', ej. `op nick`).
+/// Ejecuta un comando recibido por el ident `COMMAND` o por texto público
+/// que empieza con `/` o `#`. Acepta el comando con o sin prefijo.
 fn handle_ws_command(ctx: &AppContext, user: &Arc<AresUser>, raw: &str) {
-    let raw = raw.trim();
+    let raw = raw.trim().trim_start_matches(['/', '#']).trim();
     if raw.is_empty() {
         return;
     }
@@ -498,16 +528,22 @@ fn handle_ws_command(ctx: &AppContext, user: &Arc<AresUser>, raw: &str) {
         Some((c, a)) => (c, a.trim()),
         None => (raw, ""),
     };
-    let _ = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);
+    let (handled, _events) = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);
+    if !handled {
+        let _ = user.print(
+            &ctx.settings.bot_name,
+            &format!("Unknown command: {}", cmd),
+        );
+    }
 }
 
 fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     if text.is_empty() {
         return;
     }
-    // Comando slash (/op, /help, ...): mismos built-ins que el path TCP.
-    if let Some((cmd, cargs)) = astra_commands::parse_command(text) {
-        let _ = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);
+    // Comando: `/cmd` o `#cmd` (paridad WebProcessor.Text de sb0t).
+    if text.starts_with('/') || text.starts_with('#') {
+        handle_ws_command(ctx, user, text);
         return;
     }
     // Word filter: solo aplica a usuarios regulares (Moderator+ exentos).
@@ -521,6 +557,151 @@ fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     let pkt = outbound::build_public(&name, text);
     broadcast_to_room(ctx, user, pkt);
     ctx.record_message(&name, text, false);
+}
+
+/// PM saliente de un usuario web: `PM:{nameLen},{textLen}:{target}{text}`.
+/// Paridad `WebProcessor.PM` de sb0t (incluye `#cmd`//`/cmd` al bot = comando).
+fn handle_ws_pm(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let Some(items) = protocol::parse_lens_args(args) else {
+        return;
+    };
+    if items.len() < 2 {
+        return;
+    }
+    let target_name = items[0].trim();
+    let mut text = items[1].clone();
+    if text.chars().count() > 300 {
+        text = text.chars().take(300).collect();
+    }
+    if target_name.is_empty() || text.is_empty() {
+        return;
+    }
+
+    // PM al bot: los comandos `/x` o `#x` se ejecutan (paridad sb0t).
+    if target_name == ctx.settings.bot_name {
+        if text.starts_with('/') || text.starts_with('#') {
+            handle_ws_command(ctx, user, &text);
+        }
+        return;
+    }
+
+    let from = user.name.read().clone();
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        let _ = user.print(
+            &ctx.settings.bot_name,
+            &format!("User '{}' not found", target_name),
+        );
+        return;
+    };
+    // Respeta ignore list y /pmblock (regulares).
+    let blocked = (target.pm_blocked.load(std::sync::atomic::Ordering::Relaxed)
+        && (*user.level.read() as u8) < server_core::ILevel::Moderator as u8)
+        || target
+            .ignore_list
+            .read()
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(&from));
+    if blocked {
+        let _ = user.print(
+            &ctx.settings.bot_name,
+            &format!("{} is ignoring you.", target_name),
+        );
+        return;
+    }
+    let _ = target.send_pvt(&from, &text);
+}
+
+/// Cambio de personal message: `PERMSG:{len1},{len2}:{arg0}{texto}`.
+/// Se guarda (máx 50 chars) y se difunde como PERSMSG a los inbizier y como
+/// PersonalMessage binario a los clientes Ares (paridad sb0t).
+fn handle_ws_permsg(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let Some(items) = protocol::parse_lens_args(args) else {
+        return;
+    };
+    // sb0t toma arg_items[1]; si solo vino un campo, usamos ese.
+    let mut text = items.last().cloned().unwrap_or_default();
+    if text.chars().count() > 50 {
+        text = text.chars().take(50).collect();
+    }
+    {
+        let mut pmsg = user.personal_message.lock();
+        if *pmsg == text {
+            return;
+        }
+        *pmsg = text.clone();
+    }
+    let name = user.name.read().clone();
+    let vroom = *user.vroom.read();
+    let ws_msg = protocol::build_persmsg(&name, &text);
+    for u in ctx.user_pool.users() {
+        if !u.logged_in
+            || *u.vroom.read() != vroom
+            || u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            if u.inbizier_web || u.inbizier_mobile {
+                let _ = tx.send(ws_msg.clone());
+            }
+        } else {
+            let mut w = proto_ares::PacketWriter::with_msg_crypto(
+                proto_ares::TcpMsg::PersonalMessage,
+                u.ares_crypto,
+            );
+            w.write_string_nt(&name).ok();
+            w.write_string_nt(&text).ok();
+            let _ = u.send(Bytes::copy_from_slice(w.as_bytes()));
+        }
+    }
+}
+
+/// Avatar subido por un usuario web: `AVATAR:{len1},{len2}:{arg0}{base64}`.
+/// Se guarda y se re-anuncia a los inbizier de la sala (USERINFO con el
+/// avatar nuevo) para que se actualice en vivo.
+fn handle_ws_avatar(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    use base64::Engine as _;
+    if !ctx.room_flags.get("avatars") {
+        return;
+    }
+    let Some(items) = protocol::parse_lens_args(args) else {
+        return;
+    };
+    let b64 = items.last().cloned().unwrap_or_default();
+    if b64.is_empty() || b64 == "/default.png" {
+        return;
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
+        return;
+    };
+    *user.full_avatar.lock() = Some(bytes.clone());
+    *user.avatar.lock() = Some(bytes);
+
+    // Re-anunciar al resto de los inbizier de la vroom con el avatar nuevo.
+    let name = user.name.read().clone();
+    let pmsg = user.personal_message.lock().clone();
+    let avatar = avatar_b64_of(user);
+    let info = protocol::build_userinfo(
+        &name,
+        &pmsg,
+        &avatar,
+        user.id,
+        *user.level.read() as u8,
+        user.inbizier_web,
+        user.inbizier_mobile,
+    );
+    let vroom = *user.vroom.read();
+    for u in ctx.user_pool.users() {
+        if u.logged_in
+            && *u.vroom.read() == vroom
+            && (u.inbizier_web || u.inbizier_mobile)
+            && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(tx) = &u.ws_text_sender {
+                let _ = tx.send(info.clone());
+            }
+        }
+    }
 }
 
 /// Envía el greet de bienvenida como PM del bot al usuario WS que entra.

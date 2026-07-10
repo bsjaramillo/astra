@@ -251,6 +251,11 @@ pub fn build_url(addr: &str, tag: &str) -> String {
     format!("URL:{},{}:{}{}", clen(addr), clen(tag), addr, tag)
 }
 
+/// `PERSMSG:{nameLen},{textLen}:{name}{text}` — cambio de personal message.
+pub fn build_persmsg(name: &str, text: &str) -> String {
+    format!("PERSMSG:{},{}:{}{}", clen(name), clen(text), name, text)
+}
+
 // ============================================================================
 // Parser de LOGIN (args de longitud variable)
 // ============================================================================
@@ -264,18 +269,24 @@ pub struct LoginArgs {
     pub guid: [u8; 16],
     /// Nick
     pub name: String,
-    /// Código de idioma
+    /// Código de idioma (ib0t clásico) o user-agent (inbizier)
     pub lang: String,
-    /// Personal message / detalle
+    /// Personal message
     pub pmsg: String,
+    /// Avatar en base64 (inbizier con 7 campos; vacío si no vino o es el default)
+    pub avatar_b64: String,
     /// Inbizier web (versión 5000)
     pub inbizier_web: bool,
     /// Inbizier mobile (versión 6000)
     pub inbizier_mobile: bool,
 }
 
-/// Parsea los args de un LOGIN. Formato:
-/// `LOGIN:1,32,5,2,4:2000ffffffffffffffffffffffffffffffffAliceen-USpersonal`
+/// Parsea los args de un LOGIN.
+///
+/// ib0t clásico: `2000/{guid}/{name}/{lang}/{pmsg?}`.
+/// Inbizier (5000/6000) con 7 campos (paridad `WebProcessor.Login` de sb0t):
+/// `[0]=version [1]=guid_hex [2]=name [3]=useragent [4]=client_version
+///  [5]=personal_message [6]=avatar_base64 (o "/default.png")`.
 pub fn parse_login(args_text: &str) -> Option<LoginArgs> {
     let items = parse_lens_args(args_text)?;
     if items.len() < 3 {
@@ -300,10 +311,25 @@ pub fn parse_login(args_text: &str) -> Option<LoginArgs> {
 
     let name = items[2].trim().to_string();
     let lang = items.get(3).cloned().unwrap_or_default();
-    let pmsg = items.get(4).cloned().unwrap_or_default();
 
     let inbizier_web = version == "5000";
     let inbizier_mobile = version == "6000";
+    let inbizier = inbizier_web || inbizier_mobile;
+
+    // sb0t: para inbizier con 7 campos, el pmsg real es [5] y el avatar [6];
+    // [4] es el string de versión del cliente (fallback de pmsg).
+    let (pmsg, avatar_b64) = if inbizier && items.len() == 7 {
+        let pmsg = items[5].clone();
+        let av = &items[6];
+        let avatar = if av.is_empty() || av == "/default.png" {
+            String::new()
+        } else {
+            av.clone()
+        };
+        (pmsg, avatar)
+    } else {
+        (items.get(4).cloned().unwrap_or_default(), String::new())
+    };
 
     Some(LoginArgs {
         version,
@@ -311,6 +337,7 @@ pub fn parse_login(args_text: &str) -> Option<LoginArgs> {
         name,
         lang,
         pmsg,
+        avatar_b64,
         inbizier_web,
         inbizier_mobile,
     })

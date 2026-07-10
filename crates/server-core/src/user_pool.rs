@@ -258,20 +258,67 @@ impl AresUser {
         }
     }
 
-    /// Envía un PM al cliente, cifrando los strings con su key si negoció
-    /// cifrado (Ares `crypto=250`). Usar en vez de `send(build_pvt(...))`.
+    /// Envía un PM al cliente. Para clientes web (WS) usa el formato de texto
+    /// ib0t (`PM:len,len:...`); para clientes Ares, binario cifrando con su
+    /// key si negoció cifrado. Usar en vez de `send(build_pvt(...))`.
     pub fn send_pvt(&self, from: &str, text: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx
+                .send(format!(
+                    "PM:{},{}:{}{}",
+                    from.chars().count(),
+                    text.chars().count(),
+                    from,
+                    text
+                ))
+                .is_ok();
+        }
         self.send(crate::outbound::build_pvt_c(from, text, self.ares_crypto))
     }
 
     /// Como [`send_pvt`](Self::send_pvt) pero para un mensaje público.
     pub fn send_public(&self, from: &str, text: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx
+                .send(format!(
+                    "PUBLIC:{},{}:{}{}",
+                    from.chars().count(),
+                    text.chars().count(),
+                    from,
+                    text
+                ))
+                .is_ok();
+        }
         self.send(crate::outbound::build_public_c(from, text, self.ares_crypto))
     }
 
     /// Como [`send_pvt`](Self::send_pvt) pero para un emote.
     pub fn send_emote(&self, from: &str, text: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx
+                .send(format!(
+                    "EMOTE:{},{}:{}{}",
+                    from.chars().count(),
+                    text.chars().count(),
+                    from,
+                    text
+                ))
+                .is_ok();
+        }
         self.send(crate::outbound::build_emote_c(from, text, self.ares_crypto))
+    }
+
+    /// Línea de sistema (respuestas de comandos, avisos del server). Para
+    /// clientes web va como `NOSUCH:` (paridad `ib0tClient.Print` de sb0t:
+    /// texto de servidor en la ventana principal, no un PM); para clientes
+    /// Ares va como PM del bot.
+    pub fn print(&self, bot_name: &str, text: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx
+                .send(format!("NOSUCH:{}:{}", text.chars().count(), text))
+                .is_ok();
+        }
+        self.send(crate::outbound::build_pvt_c(bot_name, text, self.ares_crypto))
     }
 }
 
