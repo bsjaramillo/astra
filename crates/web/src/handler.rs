@@ -1,9 +1,11 @@
 //! Handler de una conexión WebSocket (después del handshake).
 //!
 //! Lee frames de texto, dispatcha los mensajes al server core.
-//! El envío de broadcasts se hace a través del `user.sender` (canal
-//! `mpsc::UnboundedSender<Bytes>`) — la write task del WS lee de ese
-//! mismo canal (tomando la referencia prestada).
+//! El envío de broadcasts a un usuario web se hace a través de
+//! `user.ws_text_sender` (canal `mpsc::UnboundedSender<String>`); la write
+//! task de esta conexión drena ese canal y lo escribe como frames de texto
+//! WS. `user.sender` (el canal binario que usan los clientes Ares nativos)
+//! queda siempre en `None` para usuarios web — nunca se les manda binario.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -40,9 +42,6 @@ pub async fn handle_connection(
     // Split del stream
     let (mut read_half, mut write_half) = stream.into_split();
 
-    // Canal mpsc para mensajes de error binarios (poco común)
-    let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
-
     // Canal de texto para todos los mensajes al cliente WS:
     // - estado inicial (ACK, MyFeatures, etc.) como strings
     // - broadcasts traducidos a texto
@@ -61,6 +60,11 @@ pub async fn handle_connection(
                 break;
             }
         }
+        // Cierre limpio: un cliente bien portado distingue un close frame
+        // real (no reintentar de inmediato) de un corte abrupto de la
+        // conexión (que muchos clientes reintentan agresivamente).
+        let _ = write_close_frame(&mut write_half).await;
+        let _ = write_half.flush().await;
         debug!("ws write task terminado");
     });
 
@@ -68,25 +72,31 @@ pub async fn handle_connection(
     let mut buf = BytesMut::with_capacity(8192);
     let handshake_timeout = Duration::from_secs(15);
     let user = match timeout(handshake_timeout, async {
-        ws_handshake_login(&ctx.clone(), &mut read_half, &mut buf, &tx, &ws_text_tx, peer, resolved_ip).await
+        ws_handshake_login(&ctx.clone(), &mut read_half, &mut buf, &ws_text_tx, peer, resolved_ip).await
     })
     .await
     {
         Ok(Ok(Some(u))) => u,
         Ok(Ok(None)) => {
-            drop(tx);
+            // Drenar `ws_text_tx` antes de esperar la write task: si no se
+            // dropea acá, `write_task` queda esperando `recv()` para
+            // siempre (nadie más cierra el canal), filtrando una task por
+            // cada conexión rechazada. Dropearlo ahora permite que
+            // cualquier mensaje de error ya encolado (ban/join-flood/nick
+            // duplicado) se escriba y flushee antes de cerrar.
+            drop(ws_text_tx);
             let _ = write_task.await;
             return Ok(());
         }
         Ok(Err(e)) => {
             warn!("ws error en handshake de {}: {}", peer, e);
-            drop(tx);
+            drop(ws_text_tx);
             let _ = write_task.await;
             return Ok(());
         }
         Err(_) => {
             warn!("ws handshake timeout de {}", peer);
-            drop(tx);
+            drop(ws_text_tx);
             let _ = write_task.await;
             return Ok(());
         }
@@ -152,9 +162,11 @@ pub async fn handle_connection(
     let part_pkt = outbound::build_part(&user);
     broadcast_to_room(&ctx, &user, part_pkt);
 
-    // Cerrar: drop del user → drop del sender → write task termina → enviar close
+    // Cerrar: drop del user (libera el clone de `ws_text_sender`) → drop de
+    // `ws_text_tx` (el original) → el canal se cierra → `write_task` sale
+    // de su loop y dropea `write_half`, cerrando el socket de verdad.
     drop(user);
-    drop(tx);
+    drop(ws_text_tx);
     let _ = write_task.await;
 
     info!("ws desconectado: id={}", user_id);
@@ -290,7 +302,6 @@ async fn ws_handshake_login(
     ctx: &Arc<AppContext>,
     read_half: &mut OwnedReadHalf,
     buf: &mut BytesMut,
-    tx: &mpsc::UnboundedSender<Bytes>,
     ws_text_tx: &mpsc::UnboundedSender<String>,
     peer: SocketAddr,
     resolved_ip: std::net::IpAddr,
@@ -332,12 +343,12 @@ async fn ws_handshake_login(
     let guid_arr: [u8; 16] = login.guid;
     if ctx.bans.is_banned(&guid_arr, external_ip) {
         warn!("REJECTED (ban persistente): peer={} nick='{}'", peer, login.name);
-        let _ = tx.send(Bytes::from_static(b"ERROR:You are banned from this room"));
+        let _ = ws_text_tx.send("ERROR:You are banned from this room".to_string());
         return Ok(None);
     }
     if ctx.user_history.is_join_flooding(external_ip, now_ms) {
         warn!("REJECTED (join-flood): peer={} nick='{}'", peer, login.name);
-        let _ = tx.send(Bytes::from_static(b"ERROR:Joining too quickly"));
+        let _ = ws_text_tx.send("ERROR:Joining too quickly".to_string());
         return Ok(None);
     }
     // Nick duplicado: si la sesión existente es de la MISMA IP (ya resuelta
@@ -352,14 +363,13 @@ async fn ws_handshake_login(
             astra_commands::force_part_user(ctx, &existing);
         } else {
             warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.name);
-            let _ = tx.send(Bytes::from_static(b"ERROR:Nickname already in use"));
+            let _ = ws_text_tx.send("ERROR:Nickname already in use".to_string());
             return Ok(None);
         }
     }
 
     let id = ctx.user_pool.next_id();
     let mut user = build_ares_user(id, external_ip, make_login_data(&login));
-    user.sender = Some(tx.clone());
     user.ws_text_sender = Some(ws_text_tx.clone());
     user.logged_in = true;
     user.web_client = true;

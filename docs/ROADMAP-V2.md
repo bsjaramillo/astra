@@ -582,6 +582,60 @@ conexión con el mismo nick desde la misma IP recibe el login exitoso
 (hijack) en vez del rechazo; con una IP distinta, se sigue rechazando. 18
 suites en verde, clippy limpio.
 
+### WS: fuga de conexiones/tasks en TODO desconexión (rechazo o normal) — IMPLEMENTADO (2026-07-11)
+
+Investigando un reporte de "un usuario entra a cada rato, pero en los logs
+solo aparece una vez" (visto desde otro cliente como muchos "X has joined"
+repetidos) se encontró un bug de fondo mucho más grave que el síntoma
+reportado: **ninguna desconexión WS cerraba realmente la conexión**, ni la
+de un login rechazado (ban/join-flood/nick duplicado) ni la de un usuario
+que se va normalmente.
+
+Causa raíz en `crates/web/src/handler.rs::handle_connection`: existían DOS
+canales — uno de `Bytes` (`tx`/`rx`, para "mensajes de error binarios") y
+uno de `String` (`ws_text_tx`/`ws_text_rx`, el que la write task realmente
+drena para escribir frames de texto). El canal de `Bytes` nunca tenía un
+lector (`rx` se creaba y no se leía en ningún lado), así que:
+
+1. Los 3 mensajes de rechazo del handshake (`ERROR:You are banned...`,
+   `ERROR:Joining too quickly`, `ERROR:Nickname already in use`) se
+   mandaban por el canal muerto — el cliente **nunca los recibía**, y su
+   conexión simplemente se cortaba sin ninguna explicación.
+2. Peor: la limpieza en los 4 puntos de salida (3 del handshake + 1 del
+   loop principal, éste último tras una desconexión NORMAL) hacía
+   `drop(tx)` (el canal muerto) en vez de `drop(ws_text_tx)` (el canal
+   real que la write task espera con `recv()`). Como el canal real nunca
+   se dropeaba, `write_task.await` quedaba esperando para siempre — cada
+   desconexión (rechazada O normal) filtraba la write task Y la propia
+   task de `handle_connection` (bloqueada en ese `.await`) indefinidamente,
+   sin cerrar jamás el socket subyacente (ni `read_half` ni `write_half` se
+   dropeaban nunca). En un server de larga duración esto acumula sockets
+   medio-cerrados y tasks colgadas sin límite — memoria/fds crecientes, y
+   consistente con el síntoma original de "nicks pegados" (una sesión
+   vieja podía nunca cerrarse a nivel de socket, aunque el usuario ya
+   estuviera desconectado hace rato).
+
+Fix: se eliminó el canal de `Bytes` (dead code — nada más lo necesitaba;
+`user.sender` para usuarios web queda en `None`, correcto porque los
+usuarios web solo usan `ws_text_sender`); los 3 mensajes de rechazo ahora
+se mandan por `ws_text_tx` (el canal real); los 4 puntos de limpieza ahora
+dropean `ws_text_tx` (no `tx`), lo que efectivamente cierra el canal, deja
+salir el loop de la write task, y dropea `write_half` (cerrando el socket
+de verdad). De paso: `write_close_frame` estaba importado pero nunca
+llamado (otro cabo suelto) — ahora la write task manda un close frame de
+verdad antes de terminar, para que clientes bien portados distingan un
+cierre limpio de un corte abrupto (que muchos clientes reintentan de forma
+agresiva — posible explicación adicional del síntoma de reconexión
+repetida).
+
+Verificado E2E: un login rechazado por nick duplicado (IP distinta, sin
+hijack) ahora SÍ le llega el mensaje `ERROR:...` al cliente, y su socket se
+cierra solo (antes quedaba colgado); confirmado en los logs que
+`handle_connection` llega a su `info!("ws desconectado...")` final tanto
+para la sesión rechazada como para una desconexión normal (antes, con el
+bug, esa línea nunca se alcanzaba — la función quedaba bloqueada para
+siempre en `write_task.await`). 18 suites en verde, clippy limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
