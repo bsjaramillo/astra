@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use rand::seq::SliceRandom;
 use rand::Rng;
 
 use server_core::db::{Database, NodeRecord, RoomRecord};
@@ -286,11 +287,12 @@ impl UdpNodeManager {
             .iter()
             .filter(|n| Some(n.ip) != exclude && n.ack > 0 && (n.last_connect + 900_000) > now_ms)
             .collect();
-        // Orden aleatorio (como el original)
-        active.sort_by(|_, _| {
-            let mut rng = rand::thread_rng();
-            if rng.gen() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater }
-        });
+        // Orden aleatorio (como el original). OJO: NO usar
+        // `sort_by(|_,_| random)` — un comparador aleatorio no implementa un
+        // orden total y Rust moderno paniquea ("comparison function does not
+        // correctly implement a total order"). Se usa un shuffle real.
+        let mut rng = rand::thread_rng();
+        active.shuffle(&mut rng);
         active
             .into_iter()
             .take(max)
@@ -415,6 +417,35 @@ mod tests {
         let m = UdpNodeManager::new(db, 5009);
         let ip: IpAddr = "9.9.9.9".parse().unwrap();
         assert!(!m.take_firewall_cookie(0xDEAD_BEEF, ip, 1_000));
+    }
+
+    #[test]
+    fn active_nodes_shuffle_no_panic() {
+        // Regresión: `active_nodes` ordenaba con un comparador aleatorio, que
+        // no es un orden total y hacía paniquear al sort de Rust moderno en
+        // cuanto había ≥2 nodos activos que comparar. Ahora usa un shuffle.
+        let db = Database::in_memory().unwrap();
+        let m = UdpNodeManager::new(db, 5009);
+        let now = 1_000_000_000i64;
+        {
+            let mut nodes = m.nodes.write();
+            for i in 0..25u8 {
+                nodes.push(UdpNode {
+                    ip: IpAddr::from([10, 0, 0, i]),
+                    port: 5009,
+                    ack: 3,
+                    try_count: 0,
+                    last_connect: now, // dentro de la ventana de 900s
+                    last_sent_ips: 0,
+                });
+            }
+        }
+        // Debe devolver `max` nodos sin paniquear, muchas veces (ejercita el
+        // shuffle con distintos órdenes).
+        for _ in 0..50 {
+            let out = m.active_nodes(8, now);
+            assert_eq!(out.len(), 8);
+        }
     }
 
     #[test]

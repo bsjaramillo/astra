@@ -943,6 +943,24 @@ cambió la salida real del comando en vivo (`/whois` → "Uso correcto: /whois
 <apodo>"). Tests: 162 en server-core (incl. `resolve` + "todo default es
 resolvable"), 79 en commands; clippy limpio.
 
+### Panic en producción: comparador aleatorio en `active_nodes` (total order) — CORREGIDO (2026-07-11)
+
+Reportado en producción: el server paniqueaba repetidamente
+(`user-provided comparison function does not correctly implement a total
+order`, en `tokio-rt-worker`), reiniciándose. Causa: `active_nodes_impl` en
+`udp/src/manager.rs` "barajaba" los nodos con
+`active.sort_by(|_, _| random Less/Greater)` — un antipatrón de shuffle. Un
+comparador aleatorio NO implementa un orden total, y el sort de Rust moderno
+(1.81+, y el build usa 1.96) lo **detecta y paniquea** en cuanto hay ≥2
+elementos que comparar. Era latente: solo se dispara cuando hay ≥2 nodos
+"activos" (ack>0 y `last_connect + 900s > now`); al crecer la base de nodos
+UDP (108) y reconstruir el binario con el toolchain actual, empezó a
+paniquear. Fix: reemplazado por un shuffle real
+(`rand::seq::SliceRandom::shuffle`). Test de regresión con 25 nodos activos ×
+50 llamadas. Es el único sort con comparador no-total del código (los demás
+usan claves u órdenes válidos). **Requiere reconstruir la imagen Docker y
+redeployar.**
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
