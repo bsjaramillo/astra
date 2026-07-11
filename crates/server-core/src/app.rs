@@ -16,6 +16,7 @@ use super::db::Database;
 use super::greets::GreetManager;
 use super::idle::IdleManager;
 use super::geoip::GeoIp;
+use super::ip_autologin::IpAutologinManager;
 use super::ip_bans::{AsnBanManager, RangeBanManager};
 use super::name_filters::NameFilterManager;
 use super::proxy_trust::TrustedProxyManager;
@@ -28,6 +29,29 @@ use super::stats::Stats;
 use super::user_history::UserHistory;
 use super::user_pool::UserPool;
 use super::vroom::VroomManager;
+
+/// Closures inyectadas para hablar con el scripting engine (`astra_scripting`)
+/// sin que este crate dependa de él (`astra_scripting` ya depende de
+/// `server_core::AppContext`, así que sería una dependencia circular).
+/// Mismo patrón que `RoomInfoFn`/`UserCountFn` en `crates/udp`.
+pub type ListScriptsFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+/// Carga un script por nombre. `Ok(name)` o `Err(mensaje)`.
+pub type LoadScriptFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+/// Descarga un script por nombre.
+pub type KillScriptFn = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+/// Bundle de las 3 closures de gestión de scripts, seteado una sola vez en
+/// `main.rs` tras arrancar el `ScriptManager`. `None` antes de ese punto
+/// (p.ej. en tests que construyen un `AppContext` sin scripting).
+#[derive(Clone)]
+pub struct ScriptingHooks {
+    /// Lista los scripts cargados.
+    pub list: ListScriptsFn,
+    /// Carga un script por nombre.
+    pub load: LoadScriptFn,
+    /// Descarga un script por nombre.
+    pub kill: KillScriptFn,
+}
 
 /// Snapshot serializable de un usuario para replicación Link.
 #[derive(Debug, Clone)]
@@ -337,6 +361,8 @@ pub struct AppContext {
     /// Proxies reversos confiables para resolver la IP real detrás de
     /// `X-Forwarded-For`/`X-Real-IP` en el path WS (panel Proxy).
     pub trusted_proxies: Arc<TrustedProxyManager>,
+    /// Auto-nivel por reconocimiento de IP+GUID sin cuenta (`/addautologin`).
+    pub ip_autologins: Arc<IpAutologinManager>,
     /// Avatar de sala (bot), en memoria. Persistido en
     /// `<data_dir>/avatars/server`. `None` = sin avatar de sala configurado.
     pub server_avatar: RwLock<Option<Vec<u8>>>,
@@ -344,6 +370,10 @@ pub struct AppContext {
     /// suyo (paridad `Avatars.CheckAvatars` de sb0t). Persistido en
     /// `<data_dir>/avatars/default`.
     pub default_avatar: RwLock<Option<Vec<u8>>>,
+    /// Closures hacia el scripting engine (`/listscripts`, `/loadscript`,
+    /// `/killscript`). `None` hasta que `main.rs` las setea tras arrancar
+    /// el `ScriptManager`.
+    pub scripting_hooks: RwLock<Option<ScriptingHooks>>,
     /// Resolución GeoIP/ASN (bases MMDB opcionales en `data_dir`).
     pub geoip: Arc<GeoIp>,
     /// Log reciente de acciones de ban para `/banstats`: `(banner, target, ip)`.
@@ -406,6 +436,7 @@ impl AppContext {
         let file_filters = Arc::new(NameFilterManager::new(db.clone(), "file"));
         let command_levels = Arc::new(CommandLevelManager::new(db.clone()));
         let trusted_proxies = Arc::new(TrustedProxyManager::new(db.clone()));
+        let ip_autologins = Arc::new(IpAutologinManager::new(db.clone()));
         let avatars_dir = std::path::Path::new(&settings.data_dir).join("avatars");
         let server_avatar = RwLock::new(std::fs::read(avatars_dir.join("server")).ok());
         let default_avatar = RwLock::new(std::fs::read(avatars_dir.join("default")).ok());
@@ -435,8 +466,10 @@ impl AppContext {
             file_filters,
             command_levels,
             trusted_proxies,
+            ip_autologins,
             server_avatar,
             default_avatar,
+            scripting_hooks: RwLock::new(None),
             geoip,
             ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             admins_disabled: std::sync::atomic::AtomicBool::new(false),

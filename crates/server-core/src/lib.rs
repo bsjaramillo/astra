@@ -102,10 +102,17 @@ pub mod command_levels;
 /// Lista de proxies reversos confiables (panel Proxy).
 pub mod proxy_trust;
 
+/// Auto-nivel por reconocimiento de IP+GUID (`/addautologin`).
+pub mod ip_autologin;
+
 /// Re-exports comunes.
-pub use app::{admin_action, AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
+pub use app::{
+    admin_action, AppContext, KillScriptFn, LinkEvent, LinkRequest, LinkUserSnapshot,
+    ListScriptsFn, LoadScriptFn, ScriptingHooks,
+};
 pub use command_levels::CommandLevelManager;
 pub use proxy_trust::TrustedProxyManager;
+pub use ip_autologin::{IpAutologinEntry, IpAutologinManager};
 pub use greets::{GreetContext, GreetManager};
 pub use geoip::GeoIp;
 pub use ip_bans::{AsnBanManager, RangeBanManager};
@@ -117,4 +124,4 @@ pub use types::{IFont, ILevel, ILink};
 pub use urls::{UrlItem, UrlManager};
 pub use user_pool::{AresUser, UserPool};
 pub use vroom::VroomManager;
-pub use word_filter::{FilterAction, WordFilterManager};
+pub use word_filter::{FilterAction, RemoveLineResult, WordFilterManager};

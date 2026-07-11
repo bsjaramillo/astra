@@ -636,6 +636,106 @@ para la sesión rechazada como para una desconexión normal (antes, con el
 bug, esa línea nunca se alcanzaba — la función quedaba bloqueada para
 siempre en `write_task.await`). 18 suites en verde, clippy limpio.
 
+### Auditoría sistemática sb0t vs Astra: scripting management, autologin por IP, filtros multi-línea — IMPLEMENTADO (2026-07-11)
+
+El usuario pidió una auditoría sistemática de qué comandos de sb0t faltan en
+Astra. Un agente de investigación confirmó tres gaps reales (más los ya
+reportados sueltos antes), y se implementaron los tres por completo:
+
+**1. Comandos de gestión de scripts** (no existían en absoluto):
+`/listscripts`, `/loadscript <name>`, `/killscript <name>`,
+`/livescripts`, `/downloadscript <owner/repo>`, `/errors [on|off]`.
+
+- Plumbing nuevo: `AppContext` no puede depender de `astra_scripting`
+  (circular), así que se usó el mismo patrón de closures inyectadas que
+  `crates/udp` (`RoomInfoFn`/`UserCountFn`) — nuevo
+  `AppContext::scripting_hooks: RwLock<Option<ScriptingHooks>>`, seteado
+  en `main.rs` tras `start_in_thread()`. Nuevas variantes
+  `ScriptRequest::ListScripts/LoadScript/KillScript` +
+  `ScriptHandle::list_scripts/load_script/kill_script` (mismo patrón
+  sync-request-con-reply que ya usaban los hooks `*Before`).
+- `/livescripts`/`/downloadscript`: paridad con `LiveScript.cs` de sb0t —
+  buscan repos de GitHub con el topic `areschatscript`, y descargan+cargan
+  el último release. **Simplificación deliberada**: sb0t renombra el
+  directorio raíz extraído a `<filename>.js` (su modelo permite que un
+  "script" sea una carpeta); Astra busca el primer `.js` dentro del zip y
+  lo carga como archivo individual, consistente con su modelo de scripts.
+  Nuevo campo `Settings.live_scripts_endpoint` (default
+  `https://api.github.com`, paridad con el default real de sb0t).
+- `/errors [on|off]`: reusa el patrón `Subscription`/`handle_subscription`
+  ya existente (mismo que `/vspy`, `/ipsend`, etc.) — nuevo
+  `AresUser::sub_errors`. A diferencia de sb0t (~90 call sites de
+  `ErrorDispatcher.SendError`), Astra centraliza los errores de script en
+  solo 2 lugares (`manager.rs::load_source`/`dispatch`), así que alcanzó
+  con notificar ahí.
+- **Bug real encontrado al probar `/killscript` en vivo**: la primera vez
+  que se descargaba CUALQUIER script (incluso uno cargado al arrancar el
+  server) el thread del scripting manager **paniqueaba** (`attempt to
+  subtract with overflow` dentro de `boa_engine`). Causa raíz:
+  `start_in_thread()` cargaba los scripts (`load_all_inner()`, creando sus
+  `boa_engine::Context`) ANTES de mover el manager al thread dedicado — los
+  Context se creaban en el thread llamante pero se destruían en el thread
+  dedicado, y `boa_engine` mantiene un contador `thread_local`
+  (`CANNOT_BLOCK_COUNTER`) que se incrementa al crear un Context y se
+  decrementa al dropearlo: crear en un thread y destruir en otro descuenta
+  un contador que nunca se incrementó ahí. Este bug existía desde que se
+  construyó el scripting subsystem, pero nada en producción llamaba
+  `unload()`/`reload()` hasta `/killscript`. Fix: mover
+  `load_all_inner()` a DENTRO del thread dedicado (después de
+  `Box::from_raw`), para que TODA la carga de scripts (inicial y en
+  caliente) pase por el mismo thread consistentemente.
+- **Bug adicional encontrado**: el autologin (tanto el existente por
+  cuenta/GUID como el nuevo por IP) nunca se ejecutaba para usuarios
+  web/WS — `dispatch_autologin` solo se llamaba desde el path TCP nativo,
+  gateado detrás del opcode `ClientAutologin` que el cliente debe mandar
+  explícitamente (el protocolo de texto ib0t no tiene un opcode
+  equivalente). Fix: en `web/handler.rs`, llamar `dispatch_autologin`
+  automáticamente en cada join web, antes de mandar el estado inicial
+  (paridad más fiel del `Joined()` incondicional de sb0t). El path TCP
+  nativo queda como estaba (opt-in vía el opcode, sin cambios).
+
+**2. `/addautologin`/`/remautologin`/`/autologins`** (auto-nivel por
+IP+GUID sin cuenta, paridad `commands/AutoLogin.cs` de sb0t): nuevo
+`server_core::ip_autologin::IpAutologinManager` (tabla `ip_autologins`,
+mismo patrón que `RoomFlags`/`TrustedProxyManager`) con el matching de dos
+niveles de sb0t (GUID + mismos primeros 2 octetos de IP, o IP exacta,
+self-healing en ambos casos). Restringido a Moderator/Admin — nunca Owner
+(paridad del rango `byte 1-3` de sb0t, que deliberadamente no permite
+auto-otorgar el nivel más alto vía reconocimiento de IP). **Corrección de
+nombre necesaria**: `"autologins"` estaba aliaseado a `listpasswords`
+(cuentas registradas) — se desaliaseó, ya que en sb0t `/autologins` lista
+las entradas de IP-autologin, un concepto distinto.
+
+**3. `/addline`/`/remline`/`/viewfilter`** (líneas de respuesta múltiples
+en un filtro, paridad `WordFilter.cs` de sb0t): nueva variante
+`FilterAction::Announce` — un filtro que, a diferencia de Block/Kick/Ban,
+**no bloquea el mensaje**: además de dejarlo pasar, difunde una o más
+líneas enlatadas con placeholders `+n`/`+ip`/`+r` (mini sistema de
+auto-respuesta por keyword). `WordFilterManager` gana un cache paralelo de
+líneas por pattern (tabla `word_filter_lines`) + `add_line`/`remove_line`
+(con borrado en cascada del filtro si era la última línea, paridad sb0t)/
+`view`/`check_announce` (separado de `check()`, que sigue siendo solo para
+censura). Nuevo hook en `handle_public` (TCP y WS): si `check()` no
+matcheó, se prueba `check_announce()` y se difunden las líneas sin
+bloquear el mensaje original. **Corrección de nombre necesaria**:
+`"viewfilter"` estaba aliaseado a `wordfilters` (lista plana) — se
+desaliaseó, ya que en sb0t `/viewfilter <índice>` es el visor per-entrada
+de líneas, un comando distinto de `/wordfilters` (que ahora además
+muestra el índice de cada filtro, necesario para poder referenciarlos
+desde `/addline`/`/remline`/`/viewfilter`).
+
+Verificado E2E contra un binario real conectado a la API real de GitHub:
+`/livescripts` devolvió resultados reales (repos con el topic
+`areschatscript`); `/downloadscript owner/repo` descargó, extrajo y cargó
+un script real sin crashear; `/killscript`+`/loadscript` en ciclo repetido
+confirmaron el fix del panic; `/addautologin` + reconexión sin login
+restauró el nivel automáticamente (verificado tanto el mensaje de sistema
+como el `UPDATE` de nivel y el propio `USERINFO` del usuario); un filtro
+`announce` con 2 líneas disparó ambas con `+n`/`+ip`/`+r` sustituidos SIN
+bloquear el mensaje original, y `/remline` en cascada borró el filtro al
+vaciarse. 18 suites en verde (149 tests en `astra-commands`, 16 en
+`word_filter`, 7 nuevos en `ip_autologin`), clippy limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

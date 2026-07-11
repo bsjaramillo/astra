@@ -961,12 +961,19 @@ async fn handle_public(
         return;
     }
 
-    // Word filter: solo aplica a usuarios regulares (Moderator+ exentos).
+    // Word filter: solo aplica (censura) a usuarios regulares (Moderator+ exentos).
     if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
         if let Some(action) = ctx.word_filter.check(&text) {
             apply_filter_action(ctx, user, action, &name);
             return;
         }
+    }
+
+    // Filtro Announce: dispara para cualquier usuario, NO bloquea el
+    // mensaje (paridad `FilterType.Announce` de sb0t) — se difunden
+    // líneas enlatadas además del mensaje normal.
+    if let Some((_, lines, remainder)) = ctx.word_filter.check_announce(&text) {
+        broadcast_announce_lines(ctx, &name, user.external_ip, &lines, &remainder);
     }
 
     // Echo heckle (/echo): reenvía el texto configurado solo a este usuario.
@@ -1289,6 +1296,38 @@ fn apply_filter_action(
                 user.data_port,
             );
             filter_remove_user(ctx, user);
+        }
+        FilterAction::Announce => {
+            // No debería llegar acá: `check()` (censura) nunca devuelve
+            // Announce — ver `check_announce` para ese path, que no
+            // bloquea el mensaje.
+            debug!("word filter: Announce inesperado en apply_filter_action de '{}'", name);
+        }
+    }
+}
+
+/// Difunde las líneas de un filtro `Announce` a toda la sala (paridad del
+/// `case FilterType.Announce` de sb0t en `WordFilter.FilterBefore`), con
+/// los placeholders `+n` (nombre del emisor), `+ip` (su IP) y `+r` (resto
+/// del texto tras el trigger) sustituidos. El mensaje original del emisor
+/// se sigue procesando normalmente — esto es adicional, no un reemplazo.
+fn broadcast_announce_lines(
+    ctx: &AppContext,
+    sender_name: &str,
+    sender_ip: std::net::IpAddr,
+    lines: &[String],
+    remainder: &str,
+) {
+    let bot = ctx.settings.bot_name.clone();
+    for line in lines {
+        let msg = line
+            .replace("+n", sender_name)
+            .replace("+ip", &sender_ip.to_string())
+            .replace("+r", remainder);
+        for u in ctx.user_pool.users() {
+            if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = u.send_public(&bot, &msg);
+            }
         }
     }
 }

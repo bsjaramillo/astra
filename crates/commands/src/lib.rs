@@ -56,9 +56,12 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/addgreet <text> - add a greeting (placeholders +n +ip +uc +rn ...)",
     "/remgreet <index> - remove greeting by index",
     "/listgreets - list greetings",
-    "/addfilter <word> [block|kick|ban] - add a chat word filter",
+    "/addfilter <word> [block|kick|ban|announce] - add a chat word filter",
     "/remfilter <word> - remove a word filter",
     "/listfilters - list word filters",
+    "/addline <index>, <text> - add a response line to an announce-type filter",
+    "/remline <index>, <line> - remove a response line (removes the filter if it was the last line)",
+    "/viewfilter <index> - view the response lines of an announce-type filter",
     "/url [on|off] - toggle or show rotating room URLs",
     "/addurl <address> <text> - add a rotating room URL",
     "/remurl <index> - remove a room URL",
@@ -118,6 +121,9 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/listquarantined - list quarantined users",
     "/unquarantine <nick|index> - release a quarantined user",
     "/listpasswords - list registered accounts (owner)",
+    "/addautologin <nick> <level> - auto-grant a level by IP recognition, no account needed (owner)",
+    "/remautologin <id> - remove an IP autologin entry (owner)",
+    "/autologins - list IP autologin entries (owner)",
     "/joinfilter [add|del <pat>|list] - filter nicks at login",
     "/filefilter [add|del <pat>|list] - filter shared file names",
     "/vspy [on|off] - watch other vrooms' chat",
@@ -127,6 +133,12 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/trace <nick|ip> - geolocate a user (needs GeoIP db)",
     "/define <word> - dictionary definition (Wordnik)",
     "/urban <term> - Urban Dictionary lookup",
+    "/listscripts - list loaded scripts (owner)",
+    "/loadscript <name> - load a script from disk (owner)",
+    "/killscript <name> - unload a script (owner)",
+    "/livescripts - search GitHub for community scripts (owner)",
+    "/downloadscript <owner/repo> - download and load a script from GitHub (owner)",
+    "/errors [on|off] - receive script error notifications",
 ];
 
 /// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
@@ -643,8 +655,20 @@ pub fn dispatch_builtin(
             handle_unquarantine(ctx, user, args);
             (true, vec![])
         }
-        "listpasswords" | "autologins" => {
+        "listpasswords" => {
             handle_listpasswords(ctx, user, args);
+            (true, vec![])
+        }
+        "addautologin" => {
+            handle_addautologin(ctx, user, args);
+            (true, vec![])
+        }
+        "remautologin" => {
+            handle_remautologin(ctx, user, args);
+            (true, vec![])
+        }
+        "autologins" => {
+            handle_ip_autologins(ctx, user);
             (true, vec![])
         }
         "joinfilter" | "joinfilters" => {
@@ -715,7 +739,7 @@ pub fn dispatch_builtin(
             handle_banlist(ctx, user, args);
             (true, vec![])
         }
-        "wordfilters" | "viewfilter" => {
+        "wordfilters" => {
             handle_listfilters(ctx, user, args);
             (true, vec![])
         }
@@ -730,6 +754,18 @@ pub fn dispatch_builtin(
         }
         "remwordfilter" => {
             handle_remfilter(ctx, user, args);
+            (true, vec![])
+        }
+        "addline" => {
+            handle_addline(ctx, user, args);
+            (true, vec![])
+        }
+        "remline" => {
+            handle_remline(ctx, user, args);
+            (true, vec![])
+        }
+        "viewfilter" => {
+            handle_viewfilter(ctx, user, args);
             (true, vec![])
         }
         "addjoinfilter" => {
@@ -770,6 +806,30 @@ pub fn dispatch_builtin(
         }
         "loadtemplate" => {
             handle_unavailable(ctx, user, "loadtemplate");
+            (true, vec![])
+        }
+        "listscripts" => {
+            handle_listscripts(ctx, user);
+            (true, vec![])
+        }
+        "loadscript" => {
+            handle_loadscript(ctx, user, args);
+            (true, vec![])
+        }
+        "killscript" => {
+            handle_killscript(ctx, user, args);
+            (true, vec![])
+        }
+        "livescripts" => {
+            handle_livescripts(ctx, user);
+            (true, vec![])
+        }
+        "downloadscript" => {
+            handle_downloadscript(ctx, user, args);
+            (true, vec![])
+        }
+        "errors" => {
+            handle_subscription(ctx, user, args, Subscription::Errors);
             (true, vec![])
         }
         _ => (false, vec![]),
@@ -1495,17 +1555,29 @@ fn handle_login(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
 /// Auto-login por GUID (sb0t SecureLogin / AUTOLOGIN): si el GUID tiene una
 /// cuenta registrada, restaura su nivel. Retorna `true` si el nivel cambió.
 pub fn dispatch_autologin(ctx: &AppContext, user: &Arc<AresUser>) -> bool {
-    let Some(acc) = ctx.accounts.find_by_guid(&user.guid).ok().flatten() else {
-        return false;
-    };
-    let level = level_from_u8(acc.level);
-    apply_level(
-        ctx,
-        user,
-        user,
-        level,
-        &format!("Auto-logged in (level {}).", acc.level),
-    )
+    if let Some(acc) = ctx.accounts.find_by_guid(&user.guid).ok().flatten() {
+        let level = level_from_u8(acc.level);
+        return apply_level(
+            ctx,
+            user,
+            user,
+            level,
+            &format!("Auto-logged in (level {}).", acc.level),
+        );
+    }
+    // Sin cuenta registrada: probar reconocimiento por IP+GUID (paridad
+    // `Joined()` de sb0t, que también corre `AutoLogin.GetLevel` para
+    // cualquier usuario, con o sin cuenta).
+    if let Some(level) = ctx.ip_autologins.get_level(&user.guid, user.external_ip) {
+        return apply_level(
+            ctx,
+            user,
+            user,
+            level,
+            &format!("Auto-logged in via IP recognition (level {}).", level as u8),
+        );
+    }
+    false
 }
 
 /// Retorna el nick del target si el nivel cambió.
@@ -1594,6 +1666,100 @@ fn handle_revoke(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<S
     } else {
         send_system_line(ctx, user, &format!("'{}' is already a regular user.", target_name));
         None
+    }
+}
+
+/// `/addautologin <nick> <moderator|admin>` — otorga un nivel a un usuario
+/// conectado Y lo recuerda por IP+GUID (paridad `AutoLogin.Add` de sb0t):
+/// la próxima vez que se conecte desde (aprox.) la misma IP, el nivel se
+/// restaura solo, sin necesidad de cuenta ni login. Nunca permite Owner
+/// (paridad del rango `byte 1-3` de sb0t).
+fn handle_addautologin(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let args = args.trim();
+    let mut parts = args.rsplitn(2, char::is_whitespace);
+    let level_str = parts.next().unwrap_or("");
+    let target_name = parts.next().unwrap_or("").trim();
+    let Some(level) = parse_level(level_str) else {
+        send_system_line(ctx, user, "Usage: /addautologin <nick> <moderator|admin>");
+        return;
+    };
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /addautologin <nick> <moderator|admin>");
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    let name = target.name.read().clone();
+    match ctx.ip_autologins.add(&target.guid, &name, level, target.external_ip) {
+        Ok(()) => {
+            let msg = format!(
+                "Your level is now {} ({}), auto-restored on reconnect from this IP.",
+                level as u8,
+                level_name(level)
+            );
+            apply_level(ctx, user, &target, level, &msg);
+            send_system_line(
+                ctx,
+                user,
+                &format!("'{}' added to IP autologin as {} ({}).", name, level as u8, level_name(level)),
+            );
+        }
+        Err(e) => send_system_line(ctx, user, &format!("Failed: {}", e)),
+    }
+}
+
+/// `/remautologin <id>` — elimina una entrada y degrada a Regular a
+/// cualquier usuario conectado que matchee por GUID o IP (paridad
+/// `AutoLogin.Remove` de sb0t, que escanea `Ares`/`Web` por igual).
+fn handle_remautologin(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let Ok(id) = args.trim().parse::<i64>() else {
+        send_system_line(ctx, user, "Usage: /remautologin <id>");
+        return;
+    };
+    let Some((guid_hex_str, ip)) = ctx.ip_autologins.remove(id) else {
+        send_system_line(ctx, user, "No autologin entry with that id.");
+        return;
+    };
+    for u in ctx.user_pool.users() {
+        if !u.logged_in {
+            continue;
+        }
+        if guid_to_hex(&u.guid) == guid_hex_str || u.external_ip == ip {
+            apply_level(
+                ctx,
+                user,
+                &u,
+                ILevel::Regular,
+                "Your auto-login entry was removed; you are now a regular user.",
+            );
+        }
+    }
+    send_system_line(ctx, user, "Autologin entry removed.");
+}
+
+/// `/autologins` — lista las entradas de auto-nivel por IP.
+fn handle_ip_autologins(ctx: &AppContext, user: &Arc<AresUser>) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let list = ctx.ip_autologins.list();
+    if list.is_empty() {
+        send_system_line(ctx, user, "No IP autologin entries.");
+        return;
+    }
+    for (id, name, ip, level) in list {
+        send_system_line(ctx, user, &format!("{} - {} [{}] [{}]", id, name, ip, level_name(level)));
     }
 }
 
@@ -1928,25 +2094,37 @@ fn handle_addfilter(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
     let args = args.trim();
     if args.is_empty() {
-        send_system_line(ctx, user, "Usage: /addfilter <word> [block|kick|ban]");
+        send_system_line(ctx, user, "Usage: /addfilter <word> [block|kick|ban|announce]");
         return;
     }
     // El último token puede ser la acción; el resto es el patrón.
     let (pattern, action) = match args.rsplit_once(char::is_whitespace) {
-        Some((p, last)) if matches!(last.to_ascii_lowercase().as_str(), "block" | "kick" | "ban") => {
+        Some((p, last))
+            if matches!(last.to_ascii_lowercase().as_str(), "block" | "kick" | "ban" | "announce") =>
+        {
             (p.trim(), FilterAction::parse(last))
         }
         _ => (args, FilterAction::Block),
     };
     if pattern.is_empty() {
-        send_system_line(ctx, user, "Usage: /addfilter <word> [block|kick|ban]");
+        send_system_line(ctx, user, "Usage: /addfilter <word> [block|kick|ban|announce]");
         return;
     }
     ctx.word_filter.add(pattern, action);
+    let extra = if action == FilterAction::Announce {
+        " Use /addline to add response lines."
+    } else {
+        ""
+    };
     send_system_line(
         ctx,
         user,
-        &format!("Filter '{}' → {} added.", pattern.to_ascii_lowercase(), action.as_str()),
+        &format!(
+            "Filter '{}' → {} added.{}",
+            pattern.to_ascii_lowercase(),
+            action.as_str(),
+            extra
+        ),
     );
 }
 
@@ -1978,8 +2156,104 @@ fn handle_listfilters(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         return;
     }
     send_system_line(ctx, user, &format!("Word filters ({}):", filters.len()));
-    for (pattern, action) in &filters {
-        send_system_line(ctx, user, &format!("{} → {}", pattern, action.as_str()));
+    for (i, (pattern, action)) in filters.iter().enumerate() {
+        // El índice acá es el que usan /addline, /remline y /viewfilter.
+        send_system_line(ctx, user, &format!("{} - {} → {}", i, pattern, action.as_str()));
+    }
+}
+
+/// `/addline <índice>, <texto>` — agrega una línea de respuesta a un
+/// filtro `announce` existente, referenciado por su índice en
+/// `/listfilters` (paridad `WordFilter.AddLine` de sb0t).
+fn handle_addline(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let Some((index_str, text)) = args.split_once(',') else {
+        send_system_line(ctx, user, "Usage: /addline <index>, <text>");
+        return;
+    };
+    let Ok(index) = index_str.trim().parse::<usize>() else {
+        send_system_line(ctx, user, "Usage: /addline <index>, <text>");
+        return;
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        send_system_line(ctx, user, "Usage: /addline <index>, <text>");
+        return;
+    }
+    let filters = ctx.word_filter.list();
+    let Some((pattern, _)) = filters.get(index) else {
+        send_system_line(ctx, user, "No filter at that index.");
+        return;
+    };
+    match ctx.word_filter.add_line(pattern, text) {
+        Ok(()) => send_system_line(ctx, user, &format!("Line added to filter '{}'.", pattern)),
+        Err(e) => send_system_line(ctx, user, &format!("Failed: {}", e)),
+    }
+}
+
+/// `/remline <índice>, <línea>` — elimina una línea de respuesta; si era
+/// la última, borra el filtro entero (paridad `WordFilter.RemLine`).
+fn handle_remline(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let Some((index_str, line_str)) = args.split_once(',') else {
+        send_system_line(ctx, user, "Usage: /remline <index>, <line>");
+        return;
+    };
+    let (Ok(index), Ok(line_index)) = (
+        index_str.trim().parse::<usize>(),
+        line_str.trim().parse::<usize>(),
+    ) else {
+        send_system_line(ctx, user, "Usage: /remline <index>, <line>");
+        return;
+    };
+    let filters = ctx.word_filter.list();
+    let Some((pattern, _)) = filters.get(index) else {
+        send_system_line(ctx, user, "No filter at that index.");
+        return;
+    };
+    let pattern = pattern.clone();
+    match ctx.word_filter.remove_line(&pattern, line_index) {
+        server_core::RemoveLineResult::LineRemoved => {
+            send_system_line(ctx, user, &format!("Line removed from filter '{}'.", pattern));
+        }
+        server_core::RemoveLineResult::FilterRemoved => {
+            send_system_line(ctx, user, &format!("Filter '{}' removed (last line).", pattern));
+        }
+        server_core::RemoveLineResult::NotFound => {
+            send_system_line(ctx, user, "No such filter or line index.");
+        }
+    }
+}
+
+/// `/viewfilter <índice>` — muestra las líneas de un filtro `announce`.
+fn handle_viewfilter(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let Ok(index) = args.trim().parse::<usize>() else {
+        send_system_line(ctx, user, "Usage: /viewfilter <index>");
+        return;
+    };
+    let filters = ctx.word_filter.list();
+    let Some((pattern, _)) = filters.get(index) else {
+        send_system_line(ctx, user, "No filter at that index.");
+        return;
+    };
+    match ctx.word_filter.view(pattern) {
+        Some(lines) if !lines.is_empty() => {
+            for (i, line) in lines.iter().enumerate() {
+                send_system_line(ctx, user, &format!("line {}: {}", i, line));
+            }
+        }
+        Some(_) => send_system_line(ctx, user, "This filter has no lines yet."),
+        None => send_system_line(ctx, user, "This filter is not an announce-type filter."),
     }
 }
 
@@ -3058,6 +3332,68 @@ fn handle_unlink(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 }
 
+/// `/listscripts` — lista los scripts JS cargados.
+fn handle_listscripts(ctx: &AppContext, user: &Arc<AresUser>) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let Some(hooks) = ctx.scripting_hooks.read().clone() else {
+        send_system_line(ctx, user, "Scripting is not available.");
+        return;
+    };
+    let names = (hooks.list)();
+    if names.is_empty() {
+        send_system_line(ctx, user, "No scripts loaded.");
+    } else {
+        for name in names {
+            send_system_line(ctx, user, &name);
+        }
+    }
+}
+
+/// `/loadscript <name>` — carga `<data_dir>/scripts/<name>.js`.
+fn handle_loadscript(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let name = args.trim();
+    if name.is_empty() {
+        send_system_line(ctx, user, "Usage: /loadscript <name>");
+        return;
+    }
+    let Some(hooks) = ctx.scripting_hooks.read().clone() else {
+        send_system_line(ctx, user, "Scripting is not available.");
+        return;
+    };
+    match (hooks.load)(name) {
+        Ok(loaded) => send_system_line(ctx, user, &format!("Script '{}' loaded.", loaded)),
+        Err(e) => send_system_line(ctx, user, &format!("Failed to load '{}': {}", name, e)),
+    }
+}
+
+/// `/killscript <name>` — descarga un script cargado.
+fn handle_killscript(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let name = args.trim();
+    if name.is_empty() {
+        send_system_line(ctx, user, "Usage: /killscript <name>");
+        return;
+    }
+    let Some(hooks) = ctx.scripting_hooks.read().clone() else {
+        send_system_line(ctx, user, "Scripting is not available.");
+        return;
+    };
+    match (hooks.kill)(name) {
+        Ok(()) => send_system_line(ctx, user, &format!("Script '{}' unloaded.", name)),
+        Err(e) => send_system_line(ctx, user, &format!("Failed to unload '{}': {}", name, e)),
+    }
+}
+
 /// Feeds internos a los que un admin puede suscribirse.
 #[derive(Clone, Copy)]
 enum Subscription {
@@ -3065,6 +3401,7 @@ enum Subscription {
     IpSend,
     LogSend,
     BanSend,
+    Errors,
 }
 
 /// Toggle de una suscripción per-admin (`/vspy`, `/ipsend`, `/logsend`,
@@ -3079,6 +3416,7 @@ fn handle_subscription(ctx: &AppContext, user: &Arc<AresUser>, args: &str, sub: 
         Subscription::IpSend => (&user.sub_ipsend, "ipsend"),
         Subscription::LogSend => (&user.sub_logsend, "logsend"),
         Subscription::BanSend => (&user.sub_bansend, "bansend"),
+        Subscription::Errors => (&user.sub_errors, "errors"),
     };
     use std::sync::atomic::Ordering;
     let now_on = match args.trim().to_ascii_lowercase().as_str() {
@@ -3237,6 +3575,182 @@ where
             let _ = user.send_pvt(&bot, "Lookup requires the async runtime (unavailable here).");
         }
     }
+}
+
+/// Headers requeridos por la API de GitHub (paridad `LiveScript.cs` de sb0t).
+fn github_headers(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    req.header("User-Agent", "astra-server")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubSearchResponse {
+    items: Vec<GitHubRepository>,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubRepository {
+    name: String,
+    full_name: String,
+    #[serde(rename = "private")]
+    is_private: bool,
+    owner: GitHubOwner,
+    description: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubOwner {
+    login: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubRelease {
+    zipball_url: String,
+}
+
+/// `/livescripts` — busca en GitHub repos públicos con el topic
+/// `areschatscript` (paridad `LiveScript.LiveScripts` de sb0t).
+fn handle_livescripts(ctx: &AppContext, user: &Arc<AresUser>) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let bot = ctx.settings.bot_name.clone();
+    let endpoint = ctx.settings.live_scripts_endpoint.clone();
+    let user = user.clone();
+    spawn_lookup(user, bot, move || async move {
+        let client = reqwest::Client::new();
+        let url = format!("{}/search/repositories?q=topic:areschatscript+is:public", endpoint);
+        let req = github_headers(client.get(&url)).timeout(std::time::Duration::from_secs(10));
+        let resp = req.send().await.ok()?;
+        let parsed: GitHubSearchResponse = resp.json().await.ok()?;
+        let lines: Vec<String> = parsed
+            .items
+            .iter()
+            .filter(|r| !r.is_private)
+            .map(|r| {
+                format!(
+                    "Script: {}  Author: {}  Path: {}  Description: {}",
+                    r.name,
+                    r.owner.login,
+                    r.full_name,
+                    r.description.as_deref().unwrap_or("")
+                )
+            })
+            .collect();
+        if lines.is_empty() {
+            Some("No scripts available".to_string())
+        } else {
+            Some(lines.join("\n"))
+        }
+    });
+}
+
+/// `/downloadscript <owner/repo>` — descarga el último release de un repo
+/// de GitHub, extrae el primer `.js` que encuentra, y lo carga (paridad
+/// `LiveScript.GetDownload`/`Download` de sb0t). Simplificación deliberada:
+/// sb0t renombra el directorio raíz extraído a `<filename>.js` (su modelo
+/// permite que un "script" sea una carpeta); acá se busca el primer
+/// archivo `.js` dentro del zip y se lo carga como script individual,
+/// consistente con el modelo de `ScriptManager` de Astra.
+fn handle_downloadscript(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let path = args.trim().to_string();
+    let valid = regex::Regex::new(r"^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$")
+        .map(|re| re.is_match(&path))
+        .unwrap_or(false);
+    if !valid {
+        send_system_line(ctx, user, &format!("{} is not a valid path. Path must be like user/repository", path));
+        return;
+    }
+    send_system_line(ctx, user, &format!("Starting download of the script from: {}", path));
+    let bot = ctx.settings.bot_name.clone();
+    let endpoint = ctx.settings.live_scripts_endpoint.clone();
+    let data_dir = ctx.settings.data_dir.clone();
+    let hooks = ctx.scripting_hooks.read().clone();
+    let user = user.clone();
+    spawn_lookup(user, bot, move || async move {
+        download_and_load_script(endpoint, path, data_dir, hooks).await
+    });
+}
+
+async fn download_and_load_script(
+    endpoint: String,
+    path: String,
+    data_dir: String,
+    hooks: Option<server_core::ScriptingHooks>,
+) -> Option<String> {
+    let client = reqwest::Client::new();
+
+    let release_url = format!("{}/repos/{}/releases/latest", endpoint, path);
+    let req = github_headers(client.get(&release_url)).timeout(std::time::Duration::from_secs(10));
+    let Ok(resp) = req.send().await else {
+        return Some(format!("Unable to get the script with path: {}", path));
+    };
+    let Ok(release) = resp.json::<GitHubRelease>().await else {
+        return Some(format!("Unable to get the script with path: {}", path));
+    };
+    if release.zipball_url.is_empty() {
+        return Some(format!("Unable to get the script with path: {}", path));
+    }
+
+    let req = github_headers(client.get(&release.zipball_url)).timeout(std::time::Duration::from_secs(30));
+    let Ok(zip_resp) = req.send().await else {
+        return Some(format!("Failed to download release zip for: {}", path));
+    };
+    let Ok(zip_bytes) = zip_resp.bytes().await else {
+        return Some(format!("Failed to download release zip for: {}", path));
+    };
+
+    let filename = path.split('/').nth(1).unwrap_or("script").to_string();
+    let scripts_dir = std::path::PathBuf::from(&data_dir).join("scripts");
+    let zip_vec = zip_bytes.to_vec();
+    let extract_result = tokio::task::spawn_blocking(move || {
+        extract_first_js(&zip_vec, &scripts_dir, &filename)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("extraction task panicked: {}", e)));
+
+    let dest_name = match extract_result {
+        Ok(name) => name,
+        Err(e) => return Some(format!("Unable to extract script from {}: {}", path, e)),
+    };
+
+    let Some(hooks) = hooks else {
+        return Some(format!(
+            "Successfully downloaded from live script: {} (scripting unavailable, not auto-loaded).",
+            dest_name
+        ));
+    };
+    let load_name = dest_name.trim_end_matches(".js");
+    match (hooks.load)(load_name) {
+        Ok(_) => Some(format!("Successfully downloaded from live script: {}", dest_name)),
+        Err(e) => Some(format!("Downloaded '{}' but failed to load: {}", dest_name, e)),
+    }
+}
+
+/// Extrae el primer archivo `.js` de un zip (bytes en memoria) a
+/// `<scripts_dir>/<filename>.js`. Retorna el nombre de archivo final.
+fn extract_first_js(zip_bytes: &[u8], scripts_dir: &std::path::Path, filename: &str) -> Result<String, String> {
+    std::fs::create_dir_all(scripts_dir).map_err(|e| format!("mkdir failed: {}", e))?;
+    let cursor = std::io::Cursor::new(zip_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("invalid zip: {}", e))?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("zip read error: {}", e))?;
+        if !file.name().ends_with(".js") {
+            continue;
+        }
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut buf).map_err(|e| format!("zip extract error: {}", e))?;
+        let dest_name = format!("{}.js", filename);
+        std::fs::write(scripts_dir.join(&dest_name), &buf).map_err(|e| format!("write failed: {}", e))?;
+        return Ok(dest_name);
+    }
+    Err("no .js file found in the downloaded archive".to_string())
 }
 
 /// `/trace <nick|ip>` — geolocaliza una IP usando la base GeoIP (si está
@@ -4170,8 +4684,8 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &alice, "listfilters", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Word filters (2):");
         // Dos líneas de detalle (ordenadas por patrón): badword, spammy
-        assert_eq!(next_pvt_text(&mut alice_rx), "badword → ban");
-        assert_eq!(next_pvt_text(&mut alice_rx), "spammy → block");
+        assert_eq!(next_pvt_text(&mut alice_rx), "0 - badword → ban");
+        assert_eq!(next_pvt_text(&mut alice_rx), "1 - spammy → block");
 
         let _ = dispatch_builtin(&ctx, &alice, "remfilter", "badword");
         assert_eq!(next_pvt_text(&mut alice_rx), "Filter 'badword' removed.");

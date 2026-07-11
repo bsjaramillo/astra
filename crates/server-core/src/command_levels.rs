@@ -113,6 +113,8 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("viewfilter", ILevel::Admin),
     ("addwordfilter", ILevel::Admin),
     ("remwordfilter", ILevel::Admin),
+    ("addline", ILevel::Admin),
+    ("remline", ILevel::Admin),
     ("filter", ILevel::Admin),
     ("url", ILevel::Admin),
     ("addurl", ILevel::Admin),
@@ -179,8 +181,16 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("enableadmins", ILevel::Owner),
     ("listpasswords", ILevel::Owner),
     ("autologins", ILevel::Owner),
+    ("addautologin", ILevel::Owner),
+    ("remautologin", ILevel::Owner),
     ("link", ILevel::Owner),
     ("unlink", ILevel::Owner),
+    ("listscripts", ILevel::Owner),
+    ("loadscript", ILevel::Owner),
+    ("killscript", ILevel::Owner),
+    ("livescripts", ILevel::Owner),
+    ("downloadscript", ILevel::Owner),
+    ("errors", ILevel::Moderator),
 ];
 
 fn ilevel_from_u8(v: u8) -> Option<ILevel> {

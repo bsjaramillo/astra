@@ -184,6 +184,21 @@ async fn main() -> anyhow::Result<()> {
         scripts_dir.display()
     );
 
+    // Hooks para que /listscripts, /loadscript y /killscript (crates/commands)
+    // puedan hablar con el ScriptManager sin que server-core dependa de
+    // astra_scripting (sería circular, ya que astra_scripting depende de
+    // server_core::AppContext).
+    {
+        let h1 = scripting.clone();
+        let h2 = scripting.clone();
+        let h3 = scripting.clone();
+        *ctx.scripting_hooks.write() = Some(server_core::ScriptingHooks {
+            list: std::sync::Arc::new(move || h1.list_scripts()),
+            load: std::sync::Arc::new(move |name: &str| h2.load_script(name)),
+            kill: std::sync::Arc::new(move |name: &str| h3.kill_script(name)),
+        });
+    }
+
     // Bridge LinkEvent → ScriptEvent: reenvía TODOS los eventos del bus
     // (Linked/Unlinked/LinkError/LeafJoin/LeafPart/Join/Part/...) a los scripts.
     {

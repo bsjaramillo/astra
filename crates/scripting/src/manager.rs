@@ -81,15 +81,35 @@ pub enum ScriptRequest {
         is_pm: bool,
         reply: std_mpsc::SyncSender<bool>,
     },
+    /// Lista los nombres de los scripts cargados (`/listscripts`).
+    ListScripts {
+        reply: std_mpsc::SyncSender<Vec<String>>,
+    },
+    /// Carga un script por nombre desde `scripts_dir/<name>.js` (`/loadscript`).
+    LoadScript {
+        name: String,
+        reply: std_mpsc::SyncSender<Result<String, String>>,
+    },
+    /// Descarga un script por nombre (`/killscript`).
+    KillScript {
+        name: String,
+        reply: std_mpsc::SyncSender<Result<(), String>>,
+    },
 }
 
 impl ScriptRequest {
+    /// Solo aplica a las variantes `*Before`/`ScribbleCheck` (llaman un
+    /// handler JS); `ListScripts`/`LoadScript`/`KillScript` se resuelven
+    /// directamente en `dispatch_request` sin llegar a este método.
     fn handler_name(&self) -> &'static str {
         match self {
             ScriptRequest::TextBefore { .. } => "onTextBefore",
             ScriptRequest::EmoteBefore { .. } => "onEmoteBefore",
             ScriptRequest::PMBefore { .. } => "onPMBefore",
             ScriptRequest::ScribbleCheck { .. } => "onScribbleCheck",
+            ScriptRequest::ListScripts { .. }
+            | ScriptRequest::LoadScript { .. }
+            | ScriptRequest::KillScript { .. } => unreachable!("resuelto antes en dispatch_request"),
         }
     }
 
@@ -103,6 +123,9 @@ impl ScriptRequest {
             ScriptRequest::ScribbleCheck { from, is_pm, .. } => {
                 vec![from.clone(), is_pm.to_string()]
             }
+            ScriptRequest::ListScripts { .. }
+            | ScriptRequest::LoadScript { .. }
+            | ScriptRequest::KillScript { .. } => unreachable!("resuelto antes en dispatch_request"),
         }
     }
 }
@@ -177,6 +200,37 @@ impl ScriptHandle {
         // Esperar respuesta con timeout de 100ms
         rx.recv_timeout(Duration::from_millis(100)).unwrap_or(true)
     }
+
+    /// Lista los nombres de los scripts cargados (`/listscripts`).
+    pub fn list_scripts(&self) -> Vec<String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Vec<String>>(1);
+        if self.tx_req.send(ScriptRequest::ListScripts { reply: tx }).is_err() {
+            return Vec::new();
+        }
+        rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default()
+    }
+
+    /// Carga un script por nombre desde el directorio de scripts (`/loadscript`).
+    pub fn load_script(&self, name: &str) -> Result<String, String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Result<String, String>>(1);
+        let request = ScriptRequest::LoadScript { name: name.to_string(), reply: tx };
+        if self.tx_req.send(request).is_err() {
+            return Err("script manager no disponible".to_string());
+        }
+        rx.recv_timeout(Duration::from_millis(500))
+            .unwrap_or_else(|_| Err("timeout esperando al script manager".to_string()))
+    }
+
+    /// Descarga un script por nombre (`/killscript`).
+    pub fn kill_script(&self, name: &str) -> Result<(), String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Result<(), String>>(1);
+        let request = ScriptRequest::KillScript { name: name.to_string(), reply: tx };
+        if self.tx_req.send(request).is_err() {
+            return Err("script manager no disponible".to_string());
+        }
+        rx.recv_timeout(Duration::from_millis(500))
+            .unwrap_or_else(|_| Err("timeout esperando al script manager".to_string()))
+    }
 }
 
 // Add ScribbleCheck variant to dispatch_request matching
@@ -211,12 +265,10 @@ impl ScriptManager {
     /// que se puede usar desde otras tasks (TCP, WS, etc.) para enviar
     /// eventos.
     ///
-    /// Carga todos los scripts `.js` del directorio configurado antes de
-    /// iniciar el thread.
+    /// Carga todos los scripts `.js` del directorio configurado, DESDE
+    /// DENTRO del thread dedicado (ver nota de seguridad más abajo — NO
+    /// antes de moverse ahí).
     pub fn start_in_thread(self) -> ScriptHandle {
-        // Cargar los scripts del directorio
-        let _ = self.load_all_inner();
-
         // Dos canales: events (async) y requests (sync con reply)
         let (tx, mut rx_events) = mpsc::unbounded_channel::<ScriptEvent>();
         let (tx_req, mut rx_requests) = mpsc::unbounded_channel::<ScriptRequest>();
@@ -225,13 +277,30 @@ impl ScriptManager {
         // un `usize` (Send + Copy + 'static). El *mut ScriptManager
         // NO es Send directamente, pero un usize sí.
         // SAFETY: el manager vive solo en este thread y se destruye
-        // cuando el thread termina.
+        // cuando el thread termina. En este punto `self.scripts` está
+        // VACÍO (`load_all_inner` corre recién abajo, ya en el thread
+        // dedicado) — si se cargaran scripts ANTES de mover el manager acá
+        // (como hacía una versión anterior de este código), sus
+        // `boa_engine::Context` se crean en el thread llamante pero se
+        // destruyen en este thread dedicado; `boa_engine` mantiene un
+        // contador `thread_local` (`CANNOT_BLOCK_COUNTER`) que se
+        // incrementa al crear un Context y se decrementa al dropearlo —
+        // crear en un thread y destruir en otro descuenta un contador que
+        // nunca se incrementó ahí, y panickea por underflow (`attempt to
+        // subtract with overflow`) la primera vez que se descarga un
+        // script cargado al arrancar (`/killscript`, `/reload`). Por eso
+        // TODA la carga de scripts (inicial y en caliente) debe pasar por
+        // este mismo thread.
         let manager_ptr: usize = Box::into_raw(Box::new(self)) as usize;
 
         std::thread::spawn(move || {
             // SAFETY: reconstituimos el Box desde el usize
             let manager = unsafe { Box::from_raw(manager_ptr as *mut ScriptManager) };
             info!("script manager: thread iniciado");
+
+            // Cargar los scripts del directorio (ver nota de seguridad
+            // arriba: tiene que pasar acá, no antes de mover `self`).
+            let _ = manager.load_all_inner();
 
             // Loop principal: alterna entre events y requests.
             // Como ambos usan tokio::sync::mpsc con blocking_recv, podemos
@@ -343,6 +412,7 @@ impl ScriptManager {
             error!("script '{}': {}", name, e);
             script.set_state(ScriptLifecycle::Error);
             script.set_error(e.clone());
+            notify_error_subscribers(&self.app, name, &e);
             let id = script.id;
             unregister_context(&ctx);
             self.scripts.lock().insert(id, script);
@@ -442,7 +512,8 @@ impl ScriptManager {
                 if let Err(e) = call_void_handler(ctx, handler_name, &args) {
                     let msg = format!("error en handler '{}': {}", handler_name, e);
                     warn!("script '{}': {}", script.name(), msg);
-                    script.set_error(msg);
+                    script.set_error(msg.clone());
+                    notify_error_subscribers(&self.app, script.name(), &msg);
                 }
             }
         }
@@ -454,6 +525,41 @@ impl ScriptManager {
     /// si ALGÚN script retorna `false`, el reply es `false` (cancela).
     /// Si TODOS retornan `true` o no hay handler, el reply es `true`.
     pub fn dispatch_request(&self, request: ScriptRequest) {
+        // Las 3 variantes de gestión de scripts no llaman a ningún handler
+        // JS — se resuelven directo contra `self.scripts`/`self.scripts_dir`
+        // y retornan temprano, antes de tocar `handler_name()`/`args()`
+        // (que no las soportan).
+        match request {
+            ScriptRequest::ListScripts { reply } => {
+                let names: Vec<String> = self
+                    .scripts
+                    .lock()
+                    .values()
+                    .map(|s| s.name().to_string())
+                    .collect();
+                let _ = reply.send(names);
+                return;
+            }
+            ScriptRequest::LoadScript { name, reply } => {
+                let path = self.scripts_dir.join(format!("{}.js", name));
+                let result = self.load_file(&path).map(|_| name);
+                let _ = reply.send(result);
+                return;
+            }
+            ScriptRequest::KillScript { name, reply } => {
+                let result = match self.get_by_name(&name) {
+                    Some(script) => {
+                        self.unload(script.id);
+                        Ok(())
+                    }
+                    None => Err(format!("script '{}' no encontrado", name)),
+                };
+                let _ = reply.send(result);
+                return;
+            }
+            _ => {}
+        }
+
         let handler_name = request.handler_name();
         let args = request.args();
         let reply = match &request {
@@ -461,6 +567,9 @@ impl ScriptManager {
             ScriptRequest::EmoteBefore { reply, .. } => reply.clone(),
             ScriptRequest::PMBefore { reply, .. } => reply.clone(),
             ScriptRequest::ScribbleCheck { reply, .. } => reply.clone(),
+            ScriptRequest::ListScripts { .. }
+            | ScriptRequest::LoadScript { .. }
+            | ScriptRequest::KillScript { .. } => unreachable!("ya se resolvió arriba"),
         };
 
         // Si no hay scripts cargados, default = allow
@@ -585,6 +694,22 @@ fn call_handler_with_return(
         Ok(Some(result.as_boolean().unwrap()))
     } else {
         Ok(Some(true)) // no bool → default allow
+    }
+}
+
+/// Notifica por PM del bot a todo usuario suscrito (`/errors on`, paridad
+/// `ErrorDispatcher.SendError` de sb0t) que un script tiró un error.
+/// A diferencia de sb0t (que llama esto desde ~90 call sites), acá alcanza
+/// con los 2 puntos donde ya se captura un error de script
+/// (`load_source`/`dispatch`), porque son los únicos lugares donde Astra
+/// ejecuta código JS de scripts.
+fn notify_error_subscribers(app: &AppContext, script_name: &str, msg: &str) {
+    let bot_name = app.settings.bot_name.clone();
+    let line = format!("{}: {}", script_name, msg);
+    for u in app.user_pool.users() {
+        if u.logged_in && u.sub_errors.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = u.send_pvt(&bot_name, &line);
+        }
     }
 }
 
@@ -1228,6 +1353,11 @@ mod tests {
                 is_pm,
                 reply: tx,
             },
+            ScriptRequest::ListScripts { .. }
+            | ScriptRequest::LoadScript { .. }
+            | ScriptRequest::KillScript { .. } => {
+                panic!("check_request es solo para las variantes *Before/ScribbleCheck (reply: bool)")
+            }
         };
         mgr.dispatch_request(request);
         rx.recv_timeout(Duration::from_millis(200))

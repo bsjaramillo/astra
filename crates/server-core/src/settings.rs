@@ -54,6 +54,15 @@ pub struct Settings {
     /// con AES-256-CBC.
     #[serde(default)]
     pub link_trusted_leaves: Vec<TrustedLeaf>,
+    /// Endpoint de la API de GitHub para `/livescripts`/`/downloadscript`
+    /// (paridad `liveScriptsEndpoint` de sb0t, default real de sb0t:
+    /// `https://api.github.com`).
+    #[serde(default = "default_live_scripts_endpoint")]
+    pub live_scripts_endpoint: String,
+}
+
+fn default_live_scripts_endpoint() -> String {
+    "https://api.github.com".to_string()
 }
 
 /// Un leaf autorizado a conectarse al Link Hub.
@@ -176,6 +185,7 @@ impl Default for Settings {
             supabase_key: None,
             security: SecurityConfig::default(),
             link_trusted_leaves: Vec::new(),
+            live_scripts_endpoint: default_live_scripts_endpoint(),
         }
     }
 }

@@ -109,6 +109,9 @@ pub struct AresUser {
     pub sub_logsend: AtomicBool,
     /// Suscripción `/bansend`: recibe aviso cuando alguien es baneado/rechazado.
     pub sub_bansend: AtomicBool,
+    /// Suscripción `/errors`: recibe PM del bot cuando un script tira error
+    /// (paridad `ErrorDispatcher` de sb0t).
+    pub sub_errors: AtomicBool,
     /// ¿Cloaked?
     pub cloaked: AtomicBool,
     /// ¿Captcha pendiente?
@@ -214,6 +217,7 @@ impl AresUser {
             sub_ipsend: AtomicBool::new(false),
             sub_logsend: AtomicBool::new(false),
             sub_bansend: AtomicBool::new(false),
+            sub_errors: AtomicBool::new(false),
             cloaked: AtomicBool::new(false),
             needs_captcha: AtomicBool::new(false),
             logged_in: false,

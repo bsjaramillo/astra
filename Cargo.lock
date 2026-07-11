@@ -193,6 +193,7 @@ dependencies = [
  "server-core",
  "tokio",
  "tracing",
+ "zip",
 ]
 
 [[package]]

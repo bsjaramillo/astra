@@ -239,6 +239,21 @@ impl Database {
                 ip TEXT NOT NULL PRIMARY KEY
             );
 
+            CREATE TABLE IF NOT EXISTS ip_autologins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guid TEXT NOT NULL,
+                name TEXT NOT NULL,
+                level INTEGER NOT NULL,
+                ip TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS word_filter_lines (
+                pattern TEXT NOT NULL,
+                line_index INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                PRIMARY KEY (pattern, line_index)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -1160,6 +1175,109 @@ impl Database {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare("SELECT ip FROM trusted_proxies ORDER BY ip")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ========================================================================
+    // IP autologins (`/addautologin`, reconocimiento por GUID+IP sin cuenta)
+    // ========================================================================
+
+    /// Crea una entrada nueva. Retorna el `id` autogenerado.
+    pub fn add_ip_autologin(&self, guid: &str, name: &str, level: u8, ip: &str) -> DbResult<i64> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO ip_autologins (guid, name, level, ip) VALUES (?1, ?2, ?3, ?4)",
+            params![guid, name, level as i64, ip],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Actualiza una entrada existente (self-healing de guid/ip en `add`).
+    pub fn update_ip_autologin(&self, id: i64, guid: &str, name: &str, level: u8, ip: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE ip_autologins SET guid = ?2, name = ?3, level = ?4, ip = ?5 WHERE id = ?1",
+            params![id, guid, name, level as i64, ip],
+        )?;
+        Ok(())
+    }
+
+    /// Elimina una entrada por id. Retorna `true` si existía.
+    pub fn remove_ip_autologin(&self, id: i64) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM ip_autologins WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    }
+
+    /// Lee todas las entradas persistidas: `(id, guid, name, level, ip)`.
+    pub fn list_ip_autologins(&self) -> DbResult<Vec<(i64, String, String, u8, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id, guid, name, level, ip FROM ip_autologins ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as u8,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ========================================================================
+    // Word filter lines (`/addline`, `/remline` — filtros tipo Announce)
+    // ========================================================================
+
+    /// Agrega o actualiza una línea de un filtro Announce.
+    pub fn add_word_filter_line(&self, pattern: &str, line_index: i64, text: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO word_filter_lines (pattern, line_index, text) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(pattern, line_index) DO UPDATE SET text = ?3",
+            params![pattern, line_index, text],
+        )?;
+        Ok(())
+    }
+
+    /// Elimina todas las líneas de un pattern (al re-numerar tras un
+    /// `remove_line`, o al borrar el filtro entero).
+    pub fn clear_word_filter_lines(&self, pattern: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM word_filter_lines WHERE pattern = ?1", params![pattern])?;
+        Ok(())
+    }
+
+    /// Lee las líneas de un pattern, en orden.
+    pub fn list_word_filter_lines(&self, pattern: &str) -> DbResult<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT text FROM word_filter_lines WHERE pattern = ?1 ORDER BY line_index")?;
+        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Lee TODAS las líneas de TODOS los patterns (para poblar el cache al
+    /// arrancar): `(pattern, line_index, text)`.
+    pub fn list_all_word_filter_lines(&self) -> DbResult<Vec<(String, i64, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT pattern, line_index, text FROM word_filter_lines ORDER BY pattern, line_index")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);

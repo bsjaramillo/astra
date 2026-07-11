@@ -104,6 +104,16 @@ pub async fn handle_connection(
 
     let user_id = user.id;
 
+    // Autologin (cuenta por GUID, o reconocimiento por IP+GUID): a
+    // diferencia del path TCP nativo (donde el cliente debe mandar el
+    // opcode `ClientAutologin` explícitamente), el protocolo de texto ib0t
+    // no tiene un opcode equivalente — así que para usuarios web se
+    // intenta automáticamente en cada join (paridad más fiel del
+    // `Joined()` incondicional de sb0t). Corre ANTES del estado inicial
+    // para que el nivel ya esté aplicado en el primer USERINFO/userlist
+    // que ve el propio usuario.
+    let _ = astra_commands::dispatch_autologin(&ctx, &user);
+
     // Enviar estado inicial (directo a ws_text_tx como strings)
     send_initial_state_ws(&ctx, &user, &ws_text_tx).await;
 
@@ -582,12 +592,18 @@ fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
         handle_ws_command(ctx, user, text);
         return;
     }
-    // Word filter: solo aplica a usuarios regulares (Moderator+ exentos).
+    // Word filter: solo aplica (censura) a usuarios regulares (Moderator+ exentos).
     if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
         if let Some(action) = ctx.word_filter.check(text) {
             apply_filter_action_ws(ctx, user, action);
             return;
         }
+    }
+    // Filtro Announce: dispara para cualquier usuario, NO bloquea el
+    // mensaje (paridad `FilterType.Announce` de sb0t).
+    if let Some((_, lines, remainder)) = ctx.word_filter.check_announce(text) {
+        let sender_name = user.name.read().clone();
+        broadcast_announce_lines_ws(ctx, &sender_name, user.external_ip, &lines, &remainder);
     }
     let name = user.name.read().clone();
     let pkt = outbound::build_public(&name, text);
@@ -976,6 +992,34 @@ fn apply_filter_action_ws(
                 user.data_port,
             );
             filter_remove_user_ws(ctx, user);
+        }
+        FilterAction::Announce => {
+            // No debería llegar acá: `check()` (censura) nunca devuelve
+            // Announce — ver `check_announce`, que no bloquea el mensaje.
+        }
+    }
+}
+
+/// Difunde las líneas de un filtro `Announce` a toda la sala (mismo
+/// mecanismo que `/announce`: cada usuario recibe la línea como si el bot
+/// la dijera en público), con `+n`/`+ip`/`+r` sustituidos.
+fn broadcast_announce_lines_ws(
+    ctx: &AppContext,
+    sender_name: &str,
+    sender_ip: std::net::IpAddr,
+    lines: &[String],
+    remainder: &str,
+) {
+    let bot = ctx.settings.bot_name.clone();
+    for line in lines {
+        let msg = line
+            .replace("+n", sender_name)
+            .replace("+ip", &sender_ip.to_string())
+            .replace("+r", remainder);
+        for u in ctx.user_pool.users() {
+            if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = u.send_public(&bot, &msg);
+            }
         }
     }
 }
