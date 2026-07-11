@@ -795,6 +795,48 @@ node_port, IP oculta por ser `cbot`, level/age/sex/country/region). Antes
 del fix, esos mismos 5 paquetes habrían sido opcode `20`/`30` difundidos a
 toda la sala. `cargo build/test/clippy --workspace` en verde.
 
+### Rediseño UX del panel de administración (más intuitivo, no-técnico, móvil) — IMPLEMENTADO (2026-07-11)
+
+Pedido del usuario: "ponele más cariño al panel admin, tiene que ser más
+intuitivo para usuarios que no son técnicos y una mejor experiencia de
+usuario". El panel anterior era funcional pero denso, en inglés, con tablas
+apretadas de 13px que se ven mal en el teléfono (la mayoría de los admins lo
+usan desde el móvil — de hecho todos los reportes de bugs de esta sesión
+vinieron con capturas de celular). Rediseño completo de `ADMIN_HTML` en
+`crates/web/src/panel.rs` (la capa de presentación; el contrato con el
+backend —endpoints `/admin/*`, campos del STATE, comandos slash— quedó
+idéntico, no se tocó nada de `admin.rs`/`ws.rs`):
+
+- **Todo en español**, con lenguaje para no-técnicos: "Expulsar"/"Banear"/
+  "Silenciar" en vez de kick/ban/muzzle, "rangos" en vez de levels, cada
+  sección con un texto explicativo de qué hace en criollo (ej. las room
+  flags ahora tienen nombre + descripción legible: `sharefiles` →
+  "Vigilar archivos / Monitorea la compartición de archivos").
+- **Mobile-first**: navegación agrupada en 4 secciones (Principal /
+  Moderación / Sala / Avanzado) dentro de un cajón lateral (drawer) que en
+  desktop queda fijo como sidebar y en móvil se abre con un botón ☰ +
+  backdrop. Áreas táctiles de 40px+, `env(safe-area-inset-*)` para el
+  notch.
+- **Tarjetas en vez de tablas** para las listas interactivas (usuarios,
+  con badge de rango + acciones táctiles grandes); toggles tipo switch para
+  las room flags (aplican al instante); tiles para las estadísticas del
+  inicio.
+- **Feedback claro**: notificaciones tipo toast en cada acción (en vez del
+  texto inline chiquito de antes), confirmaciones en español para lo
+  destructivo (banear, vaciar baneos).
+- **Color de marca**: acento naranja para matchear la app de inbizio/Astra
+  que se ve en las capturas del cliente móvil.
+- Detalles UX: buscador de comandos en la pestaña de Permisos (159
+  comandos), las pestañas con formularios (Servidor/Enlace/Seguridad/
+  Config/Permisos/Proxies/Avatares) quedan excluidas del auto-refresh de
+  5s para no borrar lo que el admin está escribiendo.
+
+Verificado E2E contra un binario real: panel servido OK (48KB), sintaxis JS
+validada con `node --check`, las 15 funciones `render*` ejecutadas en un DOM
+simulado contra un STATE realista sin un solo error de referencia, y el
+flujo de endpoints (login → token → state → comando `/topic` reflejado en el
+state) funcionando. `cargo build -p astra-web` limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
