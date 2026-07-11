@@ -411,6 +411,13 @@ async fn process_handshake(
                         return Ok(None);
                     }
 
+                    // Nick duplicado: rechazar (paridad sb0t "name in use").
+                    if ctx.user_pool.get_by_name(&login.org_name).is_some() {
+                        warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.org_name);
+                        let _ = tx.send(server_error_packet("Nickname already in use"));
+                        return Ok(None);
+                    }
+
                     // ASN ban (requiere base GeoIP-ASN cargada; si no, no-op)
                     if !ctx.asn_bans.is_empty() {
                         if let Some(asn) = ctx.geoip.lookup_asn(external_ip) {

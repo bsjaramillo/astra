@@ -338,6 +338,12 @@ async fn ws_handshake_login(
         let _ = tx.send(Bytes::from_static(b"ERROR:Joining too quickly"));
         return Ok(None);
     }
+    // Nick duplicado: rechazar (paridad sb0t "name in use").
+    if ctx.user_pool.get_by_name(&login.name).is_some() {
+        warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.name);
+        let _ = tx.send(Bytes::from_static(b"ERROR:Nickname already in use"));
+        return Ok(None);
+    }
 
     let id = ctx.user_pool.next_id();
     let mut user = build_ares_user(id, external_ip, make_login_data(&login));
