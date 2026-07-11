@@ -3,7 +3,11 @@
 # =============================================================================
 # Build:  docker build -t astra:local .
 # Build: docker buildx build --platform linux/amd64 -t astra .
-# Run:    docker run -p 5009:5009 -p 5009:5009/udp -v astra-data:/app/data astra
+# Run (bind mount + tu usuario, datos accesibles desde el host en ./data):
+#   mkdir -p data
+#   docker run -p 5009:5009 -p 5009:5009/udp \
+#     --user "$(id -u):$(id -g)" -v "$PWD/data:/app/data" astra
+# (o simplemente: docker compose up -d)
 # =============================================================================
 
 # -------- Stage 1: build --------

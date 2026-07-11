@@ -17,13 +17,17 @@ services:
     image: astra:dev
     container_name: astra-server
     restart: unless-stopped
+    # Corre como tu usuario del host para que ./data quede accesible desde el SO.
+    # Cambiá con: PUID=$(id -u) PGID=$(id -g) docker compose -f docker-compose.tls.yml up -d
+    user: "${PUID:-1000}:${PGID:-1000}"
     # 5009 se publica para que los clientes Ares se conecten directo.
     # La superficie web NO se publica acá: entra por Caddy (abajo).
     ports:
       - "5009:5009"       # TCP clientes Ares
       - "5009:5009/udp"   # UDP room search
     volumes:
-      - astra-data:/app/data
+      # Bind mount: datos accesibles desde el host en ./data.
+      - ./data:/app/data
       - ./astra.toml:/app/astra.toml:ro
     command: ["/app/astra", "--config", "/app/astra.toml"]
     environment:
@@ -44,7 +48,5 @@ services:
       - astra
 
 volumes:
-  astra-data:
-    name: astra-data
   caddy-data:
   caddy-config:

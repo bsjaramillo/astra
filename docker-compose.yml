@@ -10,11 +10,17 @@ services:
     image: astra:dev
     container_name: astra-server
     restart: unless-stopped
+    # Corre como tu usuario del host para que los archivos de ./data queden
+    # accesibles/editables desde el SO (no como root ni UID 65532).
+    # Cambiá el UID/GID con: PUID=$(id -u) PGID=$(id -g) docker compose up -d
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "5009:5009" # TCP clientes Ares
       - "5009:5009/udp" # UDP room search
     volumes:
-      - astra-data:/app/data
+      # Bind mount: los datos (DB, bans, cuentas, avatares, scripts) viven en
+      # ./data del host, accesibles directamente desde el explorador de archivos.
+      - ./data:/app/data
     environment:
       # Configurar aquí las opciones de Astra (alternativa al config file)
       RUST_LOG: info
@@ -23,9 +29,6 @@ services:
       ASTRA_ROOM_TOPIC: "Welcome to Astra"
     # Si quieres usar un config file:
     # volumes:
+    #   - ./data:/app/data
     #   - ./astra.toml:/app/astra.toml:ro
     # command: ["/app/astra", "--config", "/app/astra.toml"]
-
-volumes:
-  astra-data:
-    name: astra-data
