@@ -93,6 +93,52 @@ pub fn build_join_or_userlist_c(user: &AresUser, crypto: Crypto) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+/// Construye la respuesta a `ClientUpdateStatus`: paridad exacta de
+/// `TCPOutbound.UpdateUserStatus` de sb0t. A diferencia de
+/// `build_join_or_userlist_c` (que usa otro opcode y SÍ se difunde a toda la
+/// sala), este paquete se manda ÚNICAMENTE de vuelta al cliente que lo pidió
+/// — sb0t nunca lo broadcastea (`client.SendPacket(...)`, no
+/// `Server.Users.SendAll`). Reutilizar el opcode de JOIN para esto (como
+/// hacía una versión anterior de Astra) hacía que cualquier cliente que
+/// manda `ClientUpdateStatus` periódicamente (varios bots cb0t lo hacen como
+/// keep-alive) disparara un "X has joined" fantasma en cada cliente web,
+/// sin que el usuario se hubiera ido ni vuelto a entrar.
+///
+/// Formato (de `TCPOutbound.cs` `UpdateUserStatus`):
+/// ```text
+/// str  name
+/// u16  file_count
+/// u8   browsable (1/0)
+/// IPv4 node_ip
+/// u16  node_port
+/// IPv4 external_ip (0.0.0.0 si el cliente no es Ares nativo)
+/// u8   level
+/// u8   age
+/// u8   sex
+/// u8   country
+/// str  region
+/// ```
+pub fn build_update_user_status_c(user: &AresUser, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerUpdateUserStatus, crypto);
+    w.write_string_nt(&user.name.read()).ok();
+    w.write_u16_le(user.file_count).ok();
+    w.write_u8(user.browsable as u8).ok();
+    write_ip(&mut w, &user.node_ip);
+    w.write_u16_le(user.node_port).ok();
+    let reported_ip = if user.ares {
+        user.external_ip
+    } else {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    };
+    write_ip(&mut w, &reported_ip);
+    w.write_u8(level_to_u8(&*user.level.read())).ok();
+    w.write_u8(user.age).ok();
+    w.write_u8(user.sex).ok();
+    w.write_u8(user.country).ok();
+    w.write_string_nt(&user.region).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
 /// Construye un PART (un usuario se fue).
 ///
 /// Formato: `str name`

@@ -736,6 +736,65 @@ bloquear el mensaje original, y `/remline` en cascada borró el filtro al
 vaciarse. 18 suites en verde (149 tests en `astra-commands`, 16 en
 `word_filter`, 7 nuevos en `ip_autologin`), clippy limpio.
 
+### "Has joined" fantasma en clientes web por `ClientUpdateStatus` mal manejado — IMPLEMENTADO (2026-07-11)
+
+Reportado en producción por el usuario con una captura real: dos bots cb0t
+(`Host`, `ARANA`, ambos `cbot=true` en el login) aparecían repitiendo
+"has joined" en la sala decenas de veces sin ningún desconecte real de por
+medio (los logs mostraban un único `LOGIN OK` para cada uno). Esto NO tenía
+relación con el hijack-por-IP ni con la fuga de canales WS arregladas
+antes en esta misma sesión (ver secciones arriba) — era un bug distinto,
+específico de clientes TCP nativos.
+
+Causa raíz, confirmada leyendo `TCPProcessor.cs` de sb0t: el opcode
+`MSG_CHAT_CLIENT_UPDATE_STATUS` (4) — que los clientes cb0t mandan
+periódicamente como refresh de su estado de compartición de archivos
+(file_count/browsable/etc, no tiene nada que ver con join/leave) — en sb0t
+se responde ÚNICAMENTE al mismo cliente que lo mandó
+(`client.SendPacket(TCPOutbound.UpdateUserStatus(client, client))`, opcode
+`MSG_CHAT_SERVER_UPDATE_USER_STATUS` = 5). Astra, en cambio, reusaba el
+opcode de JOIN (`build_join_or_userlist_c`, `ServerJoin`/
+`ServerChannelUserList`) y lo DIFUNDÍA A TODA LA SALA
+(`tcp_handler.rs::dispatch_message`, arm `TcpMsg::ClientUpdateStatus`).
+Como `ws_outbound::translate_broadcast` traduce cualquier paquete con esos
+dos opcodes a un mensaje de texto "ha entrado" para clientes web sin
+distinguir "join real" de "refresh reusando el mismo opcode", cada
+`ClientUpdateStatus` periódico de un bot cb0t generaba un "X has joined"
+fantasma en todos los clientes web de la sala, indefinidamente, sin que el
+usuario se moviera.
+
+Fix: agregado `build_update_user_status_c` en
+`server-core/src/outbound.rs` (paridad exacta de `TCPOutbound.cs
+UpdateUserStatus`: name, file_count, browsable, node_ip, node_port,
+external_ip —oculta a `0.0.0.0` si el cliente no es Ares nativo, paridad
+`client.Ares`—, level, age, sex, country, region; opcode
+`ServerUpdateUserStatus`, ya existía en `proto_ares::TcpMsg` pero nunca se
+usaba). El handler de `ClientUpdateStatus` ahora hace
+`user.send(outbound::build_update_user_status_c(user, user.ares_crypto))`
+(reply directo al socket del propio cliente) en vez de `broadcast_to_room`,
+y se quitó el `ctx.publish_link_event(LinkEvent::UserUpdated {...})`
+asociado (sb0t tampoco lo propaga a links; era un efecto colateral de la
+implementación anterior, no algo real de sb0t).
+
+De paso, mientras se investigaba este reporte con logs reales del server en
+producción, se encontró un segundo bug menor: el arm `_` (paquete
+desconocido/no-login como primer paquete, ej. `LinkProto` de un peer que
+prueba el protocolo de link sin éxito) en `tcp_handler.rs::process_handshake`
+era la ÚNICA rama de rechazo que NO llamaba a
+`ctx.security.failed_logins.record_failure(peer.ip())` — permitía que una
+IP reintentara indefinidamente sin nunca activar el ban automático de CAPA
+5 (se observó una IP externa reintentando cada ~10s durante 40000+
+segundos de uptime sin ser jamás baneada). Corregido agregando la llamada
+faltante, igual que las otras 5 ramas de rechazo.
+
+Verificado E2E con un binario real: cliente TCP nativo logueado + 5
+`ClientUpdateStatus` seguidos → 5 respuestas de opcode `5`
+(`ServerUpdateUserStatus`) recibidas únicamente por el propio cliente,
+con el payload byte-a-byte coincidente con el formato de sb0t (node_ip,
+node_port, IP oculta por ser `cbot`, level/age/sex/country/region). Antes
+del fix, esos mismos 5 paquetes habrían sido opcode `20`/`30` difundidos a
+toda la sala. `cargo build/test/clippy --workspace` en verde.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

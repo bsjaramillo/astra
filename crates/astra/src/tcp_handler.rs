@@ -537,6 +537,7 @@ async fn process_handshake(
         }
         _ => {
             warn!("primer paquete no es login: {:?} de {}", msg, peer);
+            ctx.security.failed_logins.record_failure(peer.ip());
             Ok(None)
         }
     }
@@ -625,12 +626,13 @@ async fn dispatch_message(
         }
         TcpMsg::ClientUpdateStatus => {
             debug!("update status de id={}", user.id);
-            // Por ahora: reenvía el status (broadcast del join refresh)
-            broadcast_to_room(ctx, user, |c| outbound::build_join_or_userlist_c(user, c));
-            ctx.publish_link_event(LinkEvent::UserUpdated {
-                origin: None,
-                user: LinkUserSnapshot::from_user(user),
-            });
+            // Paridad `TCPProcessor.cs` MSG_CHAT_CLIENT_UPDATE_STATUS: solo
+            // responde al mismo cliente (echo de su propio status de
+            // file-sharing), NUNCA se difunde a la sala. Difundirlo (como
+            // hacía una versión anterior, reusando el opcode de JOIN) hacía
+            // que cualquier bot que manda esto periódicamente disparara un
+            // "has joined" fantasma en los clientes web.
+            let _ = user.send(outbound::build_update_user_status_c(user, user.ares_crypto));
         }
         TcpMsg::ClientIgnorelist => {
             handle_ignore_list(user, &pkt.data[1..]);
