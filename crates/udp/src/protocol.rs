@@ -172,18 +172,25 @@ pub fn build_ackinfo(
 
 /// Construye `OP_SERVERLIST_ADDIPS` con nuestro puerto + lista de nodos.
 pub fn build_addips(my_port: u16, servers: &[NodeAddr]) -> Bytes {
+    build_node_list_packet(UdpMsg::ServerListAddIps, my_port, servers)
+}
+
+/// Construye `OP_SERVERLIST_ACKIPS` (mismo payload que ADDIPS: `u16 port,
+/// N*(ip+port)`; solo cambia el opcode).
+pub fn build_ackips(my_port: u16, servers: &[NodeAddr]) -> Bytes {
+    build_node_list_packet(UdpMsg::ServerListAckIps, my_port, servers)
+}
+
+/// Escribe el payload común a ADDIPS/ACKIPS/CHECKFIREWALLBUSY
+/// (`u16 port, N*(ip+port)`) con el opcode indicado.
+fn build_node_list_packet(op: UdpMsg, my_port: u16, servers: &[NodeAddr]) -> Bytes {
     let mut w = UdpPacketWriter::new();
     w.write_u16_le(my_port);
     for s in servers.iter().take(6) {
         write_ip(&mut w, s.ip);
         w.write_u16_le(s.port);
     }
-    Bytes::copy_from_slice(&w.to_ares_packet(UdpMsg::ServerListAddIps))
-}
-
-/// Construye `OP_SERVERLIST_ACKIPS`.
-pub fn build_ackips(my_port: u16, servers: &[NodeAddr]) -> Bytes {
-    build_addips(my_port, servers)
+    Bytes::copy_from_slice(&w.to_ares_packet(op))
 }
 
 /// Construye `OP_SERVERLIST_ACKNODES` con lista de nodos Ares 2.x.
@@ -230,7 +237,7 @@ pub fn build_proceed_check_firewall(port: u16, cookie: u32) -> Bytes {
 
 /// Construye `OP_SERVERLIST_CHECKFIREWALLBUSY` con lista de nodos.
 pub fn build_check_firewall_busy(my_port: u16, servers: &[NodeAddr]) -> Bytes {
-    build_addips(my_port, servers)
+    build_node_list_packet(UdpMsg::ServerListCheckFirewallBusy, my_port, servers)
 }
 
 #[cfg(test)]
@@ -261,10 +268,34 @@ mod tests {
     fn addips_roundtrip() {
         let nodes = vec![NodeAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234)];
         let pkt = build_addips(5009, &nodes);
+        assert_eq!(pkt[0], UdpMsg::ServerListAddIps as u8);
         let (port, parsed_nodes) = parse_addips(&pkt[1..]).unwrap();
         assert_eq!(port, 5009);
         assert_eq!(parsed_nodes.len(), 1);
         assert_eq!(parsed_nodes[0].port, 1234);
+    }
+
+    #[test]
+    fn ackips_and_check_firewall_busy_use_distinct_opcodes() {
+        // Regresión: build_ackips y build_check_firewall_busy delegaban en
+        // build_addips completo (incluido el opcode hardcodeado), así que
+        // ambos emitían accidentalmente ADDIPS (11) en vez de su propio
+        // opcode. El payload es el mismo formato; solo el opcode debe variar.
+        let nodes = vec![NodeAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1234)];
+
+        let addips = build_addips(5009, &nodes);
+        let ackips = build_ackips(5009, &nodes);
+        let busy = build_check_firewall_busy(5009, &nodes);
+
+        assert_eq!(addips[0], UdpMsg::ServerListAddIps as u8);
+        assert_eq!(ackips[0], UdpMsg::ServerListAckIps as u8);
+        assert_eq!(busy[0], UdpMsg::ServerListCheckFirewallBusy as u8);
+        assert_ne!(ackips[0], addips[0]);
+        assert_ne!(busy[0], addips[0]);
+
+        // El payload (todo lo que sigue al opcode) es idéntico entre los tres.
+        assert_eq!(&addips[1..], &ackips[1..]);
+        assert_eq!(&addips[1..], &busy[1..]);
     }
 
     #[test]

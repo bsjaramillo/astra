@@ -98,7 +98,7 @@ async fn handle_packet(
         }
         UdpMsg::ServerListAddIps => {
             manager.stats.addips_recv.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            handle_add_ips(manager, payload, peer, now);
+            handle_add_ips(socket, manager, payload, peer, now).await;
         }
         UdpMsg::ServerListAckIps => {
             manager.stats.ackips_recv.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -209,7 +209,21 @@ fn handle_ack_info(
 }
 
 /// Procesa ADDIPS: agrega los nodos del peer y le contesta con ACKIPS.
-fn handle_add_ips(manager: &UdpNodeManager, payload: &[u8], peer: SocketAddr, _now: i64) {
+///
+/// La respuesta es la parte crítica del protocolo (paridad
+/// `UdpProcessor.AddIps` de sb0t): es lo que le permite al EMISOR marcarnos
+/// con `Ack > 0` en su propia tabla de nodos (ver `handle_ack_ips`/
+/// `record_success` del lado que la recibe). Sin este ACKIPS, quien nos
+/// empuja un ADDIPS nunca nos considera "activos" y por lo tanto nunca nos
+/// incluye en el gossip que le pasa a terceros — nunca nos volvemos
+/// descubribles transitivamente aunque nosotros sí publiquemos hacia afuera.
+async fn handle_add_ips(
+    socket: &UdpSocket,
+    manager: &UdpNodeManager,
+    payload: &[u8],
+    peer: SocketAddr,
+    now: i64,
+) {
     let (port, nodes) = match protocol::parse_addips(payload) {
         Some(p) => p,
         None => {
@@ -224,6 +238,16 @@ fn handle_add_ips(manager: &UdpNodeManager, payload: &[u8], peer: SocketAddr, _n
     // Agregar los nodos del payload
     for n in nodes {
         manager.add_node(n.ip, n.port);
+    }
+
+    let servers = manager.active_nodes_excluding(peer.ip(), 6, now);
+    let pkt = protocol::build_ackips(manager.my_port, &servers);
+    match socket.send_to(&pkt, peer).await {
+        Ok(_) => {
+            manager.stats.ackips_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            debug!("ACKIPS enviado a {}", peer);
+        }
+        Err(e) => warn!("error enviando ACKIPS a {}: {}", peer, e),
     }
 }
 
@@ -362,6 +386,33 @@ mod tests {
             let _ = run_listener(mgr, socket, user_count).await;
         });
         (manager, addr)
+    }
+
+    #[tokio::test]
+    async fn add_ips_is_acked() {
+        // Regresión: handle_add_ips no mandaba el ACKIPS de vuelta (el emisor
+        // nunca podía marcarnos con Ack>0 en su tabla, así que nunca nos
+        // incluía en el gossip hacia terceros — la sala jamás se propagaba).
+        let (manager, server_addr) = spawn_test_listener().await;
+
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_port = peer.local_addr().unwrap().port();
+        peer.send_to(&protocol::build_addips(peer_port, &[]), server_addr)
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; 512];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut buf))
+            .await
+            .expect("timeout esperando ACKIPS")
+            .unwrap();
+        assert_eq!(buf[0], UdpMsg::ServerListAckIps as u8);
+        let (port, _nodes) = protocol::parse_ackips(&buf[1..n]).unwrap();
+        assert_eq!(port, 0, "el ACKIPS debe llevar nuestro propio puerto (0 en este test)");
+        assert_eq!(
+            manager.stats.ackips_sent.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[tokio::test]
