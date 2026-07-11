@@ -140,7 +140,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "astra"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -154,7 +154,7 @@ dependencies = [
  "clap",
  "config",
  "proto-ares",
- "rand 0.8.6",
+ "rand 0.8.7",
  "reqwest",
  "scopeguard",
  "serde",
@@ -168,24 +168,24 @@ dependencies = [
 
 [[package]]
 name = "astra-captcha"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "image",
- "rand 0.8.6",
+ "rand 0.8.7",
  "thiserror 1.0.69",
  "tracing",
 ]
 
 [[package]]
 name = "astra-commands"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "anyhow",
  "astra-scripting",
  "bytes",
  "chrono",
  "proto-ares",
- "rand 0.8.6",
+ "rand 0.8.7",
  "regex",
  "reqwest",
  "serde",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "astra-link"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "aes",
  "anyhow",
@@ -209,7 +209,7 @@ dependencies = [
  "md-5",
  "parking_lot",
  "proto-ares",
- "rand 0.8.6",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "server-core",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "astra-scripting"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -247,14 +247,14 @@ dependencies = [
 
 [[package]]
 name = "astra-udp"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "anyhow",
  "bytes",
  "chrono",
  "parking_lot",
  "proto-ares",
- "rand 0.8.6",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "server-core",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "astra-web"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "anyhow",
  "astra-commands",
@@ -277,7 +277,7 @@ dependencies = [
  "http",
  "parking_lot",
  "proto-ares",
- "rand 0.8.6",
+ "rand 0.8.7",
  "scopeguard",
  "serde",
  "serde_json",
@@ -465,7 +465,7 @@ dependencies = [
  "once_cell",
  "pollster",
  "portable-atomic",
- "rand 0.8.6",
+ "rand 0.8.7",
  "regress",
  "rustc-hash",
  "ryu-js",
@@ -638,9 +638,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.66"
+version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5d6cac793997bd970000024b2934968efe83b382de4fdcf4fcb46b6ee4ad996"
+checksum = "e17dd265a7d0f31ef544e1b20e03add05d3b45b491b633b10d67145d2acc1a38"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2214,7 +2214,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
  "phf_shared",
- "rand 0.8.6",
+ "rand 0.8.7",
 ]
 
 [[package]]
@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "proto-ares"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "aes",
  "byteorder",
@@ -2328,7 +2328,7 @@ dependencies = [
  "cbc",
  "criterion",
  "md-5",
- "rand 0.8.6",
+ "rand 0.8.7",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -2418,9 +2418,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.0.1-beta.12"
+version = "0.0.1-beta.13"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -2774,7 +2774,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "proto-ares",
- "rand 0.8.6",
+ "rand 0.8.7",
  "regex",
  "rusqlite",
  "serde",
@@ -3349,7 +3349,7 @@ dependencies = [
  "http",
  "httparse",
  "log",
- "rand 0.8.6",
+ "rand 0.8.7",
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
