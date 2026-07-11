@@ -837,6 +837,34 @@ simulado contra un STATE realista sin un solo error de referencia, y el
 flujo de endpoints (login → token → state → comando `/topic` reflejado en el
 state) funcionando. `cargo build -p astra-web` limpio.
 
+### Panel de administración bilingüe (español / inglés) — IMPLEMENTADO (2026-07-11)
+
+Continuación del rediseño UX: el usuario pidió hacer el panel `/admin`
+bilingüe ES/EN (solo el panel, no el cliente de chat de prueba ni los
+mensajes del backend, que siguen viniendo en inglés desde el crate
+`commands`). Refactor de `ADMIN_HTML` en `crates/web/src/panel.rs`:
+
+- Diccionario `I18N = { es, en }` (~210 claves por idioma, paridad exacta
+  verificada) + función `t(key, ...args)` con interpolación `{0}`/`{1}`
+  para conteos y nombres. Los mapas de rangos (`LVL`), acciones de filtro
+  (`ACT`) y room flags (`FLAG`, label + descripción) también son
+  bilingües.
+- Selector de idioma: botón `ES`/`EN` en el header (y un link en la
+  pantalla de login), persistido en `sessionStorage`. Al cambiar,
+  `setLang()` reconstruye la navegación, re-renderiza la pestaña actual y
+  actualiza el header sin recargar.
+- Detección inicial por `navigator.language` (empieza en inglés si el
+  navegador está en inglés, español en cualquier otro caso), overrideable
+  y recordado.
+- `applyChrome()` traduce también los textos "estáticos" que viven fuera
+  de las funciones `render*` (login, títulos de botones del header).
+
+Verificado: `cargo build -p astra-web` limpio; panel servido crece a ~67KB;
+`node --check` OK; las 15 funciones `render*` ejecutadas en un DOM simulado
+en **ambos** idiomas (30 renders) sin un solo error ni `undefined` filtrado;
+paridad de claves ES/EN comprobada programáticamente (210 = 210, cero
+faltantes); login → state contra un binario real OK.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
