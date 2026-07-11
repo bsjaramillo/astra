@@ -59,8 +59,15 @@ pub fn build(ident: &str, args: &str) -> String {
 
 /// Construye un mensaje con args de longitud variable. Formato:
 /// `IDENT:len1,len2,...:arg1arg2...`
+///
+/// Los largos van en unidades UTF-16 (ver [`utf16_len`]), no en chars: el
+/// cliente real es JavaScript y calcula todos los largos con `String.length`,
+/// que cuenta code units UTF-16 (un emoji o char astral fuera del BMP cuenta
+/// 2, no 1). Si acá contáramos chars, un nick/mensaje con esos caracteres
+/// desalinearía el parseo del lado del cliente (o del nuestro, según la
+/// dirección) apenas apareciera uno.
 pub fn build_with_lens(ident: &str, args: &[&str]) -> String {
-    let lens: Vec<String> = args.iter().map(|a| a.chars().count().to_string()).collect();
+    let lens: Vec<String> = args.iter().map(|a| utf16_len(a).to_string()).collect();
     let lens_str = lens.join(",");
     let mut s = format!("{}:{}:", ident, lens_str);
     for a in args {
@@ -69,9 +76,21 @@ pub fn build_with_lens(ident: &str, args: &[&str]) -> String {
     s
 }
 
+/// Largo de `s` en unidades UTF-16 (lo que JavaScript reporta como
+/// `s.length`). Un char fuera del BMP (la mayoría de los emoji, algunos
+/// símbolos matemáticos/alfanuméricos) ocupa 2 unidades, no 1.
+pub fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
 /// Parsea args de longitud variable. Acepta dos formatos:
 /// - `len1,len2:arg1arg2...` (solo los args)
 /// - `IDENT:len1,len2:arg1arg2...` (paquete completo con IDENT)
+///
+/// Los largos declarados están en unidades UTF-16 (paridad con
+/// `String.length` de JS — ver [`build_with_lens`]), así que el corte de
+/// cada arg avanza char por char sumando `char::len_utf16()` hasta alcanzar
+/// el largo declarado, en vez de contar chars/bytes directamente.
 pub fn parse_lens_args(text: &str) -> Option<Vec<String>> {
     let first_colon = text.find(':')?;
     let before = &text[..first_colon];
@@ -102,16 +121,23 @@ pub fn parse_lens_args(text: &str) -> Option<Vec<String>> {
         .collect::<Option<Vec<_>>>()?;
 
     let chars: Vec<char> = data.chars().collect();
-    let total = chars.len();
     let mut result = Vec::with_capacity(lens.len());
-    let mut pos = 0;
+    let mut idx = 0;
     for l in lens {
-        if pos + l > total {
-            return None;
+        let mut collected = String::new();
+        let mut units = 0usize;
+        while units < l {
+            let c = *chars.get(idx)?;
+            units += c.len_utf16();
+            if units > l {
+                // El largo declarado corta a mitad de un surrogate pair:
+                // datos corruptos o desalineados, no un mensaje válido.
+                return None;
+            }
+            collected.push(c);
+            idx += 1;
         }
-        let s: String = chars[pos..pos + l].iter().collect();
-        result.push(s);
-        pos += l;
+        result.push(collected);
     }
     Some(result)
 }
@@ -125,8 +151,10 @@ pub fn parse_lens_args(text: &str) -> Option<Vec<String>> {
 // se envía como el valor decimal del byte ("0", "50", "100"), igual que
 // `WebOutbound.cs` de sb0t.
 
+/// Largo en unidades UTF-16 (paridad `String.length` de JS, ver
+/// [`utf16_len`]/[`build_with_lens`] para el porqué).
 fn clen(s: &str) -> usize {
-    s.chars().count()
+    utf16_len(s)
 }
 
 /// `ACK:{len}:{name}` — ack de login.
@@ -216,9 +244,18 @@ pub fn build_userlist_end() -> String {
     "USERLIST_END:".to_string()
 }
 
-/// `OFFLINE:{len}:{name}` — un usuario salió (part).
+/// `OFFLINE:{len}:{name}` — el destinatario de un PM no está conectado
+/// (paridad `WebOutbound.OfflineTo`). NO es para anunciar que alguien se fue
+/// de la sala — para eso es [`build_part`].
 pub fn build_offline(name: &str) -> String {
     format!("OFFLINE:{}:{}", clen(name), name)
+}
+
+/// `PART:{len}:{name}` — un usuario se fue de la sala (paridad
+/// `WebOutbound.PartTo`). El cliente real lo usa para mostrar "X has parted"
+/// y sacarlo de la lista de usuarios.
+pub fn build_part(name: &str) -> String {
+    format!("PART:{}:{}", clen(name), name)
 }
 
 /// `PUBLIC:{nameLen},{textLen}:{name}{text}`.
@@ -537,6 +574,47 @@ mod tests {
     fn build_offline_and_end() {
         assert_eq!(build_offline("Zoe"), "OFFLINE:3:Zoe");
         assert_eq!(build_userlist_end(), "USERLIST_END:");
+    }
+
+    #[test]
+    fn build_part_is_distinct_from_offline() {
+        // Regresión: se usaba OFFLINE (aviso de "PM a alguien desconectado")
+        // para anunciar que un usuario se fue de la sala. El cliente real solo
+        // muestra "X has parted" (y lo saca de la lista) con el ident PART.
+        assert_eq!(build_part("Zoe"), "PART:3:Zoe");
+        assert_ne!(build_part("Zoe"), build_offline("Zoe"));
+    }
+
+    #[test]
+    fn utf16_len_counts_surrogate_pairs_as_two() {
+        // 💖 y los caracteres matemáticos tipo 𝓃 están fuera del BMP: en JS
+        // (String.length) y por lo tanto en el wire, cuentan 2 unidades, no 1.
+        assert_eq!(utf16_len("💖"), 2);
+        assert_eq!(utf16_len("𝓃"), 2);
+        assert_eq!(utf16_len("a"), 1);
+        assert_eq!(utf16_len("é"), 1); // BMP: 1 unidad UTF-16 (aunque 2 bytes UTF-8)
+    }
+
+    #[test]
+    fn parse_lens_args_with_astral_chars() {
+        // Regresión: un nick/mensaje con emoji o chars astrales (fuera del
+        // BMP) desalineaba el parseo porque contábamos chars Unicode en vez
+        // de unidades UTF-16 (como hace el cliente real, que es JS y arma los
+        // largos con `String.length`).
+        let name = "✮ ℓυηα ❥luna💖✨";
+        let s = build_with_lens("LOGIN", &[name, "hola"]);
+        let parsed = parse_lens_args(&s).unwrap();
+        assert_eq!(parsed, vec![name, "hola"]);
+    }
+
+    #[test]
+    fn build_userinfo_with_emoji_name_roundtrips() {
+        // El largo declarado para el nombre debe coincidir con lo que un
+        // cliente JS calcularía (utf16), para que no corte el string a mitad.
+        let name = "luna💖";
+        let s = build_userinfo(name, "", "", 1, 100, false, true);
+        // "luna" (4) + 💖 (2 utf16 units) = 6
+        assert!(s.starts_with(&format!("USERINFO:6,0,0,1,1,1,1:{}", name)));
     }
 
     #[test]

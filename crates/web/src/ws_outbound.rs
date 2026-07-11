@@ -8,7 +8,7 @@ use bytes::Bytes;
 use server_core::user_pool::AresUser;
 
 use crate::protocol::{
-    build_emote, build_joininfo, build_offline, build_pm, build_public, build_userlist_item,
+    build_emote, build_joininfo, build_part, build_pm, build_public, build_userlist_item,
 };
 
 /// Traduce un paquete binario de broadcast al formato texto WS, para un
@@ -47,7 +47,7 @@ pub fn translate_broadcast(pkt: &Bytes, sender: &AresUser, recipient: &AresUser)
         Some(TcpMsg::ServerPart) => {
             let mut r = proto_ares::PacketReader::new(data);
             let name = r.read_string_nt().ok()?;
-            Some(build_offline(&name))
+            Some(build_part(&name))
         }
         Some(TcpMsg::ServerJoin) | Some(TcpMsg::ServerChannelUserList) => {
             // El join se anuncia a los DEMÁS, no al que entra (que ya recibió su

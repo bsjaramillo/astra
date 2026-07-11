@@ -266,8 +266,8 @@ impl AresUser {
             return tx
                 .send(format!(
                     "PM:{},{}:{}{}",
-                    from.chars().count(),
-                    text.chars().count(),
+                    ws_len(from),
+                    ws_len(text),
                     from,
                     text
                 ))
@@ -282,8 +282,8 @@ impl AresUser {
             return tx
                 .send(format!(
                     "PUBLIC:{},{}:{}{}",
-                    from.chars().count(),
-                    text.chars().count(),
+                    ws_len(from),
+                    ws_len(text),
                     from,
                     text
                 ))
@@ -298,8 +298,8 @@ impl AresUser {
             return tx
                 .send(format!(
                     "EMOTE:{},{}:{}{}",
-                    from.chars().count(),
-                    text.chars().count(),
+                    ws_len(from),
+                    ws_len(text),
                     from,
                     text
                 ))
@@ -315,11 +315,20 @@ impl AresUser {
     pub fn print(&self, bot_name: &str, text: &str) -> bool {
         if let Some(tx) = &self.ws_text_sender {
             return tx
-                .send(format!("NOSUCH:{}:{}", text.chars().count(), text))
+                .send(format!("NOSUCH:{}:{}", ws_len(text), text))
                 .is_ok();
         }
         self.send(crate::outbound::build_pvt_c(bot_name, text, self.ares_crypto))
     }
+}
+
+/// Largo en unidades UTF-16 (paridad `String.length` de JavaScript): el
+/// protocolo de texto ib0t/web usa largos declarados por el cliente real
+/// (JS), que cuenta code units UTF-16, no chars/bytes — un emoji o char
+/// astral (fuera del BMP) ocupa 2, no 1. Si acá contáramos chars, un nick o
+/// mensaje con esos caracteres desalinearía el parseo del lado del cliente.
+fn ws_len(s: &str) -> usize {
+    s.encode_utf16().count()
 }
 
 /// Pool de usuarios conectados al servidor.

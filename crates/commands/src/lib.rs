@@ -1599,7 +1599,7 @@ fn apply_level(
     let level_byte = new_level as u8;
     let name = target.name.read().clone();
     let vroom = *target.vroom.read();
-    let ws_msg = format!("UPDATE:{},1:{}{}", name.chars().count(), name, level_byte);
+    let ws_msg = format!("UPDATE:{},1:{}{}", name.encode_utf16().count(), name, level_byte);
     for u in ctx.user_pool.users() {
         if !u.logged_in
             || *u.vroom.read() != vroom
@@ -3259,7 +3259,7 @@ fn guid_to_hex(guid: &[u8; 16]) -> String {
 
 fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
     let tname = target.name.read().clone();
-    let ws_part = format!("OFFLINE:{}:{}", tname.chars().count(), tname);
+    let ws_part = format!("PART:{}:{}", tname.encode_utf16().count(), tname);
 
     ctx.user_pool.remove(target.id);
     ctx.stats.on_user_part();
@@ -3277,7 +3277,7 @@ fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
 }
 
 fn broadcast_topic(ctx: &AppContext, text: &str) {
-    let ws_msg = format!("TOPIC:{}:{}", text.chars().count(), text);
+    let ws_msg = format!("TOPIC:{}:{}", text.encode_utf16().count(), text);
     for u in ctx.user_pool.users() {
         if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
