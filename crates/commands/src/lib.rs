@@ -31,7 +31,7 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/help - show this help",
     "/nick <name> - change your nickname",
     "/vroom <id> - move to another virtual room",
-    "/cname [text|-] - set or clear your custom name",
+    "/customname [text|-] - set or clear your custom name",
     "/users - list connected users",
     "/topic [text] - show or set room topic",
     "/motd [text] - show or set message of the day",
@@ -216,10 +216,6 @@ pub fn dispatch_builtin(
         }
         "vroom" => {
             handle_vroom(ctx, user, args);
-            (true, vec![])
-        }
-        "cname" => {
-            handle_cname(ctx, user, args);
             (true, vec![])
         }
         "users" => {
@@ -794,7 +790,7 @@ fn is_user_command(cmd: &str) -> bool {
         cmd,
         "help" | "users" | "whois" | "id" | "info" | "uptime" | "stats"
             | "version" | "topic" | "motd" | "roominfo" | "status"
-            | "register" | "unregister" | "login" | "cname" | "nick" | "vroom"
+            | "register" | "unregister" | "login" | "customname" | "nick" | "vroom"
     )
 }
 

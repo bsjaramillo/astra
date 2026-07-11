@@ -554,6 +554,18 @@ async fn send_initial_state(
                 name: other.name.read().clone(),
                 users_csv: String::new(),
             });
+            // Avatar y mensaje personal ya existentes (paridad
+            // `TCPProcessor.Login`: sb0t manda el avatar/pmsg de cada user ya
+            // conectado al recién llegado; sin esto, un cliente Ares nativo
+            // nunca ve avatares/pmsg de nadie que se conectó antes que él).
+            let other_name = other.name.read().clone();
+            if let Some(avatar) = other.avatar.lock().clone() {
+                let _ = user.send(outbound::build_avatar_c(&other_name, &avatar, crypto));
+            }
+            let pmsg = other.personal_message.lock().clone();
+            if !pmsg.is_empty() {
+                let _ = user.send(outbound::build_personal_message_c(&other_name, &pmsg, crypto));
+            }
         }
     }
 
@@ -611,12 +623,25 @@ async fn dispatch_message(
             }
             publish_raw_link(ctx, LINK_MSG_AVATAR, &pkt.data[1..]);
             // Avatar: el payload completo (sin opcode) son los bytes PNG.
-            // Guardar en user.avatar (set real, no solo notificar).
+            // < 10 bytes = "sin avatar" (paridad `AresClient.Avatar` setter).
             let png = pkt.data[1..].to_vec();
-            *user.avatar.lock() = Some(png.clone());
+            let cleared = png.len() < 10;
+            *user.avatar.lock() = if cleared { None } else { Some(png.clone()) };
+            *user.full_avatar.lock() = None;
             scripting.dispatch(astra_scripting::ScriptEvent::Avatar {
                 name: user.name.read().clone(),
-                png,
+                png: png.clone(),
+            });
+            // Difundir a la sala (Ares nativos + web/inbizier), paridad del
+            // setter de `AresClient.Avatar`: sin esto, nadie más ve el avatar
+            // hasta que se reconecten (nunca, en la práctica).
+            let name = user.name.read().clone();
+            broadcast_to_room(ctx, user, |c| {
+                if cleared {
+                    outbound::build_avatar_cleared_c(&name, c)
+                } else {
+                    outbound::build_avatar_c(&name, &png, c)
+                }
             });
         }
         TcpMsg::Public => {

@@ -107,6 +107,35 @@ pub fn build_part_c(user: &AresUser, crypto: Crypto) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+/// Construye un AVATAR (server → cliente Ares): notifica el avatar de
+/// `target_name` a un destinatario (paridad `TCPOutbound.Avatar`).
+///
+/// Formato: `str target_name` + `bytes avatar_png` (sin largo explícito:
+/// el resto del paquete es el PNG).
+pub fn build_avatar_c(target_name: &str, avatar: &[u8], crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::Avatar, crypto);
+    w.write_string_nt(target_name).ok();
+    w.write_bytes(avatar).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
+/// Construye un AVATAR vacío (limpia el avatar de `target_name` en el
+/// cliente, paridad `TCPOutbound.AvatarCleared`).
+pub fn build_avatar_cleared_c(target_name: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::Avatar, crypto);
+    w.write_string_nt(target_name).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
+/// Construye un PERSONAL_MESSAGE (server → cliente Ares): notifica el
+/// mensaje personal de `target_name` (paridad `TCPOutbound.PersonalMessage`).
+pub fn build_personal_message_c(target_name: &str, text: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::PersonalMessage, crypto);
+    w.write_string_nt(target_name).ok();
+    w.write_string_nt(text).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
 /// Construye un USERLIST (un usuario en la lista).
 /// Es el mismo formato que JOIN.
 pub fn build_userlist_item(user: &AresUser) -> Bytes {

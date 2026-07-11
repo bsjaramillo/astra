@@ -244,6 +244,19 @@ pub fn build_userlist_end() -> String {
     "USERLIST_END:".to_string()
 }
 
+/// `AVATAR:{nameLen},{avatarB64Len}:{name}{avatarB64}` — avatar nuevo/
+/// actualizado de `name` (paridad `WebOutbound.AvatarTo`). Solo relevante
+/// para clientes inbizier (web "simple" no lo procesa).
+pub fn build_avatar(name: &str, avatar_b64: &str) -> String {
+    build_with_lens("AVATAR", &[name, avatar_b64])
+}
+
+/// `AVATAR:{nameLen}:{name}` — limpia el avatar de `name` (paridad
+/// `WebOutbound.AvatarClearTo`).
+pub fn build_avatar_cleared(name: &str) -> String {
+    format!("AVATAR:{}:{}", clen(name), name)
+}
+
 /// `OFFLINE:{len}:{name}` — el destinatario de un PM no está conectado
 /// (paridad `WebOutbound.OfflineTo`). NO es para anunciar que alguien se fue
 /// de la sala — para eso es [`build_part`].
@@ -583,6 +596,16 @@ mod tests {
         // muestra "X has parted" (y lo saca de la lista) con el ident PART.
         assert_eq!(build_part("Zoe"), "PART:3:Zoe");
         assert_ne!(build_part("Zoe"), build_offline("Zoe"));
+    }
+
+    #[test]
+    fn build_avatar_matches_wire_format() {
+        assert_eq!(build_avatar("Bob", "QUJD"), "AVATAR:3,4:BobQUJD");
+    }
+
+    #[test]
+    fn build_avatar_cleared_has_single_len() {
+        assert_eq!(build_avatar_cleared("Bob"), "AVATAR:3:Bob");
     }
 
     #[test]

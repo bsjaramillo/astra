@@ -700,16 +700,25 @@ fn handle_ws_avatar(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         user.inbizier_web,
         user.inbizier_mobile,
     );
+    // También difundir a los clientes Ares nativos (paridad del setter
+    // `AresClient.Avatar`, que manda `TCPOutbound.Avatar` a `UserPool.AUsers`
+    // además de a `WUsers`) — sin esto, un cliente Ares nunca ve el avatar de
+    // un usuario web.
+    let raw_avatar = user.avatar.lock().clone();
     let vroom = *user.vroom.read();
     for u in ctx.user_pool.users() {
-        if u.logged_in
-            && *u.vroom.read() == vroom
-            && (u.inbizier_web || u.inbizier_mobile)
-            && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        if !u.logged_in
+            || *u.vroom.read() != vroom
+            || u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
         {
-            if let Some(tx) = &u.ws_text_sender {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            if u.inbizier_web || u.inbizier_mobile {
                 let _ = tx.send(info.clone());
             }
+        } else if let Some(bytes) = &raw_avatar {
+            let _ = u.send(outbound::build_avatar_c(&name, bytes, u.ares_crypto));
         }
     }
 }

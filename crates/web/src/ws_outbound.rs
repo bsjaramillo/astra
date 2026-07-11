@@ -8,7 +8,8 @@ use bytes::Bytes;
 use server_core::user_pool::AresUser;
 
 use crate::protocol::{
-    build_emote, build_joininfo, build_part, build_pm, build_public, build_userlist_item,
+    build_avatar, build_avatar_cleared, build_emote, build_joininfo, build_part, build_persmsg,
+    build_pm, build_public, build_userlist_item,
 };
 
 /// Traduce un paquete binario de broadcast al formato texto WS, para un
@@ -48,6 +49,35 @@ pub fn translate_broadcast(pkt: &Bytes, sender: &AresUser, recipient: &AresUser)
             let mut r = proto_ares::PacketReader::new(data);
             let name = r.read_string_nt().ok()?;
             Some(build_part(&name))
+        }
+        Some(TcpMsg::PersonalMessage) => {
+            // PERSMSG es un ident inbizier; un cliente web "simple" no lo
+            // procesa (paridad `x.Extended` — mismo gate que AVATAR arriba).
+            if !(recipient.inbizier_web || recipient.inbizier_mobile) {
+                return None;
+            }
+            let mut r = proto_ares::PacketReader::new(data);
+            let name = r.read_string_nt().ok()?;
+            let text = r.read_string_nt().ok()?;
+            Some(build_persmsg(&name, &text))
+        }
+        Some(TcpMsg::Avatar) => {
+            // Solo los clientes inbizier procesan AVATAR (paridad
+            // `x.Extended` en `AresClient.Avatar`/`Helpers.cs`); un cliente
+            // web "simple" no tiene dónde mostrarlo.
+            if !(recipient.inbizier_web || recipient.inbizier_mobile) {
+                return None;
+            }
+            let mut r = proto_ares::PacketReader::new(data);
+            let name = r.read_string_nt().ok()?;
+            let png = r.read_remaining();
+            if png.is_empty() {
+                Some(build_avatar_cleared(&name))
+            } else {
+                use base64::Engine as _;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+                Some(build_avatar(&name, &b64))
+            }
         }
         Some(TcpMsg::ServerJoin) | Some(TcpMsg::ServerChannelUserList) => {
             // El join se anuncia a los DEMÁS, no al que entra (que ya recibió su

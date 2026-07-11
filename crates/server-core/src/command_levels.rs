@@ -30,7 +30,6 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("help", ILevel::Regular),
     ("nick", ILevel::Regular),
     ("vroom", ILevel::Regular),
-    ("cname", ILevel::Regular),
     ("customname", ILevel::Regular),
     ("uncustomname", ILevel::Regular),
     ("users", ILevel::Regular),

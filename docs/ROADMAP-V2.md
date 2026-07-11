@@ -422,6 +422,60 @@ caliente y un Moderator queda bloqueado hasta el `reset`. 18 suites en
 verde (130 tests en `astra-commands`, 5 nuevos en `command_levels`),
 clippy limpio.
 
+### `/cname` removido (no existe en sb0t) + avatar/personal message rotos para clientes Ares nativos — IMPLEMENTADO (2026-07-11)
+
+Dos hallazgos más probando con un cliente Ares real (nativo TCP) además del
+cliente web inbizio:
+
+- **`/cname` no es un comando de sb0t** (correcto, señalado por el dueño del
+  proyecto): era un alias inventado sin equivalente real. sb0t solo tiene
+  `customname`/`uncustomname` (`[CommandLevel("customname", ILevel.Moderator)]`
+  en `Eval.cs`) — ya existían como alias de `handle_cname` en Astra. Se quitó
+  el arm `"cname"` del dispatcher (y de `DEFAULT_HELP_LINES`,
+  `is_user_command`, `DEFAULT_COMMAND_LEVELS`), dejando `customname`/
+  `uncustomname` como los únicos nombres reales. **Nota de diseño no
+  tocada**: en sb0t `customname` tiene una semántica dual — auto-asignación
+  (gateada a `nivel > Regular` o el flag de sala `general`) O asignar el
+  nombre custom a OTRO usuario (gateada a Moderator+); Astra solo implementa
+  la auto-asignación, sin gate. Es un cambio de diseño más grande, no
+  aplicado por ahora.
+- **Avatar y personal message nunca llegaban a clientes Ares nativos**
+  (reportado como "¿los usuarios TCP reciben avatar/pmsg?"). Comparado
+  contra `TCPProcessor.cs`/`AresClient.cs` de sb0t, se encontraron 3 gaps
+  reales:
+  1. `send_initial_state` (tcp_handler.rs, lo que se manda a un cliente Ares
+     recién conectado) nunca incluía el avatar ni el personal message de los
+     usuarios YA conectados — solo el item de userlist (sin esos campos, que
+     van en paquetes `Avatar`/`PersonalMessage` separados en el protocolo
+     real). Un cliente nativo que se unía tarde nunca veía el avatar/pmsg de
+     nadie. Fix: tras cada `USERLIST` item, si el otro usuario tiene avatar u
+     pmsg, se le manda también (paridad `TCPProcessor.Login`, líneas
+     908-920 de sb0t).
+  2. El handler `TcpMsg::Avatar` (avatar subido por un cliente Ares) NUNCA
+     difundía el cambio a nadie — solo lo guardaba en `user.avatar` y
+     notificaba a scripts. Nadie más (ni Ares ni web) veía nunca un avatar
+     actualizado en vivo. Fix: ahora difunde por `broadcast_to_room`
+     (paridad del setter `AresClient.Avatar`, que manda a `AUsers` Y
+     `WUsers`). También: payloads `< 10 bytes` ahora se tratan como "avatar
+     limpiado" (antes se guardaban tal cual, incluso vacíos).
+  3. El avatar subido por un usuario WEB (`handle_ws_avatar`) solo se
+     reanunciaba a otros clientes web/inbizier — nunca llegaba a los
+     clientes Ares nativos. Fix: ahora también manda el paquete binario
+     `Avatar` a los peers TCP de la vroom.
+  - Nuevos builders reutilizables en `server_core::outbound`:
+    `build_avatar_c`/`build_avatar_cleared_c`/`build_personal_message_c`.
+  - Nuevo caso `TcpMsg::Avatar` y `TcpMsg::PersonalMessage` en
+    `ws_outbound::translate_broadcast` (traduce el broadcast binario TCP al
+    `AVATAR:`/`PERSMSG:` de texto para clientes web inbizier — antes
+    `PersonalMessage` tampoco tenía traducción, así que un cambio de pmsg
+    originado en un cliente Ares nunca llegaba a los clientes web).
+
+Verificado E2E con clientes Ares nativos crudos (framing binario real) +
+cliente WS inbizier: un usuario nativo que se conecta tarde recibe el
+avatar/pmsg de un usuario nativo ya conectado; un update de avatar en vivo
+(nativo→nativo, nativo→web, web→nativo) llega a todos sin reconectar. 18
+suites en verde, clippy limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
