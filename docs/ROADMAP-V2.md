@@ -259,8 +259,61 @@ Verificado E2E: conexión TCP real, login, mensaje público, 8s de "inactividad"
 de esa espera llega y hace eco normalmente — reproduce exactamente el flujo
 reportado. 18 suites de tests en verde.
 
+### Bugs de cliente real: nombre/topic, /login, imágenes y audio — IMPLEMENTADO (2026-07-11)
+
+Reportados probando con un cliente inbizio real ya en producción (sala visible
+en la red tras los fixes UDP anteriores):
+
+- **CLI: `--port` clobbereaba silenciosamente el `port` del `--config`**.
+  `settings.port = cli.port;` corría siempre, y `--port` tenía
+  `default_value_t = 5009` — así que correr `astra --config astra.toml` SIN
+  pasar `--port` explícito ignoraba el puerto del toml y bindeaba 5009 sin
+  ningún error/warning. `port` ahora es `Option<u16>`; solo pisa el valor del
+  toml si se pasa explícitamente. (Encontrado mientras se armaba el E2E de
+  esta misma tanda: cualquier invocación `--config`-only pisaba 5009.)
+- **La sala aparecía con nombre/topic genéricos** ("Astra Chat"/"Welcome to
+  Astra"): `handle_send_info` (listener.rs) leía `ASTRA_ROOM_NAME`/
+  `ASTRA_ROOM_TOPIC` de variables de entorno que nadie seteaba, en vez de
+  `ctx.settings.room_name`/`ctx.current_room_topic()`. Nuevo `RoomInfoFn`
+  (mismo patrón que `UserCountFn`) inyectado desde `main.rs`, así el ACKINFO
+  siempre refleja la config real (y el topic en vivo, no un valor fijo).
+- **`/login` no reflejaba el nivel actualizado**: `apply_level` solo mandaba
+  `OPCHANGE` binario (no-op para clientes web, cuyo `sender` es `None`) y
+  nunca el ib0t `UPDATE:{name},1:{name}{level}` que el cliente real usa para
+  refrescar el badge/crown del userlist (paridad `ib0tClient.Level` setter de
+  sb0t). Ahora se difunde `UPDATE` a todos los web clients de la vroom, y un
+  refresh de join/userlist a los clientes Ares TCP — a **todos** los que
+  cambien de nivel (grant/revoke/login/register), no solo `/login`.
+- **Imágenes y audio no se mostraban** (aun con `scribbles on`/`audios on`):
+  Astra nunca manejaba los idents `CUSTOM_DATA_HEAD`/`CUSTOM_DATA_BODY` (ni
+  sus variantes `PM_`) — el mecanismo real que un cliente inbizio moderno usa
+  para mandar imágenes/audio en chunks de ≤30000 chars de base64 (paridad
+  `WebProcessor.CustomDataHead/Body` + `CustomData.cs` de sb0t). Caían al
+  catch-all y se perdían en silencio. Implementado:
+  - `server_core::custom_data::CustomDataStore`: reensamblado por `id`
+    (HEAD abre la transferencia con `sender`+`size`; cada BODY agrega un
+    chunk; al completarse `size` chunks, entrega `(sender, target, vroom,
+    data)`). Dos instancias en `AppContext` (pública y PM).
+  - `crates/web/src/handler.rs`: al completarse una transferencia pública,
+    re-chunkea y difunde `SCRIBBLE_HEAD/BLOCK` (imágenes, a todo web client de
+    la vroom, gate `room_flags.scribbles`) o `AUDIO_HEAD/BLOCK` (audio, solo a
+    clientes inbizier, gate `room_flags.audios`). Las privadas van a un solo
+    destinatario inbizier respetando su ignore list (`PM_SCRIBBLE_*`/
+    `PM_AUDIO_*`).
+  - Nuevos builders en `crates/web/src/protocol.rs` (formato exacto extraído
+    del cliente real en `~/Development/Javascript/ReactJS/inbizio-web-ios/`
+    y de `WebOutbound.cs`/`ib0tClient.cs` de sb0t).
+
+Verificado E2E con dos clientes WS reales (login inbizio v6000): ACKINFO UDP
+con nombre/topic correctos, `/login` propaga UPDATE a ambos usuarios, imagen
+pública llega con SCRIBBLE_HEAD+BLOCK y el base64 exacto, audio público llega
+con AUDIO_HEAD+BLOCK. 18 suites de tests en verde, clippy limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
   `AddShare`/`RemShare` no se sirven (feature P2P grande, fuera de alcance de un
   servidor de chat). SHARING se sigue anunciando por el browse.
+- **PM_SCRIBBLE/PM_AUDIO**: implementados en el server (ver arriba) pero sin
+  E2E dedicado (el reporte era sobre el chat público); la lógica es la misma
+  que la pública con destinatario único, debería funcionar igual.

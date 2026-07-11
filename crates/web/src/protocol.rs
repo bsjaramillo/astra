@@ -251,6 +251,75 @@ pub fn build_url(addr: &str, tag: &str) -> String {
     format!("URL:{},{}:{}{}", clen(addr), clen(tag), addr, tag)
 }
 
+/// `SCRIBBLE_HEAD:{senderLen},{countLen},{heightLen}:{sender}{count}{height}`
+/// — anuncia el inicio de una imagen reensamblada (paridad
+/// `WebOutbound.ScribbleHead` con altura, usada tras CUSTOM_DATA_HEAD/BODY).
+pub fn build_scribble_head(sender: &str, count: usize, height: u16) -> String {
+    let count_s = count.to_string();
+    let height_s = height.to_string();
+    format!(
+        "SCRIBBLE_HEAD:{},{},{}:{}{}{}",
+        clen(sender),
+        clen(&count_s),
+        clen(&height_s),
+        sender,
+        count_s,
+        height_s
+    )
+}
+
+/// `SCRIBBLE_BLOCK:{dataLen}:{data}` — un chunk (≤30000 chars) de la imagen.
+pub fn build_scribble_block(data: &str) -> String {
+    format!("SCRIBBLE_BLOCK:{}:{}", clen(data), data)
+}
+
+/// `AUDIO_HEAD:{senderLen},{countLen}:{sender}{count}`.
+pub fn build_audio_head(sender: &str, count: usize) -> String {
+    let count_s = count.to_string();
+    format!("AUDIO_HEAD:{},{}:{}{}", clen(sender), clen(&count_s), sender, count_s)
+}
+
+/// `AUDIO_BLOCK:{dataLen}:{data}` — un chunk (≤30000 chars) del audio.
+pub fn build_audio_block(data: &str) -> String {
+    format!("AUDIO_BLOCK:{}:{}", clen(data), data)
+}
+
+/// `PM_SCRIBBLE_HEAD:{senderLen},{countLen}:{sender}{count}` (sin altura, a
+/// diferencia de la variante pública).
+pub fn build_pm_scribble_head(sender: &str, count: usize) -> String {
+    let count_s = count.to_string();
+    format!(
+        "PM_SCRIBBLE_HEAD:{},{}:{}{}",
+        clen(sender),
+        clen(&count_s),
+        sender,
+        count_s
+    )
+}
+
+/// `PM_SCRIBBLE_BLOCK:{senderLen},{dataLen}:{sender}{data}` — a diferencia de
+/// la variante pública, el chunk privado repite el sender en cada bloque.
+pub fn build_pm_scribble_block(sender: &str, data: &str) -> String {
+    format!("PM_SCRIBBLE_BLOCK:{},{}:{}{}", clen(sender), clen(data), sender, data)
+}
+
+/// `PM_AUDIO_HEAD:{senderLen},{countLen}:{sender}{count}`.
+pub fn build_pm_audio_head(sender: &str, count: usize) -> String {
+    let count_s = count.to_string();
+    format!(
+        "PM_AUDIO_HEAD:{},{}:{}{}",
+        clen(sender),
+        clen(&count_s),
+        sender,
+        count_s
+    )
+}
+
+/// `PM_AUDIO_BLOCK:{senderLen},{dataLen}:{sender}{data}`.
+pub fn build_pm_audio_block(sender: &str, data: &str) -> String {
+    format!("PM_AUDIO_BLOCK:{},{}:{}{}", clen(sender), clen(data), sender, data)
+}
+
 /// `PERSMSG:{nameLen},{textLen}:{name}{text}` — cambio de personal message.
 pub fn build_persmsg(name: &str, text: &str) -> String {
     format!("PERSMSG:{},{}:{}{}", clen(name), clen(text), name, text)

@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 use super::accounts::AccountManager;
 use super::bans::BanSystem;
 use super::captcha::CaptchaManager;
+use super::custom_data::CustomDataStore;
 use super::db::Database;
 use super::greets::GreetManager;
 use super::idle::IdleManager;
@@ -321,6 +322,10 @@ pub struct AppContext {
     pub asn_bans: Arc<AsnBanManager>,
     /// Flags de sala (toggles caps/scribbles/audios/...).
     pub room_flags: Arc<RoomFlags>,
+    /// Transferencias CUSTOM_DATA públicas en curso (imágenes/audio ib0t).
+    pub custom_data: Arc<CustomDataStore>,
+    /// Transferencias CUSTOM_DATA privadas (PM) en curso.
+    pub pm_custom_data: Arc<CustomDataStore>,
     /// Filtros de nick para el login (`/joinfilter`).
     pub join_filters: Arc<NameFilterManager>,
     /// Filtros de nombres de archivo (`/filefilter`).
@@ -381,6 +386,8 @@ impl AppContext {
         let range_bans = Arc::new(RangeBanManager::new(db.clone()));
         let asn_bans = Arc::new(AsnBanManager::new(db.clone()));
         let room_flags = Arc::new(RoomFlags::new(db.clone()));
+        let custom_data = Arc::new(CustomDataStore::new());
+        let pm_custom_data = Arc::new(CustomDataStore::new());
         let join_filters = Arc::new(NameFilterManager::new(db.clone(), "join"));
         let file_filters = Arc::new(NameFilterManager::new(db.clone(), "file"));
         let geoip = Arc::new(GeoIp::load(std::path::Path::new(&settings.data_dir)));
@@ -403,6 +410,8 @@ impl AppContext {
             range_bans,
             asn_bans,
             room_flags,
+            custom_data,
+            pm_custom_data,
             join_filters,
             file_filters,
             geoip,

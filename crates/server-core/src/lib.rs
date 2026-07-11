@@ -93,6 +93,9 @@ pub mod name_filters;
 /// Resolución GeoIP / ASN via bases MMDB opcionales.
 pub mod geoip;
 
+/// Reensamblado de transferencias CUSTOM_DATA (imágenes/audio ib0t web).
+pub mod custom_data;
+
 /// Re-exports comunes.
 pub use app::{admin_action, AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use greets::{GreetContext, GreetManager};

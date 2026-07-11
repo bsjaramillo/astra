@@ -27,9 +27,11 @@ use tcp_handler::handle_tcp_client;
 #[derive(Parser, Debug)]
 #[command(name = "astra", version, about = "Servidor de chat compatible con Ares Galaxy")]
 struct Cli {
-    /// Puerto TCP principal.
-    #[arg(short, long, default_value_t = 5009)]
-    port: u16,
+    /// Puerto TCP principal. Si se omite, se usa el `port` del archivo de
+    /// configuración (`--config`); si tampoco está ahí, el default de
+    /// `Settings` (5009).
+    #[arg(short, long)]
+    port: Option<u16>,
 
     /// Archivo de configuración TOML.
     #[arg(short, long, default_value = "astra.toml")]
@@ -136,7 +138,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Cargar configuración
     let mut settings = Settings::load_or_default(&cli.config);
-    settings.port = cli.port;
+    if let Some(port) = cli.port {
+        settings.port = port;
+    }
     if cli.no_roomsearch {
         settings.roomsearch = false;
     }
@@ -336,9 +340,16 @@ async fn main() -> anyhow::Result<()> {
         let listener_pool = ctx.user_pool.clone();
         let user_count: astra_udp::UserCountFn =
             Arc::new(move || listener_pool.len().min(u16::MAX as usize) as u16);
+        let room_info_ctx = ctx.clone();
+        let room_info: astra_udp::RoomInfoFn = Arc::new(move || {
+            (
+                room_info_ctx.settings.room_name.clone(),
+                room_info_ctx.current_room_topic(),
+            )
+        });
         tokio::spawn(async move {
             if let Err(e) =
-                astra_udp::run_listener(listener_mgr, listener_socket, user_count).await
+                astra_udp::run_listener(listener_mgr, listener_socket, user_count, room_info).await
             {
                 error!("UDP listener crashed: {}", e);
             }

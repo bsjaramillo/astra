@@ -510,6 +510,10 @@ async fn dispatch_ws_message(
         "PM" => handle_ws_pm(ctx, user, args),
         "PERMSG" => handle_ws_permsg(ctx, user, args),
         "AVATAR" => handle_ws_avatar(ctx, user, args),
+        "CUSTOM_DATA_HEAD" => handle_ws_custom_data_head(ctx, user, args, false),
+        "CUSTOM_DATA_BODY" => handle_ws_custom_data_body(ctx, args, false),
+        "PM_CUSTOM_DATA_HEAD" => handle_ws_custom_data_head(ctx, user, args, true),
+        "PM_CUSTOM_DATA_BODY" => handle_ws_custom_data_body(ctx, args, true),
         _ => {
             debug!("ws mensaje {} no procesado de id={}", ident, user.id);
         }
@@ -701,6 +705,182 @@ fn handle_ws_avatar(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
                 let _ = tx.send(info.clone());
             }
         }
+    }
+}
+
+/// Tamaño máximo de chunk (paridad `preparePackets`/`Scribble2` del cliente
+/// real y de sb0t: ambos cortan en base64 de 30000 chars).
+const CUSTOM_DATA_CHUNK: usize = 30_000;
+/// Altura fija que sb0t manda en el SCRIBBLE_HEAD público (no la usa este
+/// cliente, pero se mantiene por paridad de wire).
+const SCRIBBLE_HEIGHT: u16 = 300;
+
+/// `CUSTOM_DATA_HEAD:{userLen},{idLen},{sizeLen}:{user}{id}{size}` (pública) o
+/// `PM_CUSTOM_DATA_HEAD:{targetLen},{idLen},{sizeLen}:{target}{id}{size}`
+/// (privada, el primer campo es el DESTINATARIO, no el emisor — paridad
+/// `WebProcessor.PmCustomDataHead` de sb0t). Inicia el reensamblado; el
+/// contenido real (imagen o audio) llega en los `CUSTOM_DATA_BODY` que siguen.
+fn handle_ws_custom_data_head(ctx: &AppContext, user: &Arc<AresUser>, args: &str, is_pm: bool) {
+    let Some(items) = protocol::parse_lens_args(args) else {
+        return;
+    };
+    if items.len() < 3 {
+        return;
+    }
+    let id = &items[1];
+    let Ok(size) = items[2].parse::<u16>() else {
+        return;
+    };
+    if size == 0 {
+        return;
+    }
+    let sender = user.name.read().clone();
+    let vroom = *user.vroom.read();
+    let target = if is_pm { Some(items[0].clone()) } else { None };
+    let store = if is_pm { &ctx.pm_custom_data } else { &ctx.custom_data };
+    store.start(id, sender, target, vroom, size);
+}
+
+/// `CUSTOM_DATA_BODY:{typeLen},{idLen},{dataLen}:{type}{id}{data}` (o el
+/// equivalente `PM_`). `type` es `"SCRIBBLE"` (imagen) o `"AUDIO"`. Cuando se
+/// recibe el último chunk, entrega la data completa para difundir.
+fn handle_ws_custom_data_body(ctx: &AppContext, args: &str, is_pm: bool) {
+    let Some(items) = protocol::parse_lens_args(args) else {
+        return;
+    };
+    if items.len() < 3 {
+        return;
+    }
+    let kind = items[0].as_str();
+    let id = &items[1];
+    let data = &items[2];
+    let store = if is_pm { &ctx.pm_custom_data } else { &ctx.custom_data };
+    let Some((sender, target, vroom, full_data)) = store.append(id, data) else {
+        return;
+    };
+    match (kind, target) {
+        ("SCRIBBLE", None) => deliver_public_scribble(ctx, &sender, vroom, &full_data),
+        ("AUDIO", None) => deliver_public_audio(ctx, &sender, vroom, &full_data),
+        ("SCRIBBLE", Some(target)) => deliver_pm_scribble(ctx, &sender, &target, &full_data),
+        ("AUDIO", Some(target)) => deliver_pm_audio(ctx, &sender, &target, &full_data),
+        _ => {}
+    }
+}
+
+/// Corta `data` en chunks de a lo sumo `CUSTOM_DATA_CHUNK` chars (mismo
+/// tamaño que usa el cliente al armar los BODY, así que en la práctica suele
+/// dar un solo chunk de vuelta salvo que la imagen/audio sea grande).
+fn chunk_data(data: &str) -> Vec<&str> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let bytes = data.as_bytes();
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let end = (pos + CUSTOM_DATA_CHUNK).min(bytes.len());
+        out.push(&data[pos..end]);
+        pos = end;
+    }
+    out
+}
+
+/// Difunde una imagen (scribble) reensamblada a todos los clientes web de la
+/// vroom, sin filtrar por inbizier (paridad `Scribble2` de sb0t: cualquier
+/// cliente web renderiza imágenes igual).
+fn deliver_public_scribble(ctx: &AppContext, sender: &str, vroom: u16, data: &str) {
+    if !ctx.room_flags.get("scribbles") {
+        return;
+    }
+    let chunks = chunk_data(data);
+    let head = protocol::build_scribble_head(sender, chunks.len(), SCRIBBLE_HEIGHT);
+    for u in ctx.user_pool.users() {
+        if !u.logged_in
+            || *u.vroom.read() != vroom
+            || u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            let _ = tx.send(head.clone());
+            for c in &chunks {
+                let _ = tx.send(protocol::build_scribble_block(c));
+            }
+        }
+    }
+}
+
+/// Difunde un audio reensamblado a los clientes web inbizier de la vroom
+/// (paridad `Audio` de sb0t: solo los clientes inbizio pueden reproducirlo).
+fn deliver_public_audio(ctx: &AppContext, sender: &str, vroom: u16, data: &str) {
+    if !ctx.room_flags.get("audios") {
+        return;
+    }
+    let chunks = chunk_data(data);
+    let head = protocol::build_audio_head(sender, chunks.len());
+    for u in ctx.user_pool.users() {
+        if !u.logged_in
+            || *u.vroom.read() != vroom
+            || u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+            || !(u.inbizier_web || u.inbizier_mobile)
+        {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            let _ = tx.send(head.clone());
+            for c in &chunks {
+                let _ = tx.send(protocol::build_audio_block(c));
+            }
+        }
+    }
+}
+
+/// Manda una imagen (scribble) por PM a un usuario web inbizier concreto
+/// (paridad `PmScribble` de sb0t: ignore list y target no-inbizier bloquean).
+fn deliver_pm_scribble(ctx: &AppContext, sender: &str, target_name: &str, data: &str) {
+    if !ctx.room_flags.get("scribbles") {
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        return;
+    };
+    if !target.logged_in || !(target.inbizier_web || target.inbizier_mobile) {
+        return;
+    }
+    if target.ignore_list.read().iter().any(|e| e.eq_ignore_ascii_case(sender)) {
+        return;
+    }
+    let Some(tx) = &target.ws_text_sender else {
+        return;
+    };
+    let chunks = chunk_data(data);
+    let _ = tx.send(protocol::build_pm_scribble_head(sender, chunks.len()));
+    for c in &chunks {
+        let _ = tx.send(protocol::build_pm_scribble_block(sender, c));
+    }
+}
+
+/// Manda un audio por PM a un usuario web inbizier concreto.
+fn deliver_pm_audio(ctx: &AppContext, sender: &str, target_name: &str, data: &str) {
+    if !ctx.room_flags.get("audios") {
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        return;
+    };
+    if !target.logged_in || !(target.inbizier_web || target.inbizier_mobile) {
+        return;
+    }
+    if target.ignore_list.read().iter().any(|e| e.eq_ignore_ascii_case(sender)) {
+        return;
+    }
+    let Some(tx) = &target.ws_text_sender else {
+        return;
+    };
+    let chunks = chunk_data(data);
+    let _ = tx.send(protocol::build_pm_audio_head(sender, chunks.len()));
+    for c in &chunks {
+        let _ = tx.send(protocol::build_pm_audio_block(sender, c));
     }
 }
 

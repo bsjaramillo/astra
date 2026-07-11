@@ -1592,6 +1592,28 @@ fn apply_level(
     ));
     send_system_line(ctx, target, notice);
 
+    // Difunde el nuevo nivel a todos en la misma vroom: a los clientes web
+    // como UPDATE (paridad ib0tClient.Level setter -> WebOutbound.UpdateTo,
+    // así el userlist/badge de todos se refresca en vivo) y a los clientes
+    // Ares TCP como un refresh de join/userlist (paridad UpdateUserStatus).
+    let level_byte = new_level as u8;
+    let name = target.name.read().clone();
+    let vroom = *target.vroom.read();
+    let ws_msg = format!("UPDATE:{},1:{}{}", name.chars().count(), name, level_byte);
+    for u in ctx.user_pool.users() {
+        if !u.logged_in
+            || *u.vroom.read() != vroom
+            || u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            let _ = tx.send(ws_msg.clone());
+        } else {
+            let _ = u.send(outbound::build_join_or_userlist_c(target, u.ares_crypto));
+        }
+    }
+
     ctx.publish_link_event(server_core::LinkEvent::UserUpdated {
         origin: None,
         user: server_core::LinkUserSnapshot::from_user(target),

@@ -18,6 +18,13 @@ use crate::types::NodeAddr;
 /// acoplar este crate al `UserPool` de server-core).
 pub type UserCountFn = Arc<dyn Fn() -> u16 + Send + Sync>;
 
+/// Provider de `(room_name, room_topic)` actuales (inyectado por el binario
+/// por la misma razón que `UserCountFn`: no acoplar este crate a
+/// `AppContext`). El topic es dinámico (cambia con `/topic`, el reloj de
+/// sala, etc.), por eso es un closure y no un string fijo al construir el
+/// manager.
+pub type RoomInfoFn = Arc<dyn Fn() -> (String, String) + Send + Sync>;
+
 /// Loop principal del listener UDP.
 ///
 /// El caller debe haber bindeado el socket al puerto deseado.
@@ -30,6 +37,7 @@ pub async fn run_listener(
     manager: Arc<UdpNodeManager>,
     socket: Arc<UdpSocket>,
     user_count: UserCountFn,
+    room_info: RoomInfoFn,
 ) -> anyhow::Result<()> {
     let local = socket.local_addr().ok();
     if let Some(addr) = local {
@@ -44,7 +52,7 @@ pub async fn run_listener(
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((n, peer)) => {
-                        handle_packet(&socket, &manager, &buf[..n], peer, &user_count).await;
+                        handle_packet(&socket, &manager, &buf[..n], peer, &user_count, &room_info).await;
                         let _ = n;
                     }
                     Err(e) => {
@@ -71,6 +79,7 @@ async fn handle_packet(
     data: &[u8],
     peer: SocketAddr,
     user_count: &UserCountFn,
+    room_info: &RoomInfoFn,
 ) {
     if data.is_empty() {
         return;
@@ -91,7 +100,7 @@ async fn handle_packet(
     match msg {
         UdpMsg::ServerListSendInfo => {
             manager.stats.sendinfo_recv.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            handle_send_info(socket, manager, peer, now, user_count()).await;
+            handle_send_info(socket, manager, peer, now, user_count(), room_info).await;
         }
         UdpMsg::ServerListAckInfo => {
             handle_ack_info(manager, payload, peer, now);
@@ -139,9 +148,9 @@ async fn handle_send_info(
     peer: SocketAddr,
     _now: i64,
     users: u16,
+    room_info: &RoomInfoFn,
 ) {
-    let name = std::env::var("ASTRA_ROOM_NAME").unwrap_or_else(|_| "Astra Chat".to_string());
-    let topic = std::env::var("ASTRA_ROOM_TOPIC").unwrap_or_else(|_| "Welcome to Astra".to_string());
+    let (name, topic) = room_info();
     let version = format!("Astra {}", env!("CARGO_PKG_VERSION"));
 
     // nodos activos que conocemos
@@ -381,9 +390,10 @@ mod tests {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let addr = socket.local_addr().unwrap();
         let user_count: UserCountFn = Arc::new(|| 0);
+        let room_info: RoomInfoFn = Arc::new(|| ("TestRoom".to_string(), "test topic".to_string()));
         let mgr = manager.clone();
         tokio::spawn(async move {
-            let _ = run_listener(mgr, socket, user_count).await;
+            let _ = run_listener(mgr, socket, user_count, room_info).await;
         });
         (manager, addr)
     }

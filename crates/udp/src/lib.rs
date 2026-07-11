@@ -33,7 +33,7 @@ pub mod protocol;
 pub mod seed;
 pub mod types;
 
-pub use listener::{run_listener, UserCountFn};
+pub use listener::{run_listener, RoomInfoFn, UserCountFn};
 pub use manager::{NodeChangeCallback, NodeSnapshot, UdpNodeManager};
 pub use prober::{push_once, run_prober};
 pub use seed::{load_seed, load_seed_force, validate_seed};
