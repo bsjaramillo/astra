@@ -397,10 +397,19 @@ async fn main() -> anyhow::Result<()> {
         loop {
             interval.tick().await;
             if let Some(item) = url_ctx.urls.next_url() {
-                let pkt = server_core::outbound::build_url(&item.address, &item.text);
+                let ws_msg = astra_web::protocol::build_url(&item.address, &item.text);
                 for u in url_ctx.user_pool.users() {
-                    if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = u.send(pkt.clone());
+                    if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
+                    if let Some(tx) = &u.ws_text_sender {
+                        let _ = tx.send(ws_msg.clone());
+                    } else {
+                        let _ = u.send(server_core::outbound::build_url_c(
+                            &item.address,
+                            &item.text,
+                            u.ares_crypto,
+                        ));
                     }
                 }
             }
@@ -420,11 +429,41 @@ async fn main() -> anyhow::Result<()> {
                 let base = clock_ctx.settings.room_topic.clone();
                 let topic = format!("{} [{}]", base, now);
                 clock_ctx.set_room_topic(topic.clone());
-                let pkt = server_core::outbound::build_topic(&topic);
+                let ws_msg = astra_web::protocol::build_topic(&topic);
                 for u in clock_ctx.user_pool.users() {
-                    if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = u.send(pkt.clone());
+                    if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
                     }
+                    if let Some(tx) = &u.ws_text_sender {
+                        let _ = tx.send(ws_msg.clone());
+                    } else {
+                        let _ = u.send(server_core::outbound::build_topic_c(&topic, u.ares_crypto));
+                    }
+                }
+            }
+        }
+    });
+
+    // FastPing periódico (cada 2s) a todos los clientes Ares TCP logueados.
+    // Paridad `ServerCore.cs` de sb0t: el server les manda esto a los
+    // clientes para (a) mantener viva la conexión contra NAT/firewalls
+    // intermedios que reciclan mappings ociosos, y (b) fallar rápido (error
+    // de escritura) si el socket ya está muerto. Sin este ping, un cliente
+    // que se queda leyendo sin escribir nada puede perder la conexión en
+    // silencio (el NAT la recicla) sin que ni el cliente ni el server lo
+    // noten hasta mucho después. No aplica a clientes web (usan su propio
+    // ident PING/PONG de WebSocket).
+    let fastping_ctx = ctx.clone();
+    tokio::spawn(async move {
+        let pkt = bytes::Bytes::from(
+            proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::FastPing).into_bytes(),
+        );
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            for u in fastping_ctx.user_pool.users() {
+                if u.logged_in && !u.web_client {
+                    let _ = u.send(pkt.clone());
                 }
             }
         }

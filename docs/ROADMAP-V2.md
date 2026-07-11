@@ -223,6 +223,42 @@ Handshake AES completo (paridad `Crypto.cs` / `TCPOutbound.CryptoKey`):
 - **loadtemplate**: mensaje honesto (Astra usa mensajes built-in; no hay
   plantillas que recargar). Era el último stub.
 
+### TCP: keepalive y desconexión silenciosa — IMPLEMENTADO (2026-07-10)
+
+Reportado: un cliente Ares real dejaba de recibir mensajes tras un rato de
+inactividad, sin que la app mostrara "desconectado". Causa raíz (paridad
+`ServerCore.cs` de sb0t): Astra nunca implementó el `FASTPING` que sb0t manda
+a CADA cliente logueado **cada 2 segundos** — ese ping es lo que mantiene viva
+la conexión contra NAT/firewalls que reciclan mappings TCP ociosos. Sin él,
+Astra además tenía un timeout propio de solo 120s sin lectura del cliente
+(sb0t no tiene un timeout así: se apoya enteramente en el FASTPING + en que un
+`send()` fallido revela una conexión muerta). Resultado: cualquier usuario que
+solo leyera sin escribir por más de 2 minutos era desconectado por el propio
+server, sin aviso, y si además el NAT ya había reciclado el mapping antes de
+eso, ni el cliente ni el server se enteraban (silencio total).
+
+- Nueva task periódica en `main.rs` (cada 2s): manda `FASTPING` (opcode 14,
+  paquete vacío, cifrado-invariante) a todos los clientes Ares TCP logueados.
+- `idle_timeout_secs` default 120 → 1800 (30 min): pasa de ser el mecanismo
+  principal de liveness a una red de seguridad para conexiones realmente
+  colgadas.
+- `writer_task` ahora avisa por un `oneshot` cuando una escritura falla; el
+  loop de lectura lo corre en `select!` junto al read normal, así una
+  conexión muerta se detecta por el lado de ESCRITURA (mucho más rápido) sin
+  depender de que el lado de lectura también falle.
+- Bonus: varios broadcasts periódicos/de scripting (rotación de URLs, reloj
+  de sala, `sendPublic`/`sendEmote`/`setTopic`/`Room_broadcast`/
+  `Channels_broadcast` de la API JS) armaban el paquete UNA vez y lo mandaban
+  igual a todos, ignorando el cifrado AES de cada cliente — un cliente
+  cifrado recibía ahí un string en claro que no podía decodificar. Ahora se
+  arman por-destinatario (`build_*_c` + `user.ares_crypto`), igual que ya
+  se hacía para el chat normal.
+
+Verificado E2E: conexión TCP real, login, mensaje público, 8s de "inactividad"
+(el cliente no manda nada) recibiendo FASTPINGs cada 2s, y un mensaje después
+de esa espera llega y hace eco normalmente — reproduce exactamente el flujo
+reportado. 18 suites de tests en verde.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

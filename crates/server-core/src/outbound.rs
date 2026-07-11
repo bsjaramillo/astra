@@ -304,7 +304,12 @@ pub fn build_opchange(is_op: bool) -> Bytes {
 
 /// URL tag de la sala (enviado al unirse).
 pub fn build_url(addr: &str, text: &str) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerUrl);
+    build_url_c(addr, text, None)
+}
+
+/// Variante con cifrado para el destinatario.
+pub fn build_url_c(addr: &str, text: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerUrl, crypto);
     w.write_string_nt(addr).ok();
     w.write_string_nt(text).ok();
     Bytes::copy_from_slice(w.as_bytes())

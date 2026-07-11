@@ -89,8 +89,13 @@ pub struct SecurityConfig {
     /// paquete (ClientLogin). Si no llega, cerrar conexión.
     /// Default: 15s
     pub handshake_timeout_secs: u64,
-    /// Capa 3: timeout en segundos entre mensajes después del login.
-    /// Default: 120s
+    /// Capa 3: timeout en segundos sin recibir NADA del cliente después del
+    /// login (red de seguridad para conexiones realmente muertas, no para
+    /// "usuario está leyendo sin escribir" — eso es normal y no debe cortar
+    /// la conexión). sb0t no tiene un timeout equivalente: se apoya en que
+    /// el server le manda FASTPING al cliente cada 2s (ver `run_fast_ping`),
+    /// lo que además evita que NAT/firewalls intermedios reciclen la
+    /// conexión por inactividad. Default: 1800s (30 min).
     pub idle_timeout_secs: u64,
 
     /// Capa 4: longitud mínima del nick.
@@ -131,7 +136,7 @@ impl Default for SecurityConfig {
 
             // Capa 3
             handshake_timeout_secs: 15,
-            idle_timeout_secs: 120,
+            idle_timeout_secs: 1800,
 
             // Capa 4
             min_name_length: 1,

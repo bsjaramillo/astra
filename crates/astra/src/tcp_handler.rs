@@ -81,8 +81,16 @@ pub async fn handle_tcp_client(
     // Canal mpsc para enviar al cliente
     let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
 
+    // Señal de "el writer detectó un error de escritura": el socket está
+    // muerto (peer desapareció sin FIN/RST, o el write directamente falló).
+    // El loop de lectura la corre en `select!` junto al read normal, para no
+    // depender únicamente de que el lado de lectura también falle (que en un
+    // half-dead connection puede tardar mucho más, hasta que el SO agote sus
+    // propios reintentos).
+    let (write_failed_tx, mut write_failed_rx) = tokio::sync::oneshot::channel::<()>();
+
     // Spawn writer task
-    let writer_handle = tokio::spawn(writer_task(write_half, rx));
+    let writer_handle = tokio::spawn(writer_task(write_half, rx, write_failed_tx));
 
     // ============================================================
     // CAPA 3: Handshake timeout
@@ -161,18 +169,32 @@ pub async fn handle_tcp_client(
     // ============================================================
     // Loop de lectura de mensajes
     // ============================================================
+    // `idle_timeout` es una red de seguridad (conexiones realmente colgadas),
+    // no el mecanismo principal de detección: para eso está el FastPing
+    // periódico (main.rs) + `write_failed_rx`, que corta de inmediato en
+    // cuanto el writer nota que el socket está muerto, sin esperar a que el
+    // lado de lectura también lo note (podría tardar mucho más).
     let idle_timeout = Duration::from_secs(ctx.settings.security.idle_timeout_secs);
     loop {
-        let pkt = match timeout(idle_timeout, reader.read_packet()).await {
-            Ok(Ok(p)) if p.data.is_empty() => break, // EOF
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => {
-                warn!("error leyendo de id={}: {}", user_id, e);
+        let pkt = tokio::select! {
+            biased;
+            _ = &mut write_failed_rx => {
+                debug!("writer detectó conexión rota para id={}, cerrando lector", user_id);
                 break;
             }
-            Err(_) => {
-                warn!("idle timeout para id={}, cerrando", user_id);
-                break;
+            read_result = timeout(idle_timeout, reader.read_packet()) => {
+                match read_result {
+                    Ok(Ok(p)) if p.data.is_empty() => break, // EOF
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => {
+                        warn!("error leyendo de id={}: {}", user_id, e);
+                        break;
+                    }
+                    Err(_) => {
+                        warn!("idle timeout para id={}, cerrando", user_id);
+                        break;
+                    }
+                }
             }
         };
 
@@ -221,8 +243,15 @@ pub async fn handle_tcp_client(
     Ok(())
 }
 
-/// Task que drena el mpsc y escribe al socket.
-async fn writer_task(mut write_half: OwnedWriteHalf, mut rx: mpsc::UnboundedReceiver<Bytes>) {
+/// Task que drena el mpsc y escribe al socket. Si una escritura falla, avisa
+/// por `write_failed` para que el loop de lectura corte de inmediato en vez
+/// de esperar a que el lado de lectura también note la conexión muerta (que
+/// en una conexión half-dead puede tardar mucho más).
+async fn writer_task(
+    mut write_half: OwnedWriteHalf,
+    mut rx: mpsc::UnboundedReceiver<Bytes>,
+    write_failed: tokio::sync::oneshot::Sender<()>,
+) {
     while let Some(data) = rx.recv().await {
         if data.is_empty() {
             continue;
@@ -233,11 +262,13 @@ async fn writer_task(mut write_half: OwnedWriteHalf, mut rx: mpsc::UnboundedRece
         let header = size.to_le_bytes();
         if let Err(e) = write_half.write_all(&header).await {
             debug!("writer: error escribiendo header: {}", e);
-            break;
+            let _ = write_failed.send(());
+            return;
         }
         if let Err(e) = write_half.write_all(&data).await {
             debug!("writer: error escribiendo: {}", e);
-            break;
+            let _ = write_failed.send(());
+            return;
         }
     }
     debug!("writer: terminado");

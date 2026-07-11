@@ -385,8 +385,7 @@ fn send_public_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Resul
     let from = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
-        let pkt = server_core::outbound::build_public(&from, &text);
-        broadcast_to_users(&app, &pkt);
+        broadcast_to_users(&app, |c| server_core::outbound::build_public_c(&from, &text, c));
         Ok(JsValue::from(true))
     } else {
         Ok(JsValue::from(false))
@@ -397,8 +396,7 @@ fn send_emote_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result
     let from = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
-        let pkt = server_core::outbound::build_emote(&from, &text);
-        broadcast_to_users(&app, &pkt);
+        broadcast_to_users(&app, |c| server_core::outbound::build_emote_c(&from, &text, c));
         Ok(JsValue::from(true))
     } else {
         Ok(JsValue::from(false))
@@ -524,8 +522,7 @@ fn set_topic_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
     let topic = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
         app.set_room_topic(topic.clone());
-        let pkt = server_core::outbound::build_topic(&topic);
-        broadcast_to_users(&app, &pkt);
+        broadcast_to_users(&app, |c| server_core::outbound::build_topic_c(&topic, c));
         Ok(JsValue::from(true))
     } else {
         Ok(JsValue::from(false))
@@ -885,14 +882,12 @@ fn channels_broadcast_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -
         return Ok(JsValue::from(false));
     };
     if let Some(app) = lookup_app(ctx) {
-        let pkt = server_core::outbound::build_public(&from, &text);
-        let bytes = Bytes::copy_from_slice(&pkt);
         let mut sent = 0;
         for u in app.user_pool.users() {
             if !u.logged_in { continue; }
             if *u.vroom.read() != id { continue; }
             if u.quarantined.load(std::sync::atomic::Ordering::Relaxed) { continue; }
-            if u.send(bytes.clone()) {
+            if u.send(server_core::outbound::build_public_c(&from, &text, u.ares_crypto)) {
                 sent += 1;
             }
         }
@@ -1204,8 +1199,7 @@ fn room_broadcast_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Re
     let text = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
         let from = app.settings.bot_name.clone();
-        let pkt = server_core::outbound::build_public(&from, &text);
-        broadcast_to_users(&app, &pkt);
+        broadcast_to_users(&app, |c| server_core::outbound::build_public_c(&from, &text, c));
         Ok(JsValue::from(true))
     } else {
         Ok(JsValue::from(false))
@@ -1724,10 +1718,16 @@ fn format_js_value(v: &JsValue) -> String {
 }
 
 /// Broadcast de un paquete a todos los users logueados.
-fn broadcast_to_users(app: &AppContext, pkt: &[u8]) {
+/// Difunde un paquete a todos los usuarios logueados, construyéndolo
+/// por-destinatario para que cada uno reciba sus strings cifrados con su
+/// propia key si negoció AES (`user.ares_crypto`).
+fn broadcast_to_users<F>(app: &AppContext, build: F)
+where
+    F: Fn(server_core::outbound::Crypto) -> Bytes,
+{
     for u in app.user_pool.users() {
         if u.logged_in {
-            let _ = u.send(Bytes::copy_from_slice(pkt));
+            let _ = u.send(build(u.ares_crypto));
         }
     }
 }
