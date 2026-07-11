@@ -543,6 +543,11 @@ async fn send_initial_state(
 
     // Bot fantasma
     let _ = user.send(outbound::build_userlist_bot_c(&ctx.settings.bot_name, crypto));
+    // Avatar de sala (bot), si hay uno configurado (paridad `Avatars.Server`,
+    // mandado en cada login en `TCPProcessor.cs`).
+    if let Some(avatar) = ctx.server_avatar.read().clone() {
+        let _ = user.send(outbound::build_avatar_c(&ctx.settings.bot_name, &avatar, crypto));
+    }
 
     // Userlist de todos los usuarios conectados
     let others = ctx.user_pool.users();
@@ -628,6 +633,7 @@ async fn dispatch_message(
             let cleared = png.len() < 10;
             *user.avatar.lock() = if cleared { None } else { Some(png.clone()) };
             *user.full_avatar.lock() = None;
+            user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
             scripting.dispatch(astra_scripting::ScriptEvent::Avatar {
                 name: user.name.read().clone(),
                 png: png.clone(),
@@ -1170,7 +1176,7 @@ async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_
 /// `build` construye el paquete binario para un destinatario dado su `crypto`
 /// (`None` = plano). Se llama una vez con `None` (paquete compartido para WS y
 /// clientes sin cifrar) y una vez por cada cliente Ares cifrado.
-fn broadcast_to_room<F>(ctx: &AppContext, sender: &server_core::user_pool::AresUser, build: F)
+pub(crate) fn broadcast_to_room<F>(ctx: &AppContext, sender: &server_core::user_pool::AresUser, build: F)
 where
     F: Fn(server_core::outbound::Crypto) -> Bytes,
 {

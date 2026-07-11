@@ -18,6 +18,7 @@ use super::idle::IdleManager;
 use super::geoip::GeoIp;
 use super::ip_bans::{AsnBanManager, RangeBanManager};
 use super::name_filters::NameFilterManager;
+use super::proxy_trust::TrustedProxyManager;
 use super::room_flags::RoomFlags;
 use super::urls::UrlManager;
 use super::word_filter::WordFilterManager;
@@ -333,6 +334,16 @@ pub struct AppContext {
     pub file_filters: Arc<NameFilterManager>,
     /// Niveles de permiso configurables por comando (`/cmdlevel`).
     pub command_levels: Arc<CommandLevelManager>,
+    /// Proxies reversos confiables para resolver la IP real detrás de
+    /// `X-Forwarded-For`/`X-Real-IP` en el path WS (panel Proxy).
+    pub trusted_proxies: Arc<TrustedProxyManager>,
+    /// Avatar de sala (bot), en memoria. Persistido en
+    /// `<data_dir>/avatars/server`. `None` = sin avatar de sala configurado.
+    pub server_avatar: RwLock<Option<Vec<u8>>>,
+    /// Avatar default asignado a usuarios Ares nativos que no mandan el
+    /// suyo (paridad `Avatars.CheckAvatars` de sb0t). Persistido en
+    /// `<data_dir>/avatars/default`.
+    pub default_avatar: RwLock<Option<Vec<u8>>>,
     /// Resolución GeoIP/ASN (bases MMDB opcionales en `data_dir`).
     pub geoip: Arc<GeoIp>,
     /// Log reciente de acciones de ban para `/banstats`: `(banner, target, ip)`.
@@ -394,6 +405,10 @@ impl AppContext {
         let join_filters = Arc::new(NameFilterManager::new(db.clone(), "join"));
         let file_filters = Arc::new(NameFilterManager::new(db.clone(), "file"));
         let command_levels = Arc::new(CommandLevelManager::new(db.clone()));
+        let trusted_proxies = Arc::new(TrustedProxyManager::new(db.clone()));
+        let avatars_dir = std::path::Path::new(&settings.data_dir).join("avatars");
+        let server_avatar = RwLock::new(std::fs::read(avatars_dir.join("server")).ok());
+        let default_avatar = RwLock::new(std::fs::read(avatars_dir.join("default")).ok());
         let geoip = Arc::new(GeoIp::load(std::path::Path::new(&settings.data_dir)));
         let (link_events, _) = broadcast::channel(1024);
         Self {
@@ -419,6 +434,9 @@ impl AppContext {
             join_filters,
             file_filters,
             command_levels,
+            trusted_proxies,
+            server_avatar,
+            default_avatar,
             geoip,
             ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             admins_disabled: std::sync::atomic::AtomicBool::new(false),

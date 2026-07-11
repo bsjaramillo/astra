@@ -235,6 +235,10 @@ impl Database {
                 level INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS trusted_proxies (
+                ip TEXT NOT NULL PRIMARY KEY
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -1123,6 +1127,39 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u8))
         })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ========================================================================
+    // Trusted proxies (X-Forwarded-For / X-Real-IP trust list, panel Proxy)
+    // ========================================================================
+
+    /// Agrega una IP de proxy confiable (no-op si ya existe).
+    pub fn add_trusted_proxy(&self, ip: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO trusted_proxies (ip) VALUES (?1) ON CONFLICT(ip) DO NOTHING",
+            params![ip],
+        )?;
+        Ok(())
+    }
+
+    /// Elimina una IP de proxy confiable. Retorna `true` si existía.
+    pub fn remove_trusted_proxy(&self, ip: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM trusted_proxies WHERE ip = ?1", params![ip])?;
+        Ok(n > 0)
+    }
+
+    /// Lee todas las IPs de proxy confiables persistidas.
+    pub fn list_trusted_proxies(&self) -> DbResult<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT ip FROM trusted_proxies ORDER BY ip")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);

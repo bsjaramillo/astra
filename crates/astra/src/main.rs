@@ -480,6 +480,40 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Avatar default (cada 2s): paridad `Avatars.CheckAvatars` de sb0t —
+    // a cualquier cliente Ares nativo logueado que lleve >10s conectado sin
+    // haber mandado su propio avatar, se le asigna el avatar default (si
+    // hay uno configurado desde el panel) y se difunde el cambio como un
+    // avatar en vivo más. No aplica a clientes web (sb0t tampoco lo hace:
+    // `CheckAvatars` solo recorre `UserPool.AUsers`).
+    let avatar_ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let Some(default_bytes) = avatar_ctx.default_avatar.read().clone() else {
+                continue;
+            };
+            let now_ms = server_core::time::unix_time();
+            for u in avatar_ctx.user_pool.users() {
+                if u.web_client
+                    || !u.logged_in
+                    || u.avatar_received.load(std::sync::atomic::Ordering::Relaxed)
+                    || now_ms.saturating_sub(u.join_time) < 10_000
+                {
+                    continue;
+                }
+                *u.avatar.lock() = Some(default_bytes.clone());
+                u.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
+                let name = u.name.read().clone();
+                let bytes = default_bytes.clone();
+                tcp_handler::broadcast_to_room(&avatar_ctx, &u, move |c| {
+                    server_core::outbound::build_avatar_c(&name, &bytes, c)
+                });
+            }
+        }
+    });
+
     // Stats reporter (cada 30s) + cleanup periódico
     let stats_ctx = ctx.clone();
     let stats_scripting = scripting.clone();

@@ -33,6 +33,7 @@ pub async fn handle_connection(
     ctx: Arc<AppContext>,
     stream: TcpStream,
     peer: SocketAddr,
+    resolved_ip: std::net::IpAddr,
 ) -> anyhow::Result<()> {
     info!("WS conectado: {}", peer);
 
@@ -67,7 +68,7 @@ pub async fn handle_connection(
     let mut buf = BytesMut::with_capacity(8192);
     let handshake_timeout = Duration::from_secs(15);
     let user = match timeout(handshake_timeout, async {
-        ws_handshake_login(&ctx.clone(), &mut read_half, &mut buf, &tx, &ws_text_tx, peer).await
+        ws_handshake_login(&ctx.clone(), &mut read_half, &mut buf, &tx, &ws_text_tx, peer, resolved_ip).await
     })
     .await
     {
@@ -292,6 +293,7 @@ async fn ws_handshake_login(
     tx: &mpsc::UnboundedSender<Bytes>,
     ws_text_tx: &mpsc::UnboundedSender<String>,
     peer: SocketAddr,
+    resolved_ip: std::net::IpAddr,
 ) -> anyhow::Result<Option<Arc<AresUser>>> {
     let frame = read_ws_frame(read_half, buf).await?;
     let (opcode, payload) = match frame {
@@ -324,7 +326,7 @@ async fn ws_handshake_login(
         }
     };
 
-    let external_ip = peer.ip();
+    let external_ip = resolved_ip;
     let now_ms = server_core::time::unix_time();
 
     let guid_arr: [u8; 16] = login.guid;
@@ -457,7 +459,11 @@ async fn send_initial_state_ws(
             build_userlist_item(name, level)
         }
     };
-    let _ = tx.send(emit(&bot_name, "", "", 0, ILevel::Owner as u8, false, false));
+    let bot_avatar_b64 = ctx.server_avatar.read().as_ref().map_or_else(String::new, |bytes| {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    });
+    let _ = tx.send(emit(&bot_name, "", &bot_avatar_b64, 0, ILevel::Owner as u8, false, false));
     let vroom = *user.vroom.read();
     for other in ctx.user_pool.users() {
         if other.logged_in && *other.vroom.read() == vroom {
@@ -686,6 +692,7 @@ fn handle_ws_avatar(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     };
     *user.full_avatar.lock() = Some(bytes.clone());
     *user.avatar.lock() = Some(bytes);
+    user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // Re-anunciar al resto de los inbizier de la vroom con el avatar nuevo.
     let name = user.name.read().clone();

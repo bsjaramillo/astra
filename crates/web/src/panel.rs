@@ -179,6 +179,12 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
   <button data-tab="room">Room</button>
   <button data-tab="filters">Filters</button>
   <button data-tab="accounts">Accounts</button>
+  <button data-tab="cmdlevels">Command Levels</button>
+  <button data-tab="server">Server</button>
+  <button data-tab="linking">Linking</button>
+  <button data-tab="advanced">Advanced</button>
+  <button data-tab="proxy">Proxy</button>
+  <button data-tab="avatars">Avatars</button>
   <button data-tab="settings">Settings</button>
   <button data-tab="console">Console</button>
 </nav>
@@ -227,7 +233,10 @@ function render(){
   const v = document.getElementById("view");
   v.innerHTML = ({
     dashboard: renderDashboard, users: renderUsers, bans: renderBans,
-    room: renderRoom, filters: renderFilters, accounts: renderAccounts, settings: renderSettings, console: renderConsole
+    room: renderRoom, filters: renderFilters, accounts: renderAccounts,
+    cmdlevels: renderCmdLevels, server: renderServerCfg, linking: renderLinking,
+    advanced: renderAdvanced, proxy: renderProxy, avatars: renderAvatars,
+    settings: renderSettings, console: renderConsole
   }[TAB] || renderDashboard)();
   wire();
 }
@@ -320,6 +329,241 @@ function renderAccounts(){
     <p class="muted">Grant/revoke apply to online users (see Users tab).</p></div>`;
 }
 
+function renderCmdLevels(){
+  const rows = (STATE.commandLevels||[]).map(c=>`<tr><td>/${esc(c.name)}</td>
+    <td class="${lvlClass(c.level)}">${esc(c.levelName)}</td>
+    <td>${c.isOverride?'<span class="pill">override</span>':''}</td>
+    <td>
+      <select data-cmdlvl="${esc(c.name)}">
+        <option value="">set level…</option>
+        <option value="regular">regular</option><option value="voice">voice</option>
+        <option value="moderator">moderator</option><option value="admin">admin</option>
+        <option value="owner">owner</option>
+      </select>
+      ${c.isOverride?`<button data-cmdreset="${esc(c.name)}">reset</button>`:''}
+    </td></tr>`).join("");
+  return `<div class="card"><h2>Command levels (${(STATE.commandLevels||[]).length})</h2>
+    <p class="muted">Minimum level required to run each command (paridad sb0t <code>[CommandLevel]</code> + registry). Changes apply immediately, no restart needed.</p>
+    <table><thead><tr><th>Command</th><th>Level</th><th></th><th>Actions</th></tr></thead>
+    <tbody>${rows||'<tr><td colspan=4 class=muted>none</td></tr>'}</tbody></table></div>`;
+}
+
+let CONFIG = null;
+async function loadConfig(force){
+  if(CONFIG && !force) return CONFIG;
+  const r = await api("/admin/config");
+  CONFIG = r.ok ? await r.json() : {};
+  return CONFIG;
+}
+async function postConfig(c, msgId){
+  const msg = document.getElementById(msgId);
+  const r = await api("/admin/config", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(c)});
+  if(r.ok){ msg.textContent="✓ Saved. Restart the server to apply."; msg.style.color="var(--ok)"; }
+  else { const j = await r.json().catch(()=>({error:"error"})); msg.textContent="✕ "+(j.error||"error"); msg.style.color="var(--danger)"; }
+}
+
+function renderServerCfg(){
+  return `<div class="card"><h2>Server</h2>
+    <p class="muted">Requires a server restart to take effect.</p>
+    <div class="row"><label style="width:140px">Room name</label><input id="cfgRoomName" style="flex:1"></div>
+    <div class="row"><label style="width:140px">Room topic</label><input id="cfgRoomTopic" style="flex:1"></div>
+    <div class="row"><label style="width:140px">Bot name</label><input id="cfgBotName" style="flex:1"></div>
+    <div class="row"><label style="width:140px">Port</label><input id="cfgPort" type="number" style="width:120px">
+    <label style="width:140px">Web port</label><input id="cfgWebPort" type="number" style="width:120px"></div>
+    <div class="row"><label style="width:140px">Owner password</label><input id="cfgOwnerPw" type="text" style="flex:1"></div>
+    <div class="row"><label style="width:140px">Language (0=EN)</label><input id="cfgLanguage" type="number" style="width:80px">
+    <label style="width:140px">Data dir</label><input id="cfgDataDir" style="flex:1"></div>
+    <div class="row">
+      <label><input type="checkbox" id="cfgWebEnabled"> Web enabled</label>
+      <label><input type="checkbox" id="cfgAllowReg"> Allow registration</label>
+      <label><input type="checkbox" id="cfgRoomsearch"> Room search (UDP)</label>
+    </div>
+    <div class="row" style="margin-top:8px"><button id="cfgSrvSave">Save</button><span id="cfgSrvMsg" class="muted"></span></div>
+    </div>`;
+}
+async function fillServerCfg(){
+  const c = await loadConfig();
+  const g2=(id)=>document.getElementById(id);
+  g2("cfgRoomName").value = c.room_name||"";
+  g2("cfgRoomTopic").value = c.room_topic||"";
+  g2("cfgBotName").value = c.bot_name||"";
+  g2("cfgPort").value = c.port||0;
+  g2("cfgWebPort").value = c.web_port||0;
+  g2("cfgOwnerPw").value = c.owner_password||"";
+  g2("cfgLanguage").value = c.language||0;
+  g2("cfgDataDir").value = c.data_dir||"";
+  g2("cfgWebEnabled").checked = !!c.web_enabled;
+  g2("cfgAllowReg").checked = !!c.allow_registration;
+  g2("cfgRoomsearch").checked = !!c.roomsearch;
+}
+async function saveServerCfg(){
+  const c = await loadConfig();
+  const g2=(id)=>document.getElementById(id);
+  c.room_name = g2("cfgRoomName").value;
+  c.room_topic = g2("cfgRoomTopic").value;
+  c.bot_name = g2("cfgBotName").value;
+  c.port = parseInt(g2("cfgPort").value)||0;
+  c.web_port = parseInt(g2("cfgWebPort").value)||0;
+  c.owner_password = g2("cfgOwnerPw").value;
+  c.language = parseInt(g2("cfgLanguage").value)||0;
+  c.data_dir = g2("cfgDataDir").value;
+  c.web_enabled = g2("cfgWebEnabled").checked;
+  c.allow_registration = g2("cfgAllowReg").checked;
+  c.roomsearch = g2("cfgRoomsearch").checked;
+  await postConfig(c, "cfgSrvMsg");
+}
+
+function renderLinking(){
+  return `<div class="card"><h2>Linking</h2>
+    <p class="muted">Requires a server restart to take effect. The Link Hub multiplexes on the main TCP port (no separate port).</p>
+    <div class="row"><label><input type="checkbox" id="cfgLinkHub"> Enable Link Hub</label></div>
+    <div class="row"><label style="width:140px">GUID</label><input id="cfgGuid" style="flex:1"></div>
+    <h3>Trusted leaves (Hub mode)</h3>
+    <p class="muted">Empty list = legacy mode (any leaf accepted, unencrypted). Add at least one to require matching credentials + AES encryption.</p>
+    <table id="cfgLeavesTbl"><thead><tr><th>Name (room_name)</th><th>GUID</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="row" style="margin-top:8px"><input id="cfgLeafName" placeholder="leaf room_name"><input id="cfgLeafGuid" placeholder="leaf guid" style="flex:1"><button id="cfgLeafAdd">Add</button></div>
+    <div class="row" style="margin-top:8px"><button id="cfgLinkSave">Save</button><span id="cfgLinkMsg" class="muted"></span></div>
+    </div>`;
+}
+function renderLeavesTable(leaves){
+  const tbody = document.querySelector("#cfgLeavesTbl tbody");
+  if(!tbody) return;
+  tbody.innerHTML = (leaves||[]).map((l,i)=>`<tr><td>${esc(l.name)}</td><td class="muted">${esc(l.guid)}</td>
+    <td><button class="danger" data-rmleaf="${i}">remove</button></td></tr>`).join("") || '<tr><td colspan=3 class=muted>none</td></tr>';
+  tbody.querySelectorAll("[data-rmleaf]").forEach(b=>b.onclick=async()=>{
+    const c = await loadConfig();
+    c.link_trusted_leaves = c.link_trusted_leaves||[];
+    c.link_trusted_leaves.splice(parseInt(b.dataset.rmleaf),1);
+    renderLeavesTable(c.link_trusted_leaves);
+  });
+}
+async function fillLinking(){
+  const c = await loadConfig();
+  document.getElementById("cfgLinkHub").checked = !!c.link_hub_enabled;
+  document.getElementById("cfgGuid").value = c.guid||"";
+  renderLeavesTable(c.link_trusted_leaves||[]);
+}
+async function saveLinking(){
+  const c = await loadConfig();
+  c.link_hub_enabled = document.getElementById("cfgLinkHub").checked;
+  c.guid = document.getElementById("cfgGuid").value;
+  await postConfig(c, "cfgLinkMsg");
+}
+
+function renderAdvanced(){
+  return `<div class="card"><h2>Advanced / Security</h2>
+    <p class="muted">Requires a server restart to take effect.</p>
+    <div class="grid">
+      <div class="row"><label>Max new conn/IP</label><input id="secMaxNew" type="number"></div>
+      <div class="row"><label>Conn window (s)</label><input id="secConnWindow" type="number"></div>
+      <div class="row"><label>Flood ban threshold</label><input id="secFloodThresh" type="number"></div>
+      <div class="row"><label>Flood ban (s)</label><input id="secFloodBan" type="number"></div>
+      <div class="row"><label>Max concurrent/IP</label><input id="secMaxConc" type="number"></div>
+      <div class="row"><label>Handshake timeout (s)</label><input id="secHandshake" type="number"></div>
+      <div class="row"><label>Idle timeout (s)</label><input id="secIdle" type="number"></div>
+      <div class="row"><label>Min name length</label><input id="secMinName" type="number"></div>
+      <div class="row"><label>Max name length</label><input id="secMaxName" type="number"></div>
+      <div class="row"><label>Max failed logins</label><input id="secMaxFailed" type="number"></div>
+      <div class="row"><label>Failed login window (s)</label><input id="secFailedWindow" type="number"></div>
+      <div class="row"><label>Failed login ban (s)</label><input id="secFailedBan" type="number"></div>
+    </div>
+    <div class="row"><label><input type="checkbox" id="secRejectSpam"> Reject spam bots</label></div>
+    <h3>Captcha</h3>
+    <div class="row"><label><input type="checkbox" id="secCaptchaEnabled"> Enabled</label>
+    <label>Expiration (s)</label><input id="secCaptchaExp" type="number">
+    <label>Max attempts</label><input id="secCaptchaAttempts" type="number"></div>
+    <div class="row" style="margin-top:8px"><button id="cfgAdvSave">Save</button><span id="cfgAdvMsg" class="muted"></span></div>
+    </div>`;
+}
+async function fillAdvanced(){
+  const c = await loadConfig();
+  const s = c.security || {};
+  const g2=(id)=>document.getElementById(id);
+  g2("secMaxNew").value = s.max_new_connections_per_ip ?? 10;
+  g2("secConnWindow").value = s.connection_window_secs ?? 60;
+  g2("secFloodThresh").value = s.connection_flood_ban_threshold ?? 3;
+  g2("secFloodBan").value = s.connection_flood_ban_secs ?? 300;
+  g2("secMaxConc").value = s.max_concurrent_per_ip ?? 5;
+  g2("secHandshake").value = s.handshake_timeout_secs ?? 15;
+  g2("secIdle").value = s.idle_timeout_secs ?? 1800;
+  g2("secMinName").value = s.min_name_length ?? 1;
+  g2("secMaxName").value = s.max_name_length ?? 30;
+  g2("secMaxFailed").value = s.max_failed_logins ?? 5;
+  g2("secFailedWindow").value = s.failed_login_window_secs ?? 3600;
+  g2("secFailedBan").value = s.failed_login_ban_secs ?? 3600;
+  g2("secRejectSpam").checked = !!s.reject_spam_bots;
+  g2("secCaptchaEnabled").checked = !!s.captcha_enabled;
+  g2("secCaptchaExp").value = s.captcha_expiration_secs ?? 300;
+  g2("secCaptchaAttempts").value = s.captcha_max_attempts ?? 3;
+}
+async function saveAdvanced(){
+  const c = await loadConfig();
+  c.security = c.security || {};
+  const s = c.security;
+  const g2=(id)=>document.getElementById(id);
+  s.max_new_connections_per_ip = parseInt(g2("secMaxNew").value)||0;
+  s.connection_window_secs = parseInt(g2("secConnWindow").value)||0;
+  s.connection_flood_ban_threshold = parseInt(g2("secFloodThresh").value)||0;
+  s.connection_flood_ban_secs = parseInt(g2("secFloodBan").value)||0;
+  s.max_concurrent_per_ip = parseInt(g2("secMaxConc").value)||0;
+  s.handshake_timeout_secs = parseInt(g2("secHandshake").value)||0;
+  s.idle_timeout_secs = parseInt(g2("secIdle").value)||0;
+  s.min_name_length = parseInt(g2("secMinName").value)||0;
+  s.max_name_length = parseInt(g2("secMaxName").value)||0;
+  s.max_failed_logins = parseInt(g2("secMaxFailed").value)||0;
+  s.failed_login_window_secs = parseInt(g2("secFailedWindow").value)||0;
+  s.failed_login_ban_secs = parseInt(g2("secFailedBan").value)||0;
+  s.reject_spam_bots = g2("secRejectSpam").checked;
+  s.captcha_enabled = g2("secCaptchaEnabled").checked;
+  s.captcha_expiration_secs = parseInt(g2("secCaptchaExp").value)||0;
+  s.captcha_max_attempts = parseInt(g2("secCaptchaAttempts").value)||0;
+  await postConfig(c, "cfgAdvMsg");
+}
+
+function renderProxy(){
+  const rows = (STATE.trustedProxies||[]).map(ip=>`<span class="pill">${esc(ip)} <a href="#" data-rmproxy="${esc(ip)}">✕</a></span>`).join(" ");
+  return `<div class="card"><h2>Trusted reverse proxies</h2>
+    <p class="muted">Loopback (127.0.0.1/::1) is always trusted. IPs listed here are allowed to set the real client IP via <code>X-Forwarded-For</code>/<code>X-Real-IP</code> headers (web/WebSocket clients only — native Ares TCP has no HTTP headers). Changes apply immediately.</p>
+    <div class="row">${rows||'<span class=muted>none</span>'}</div>
+    <div class="row" style="margin-top:8px"><input id="proxyIn" placeholder="1.2.3.4" style="flex:1"><button id="proxyAdd">Add</button></div></div>`;
+}
+
+function renderAvatars(){
+  return `<div class="card"><h2>Room avatar</h2>
+    <p class="muted">Sent to every Ares client on join; updates push live to everyone connected (native + web).</p>
+    <img id="avImgServer" style="width:90px;height:90px;object-fit:cover;border:1px solid var(--border);border-radius:6px;background:#000"><br>
+    <div class="row" style="margin-top:8px"><input type="file" id="avFileServer" accept="image/*">
+    <button id="avUpdateServer">Update</button><span id="avMsgServer" class="muted"></span></div></div>
+    <div class="card"><h2>Default avatar</h2>
+    <p class="muted">Assigned to native Ares clients that don't send their own avatar within 10s of connecting.</p>
+    <img id="avImgDefault" style="width:90px;height:90px;object-fit:cover;border:1px solid var(--border);border-radius:6px;background:#000"><br>
+    <div class="row" style="margin-top:8px"><input type="file" id="avFileDefault" accept="image/*">
+    <button id="avUpdateDefault">Update</button><span id="avMsgDefault" class="muted"></span></div></div>`;
+}
+async function loadAvatarPreview(kind){
+  const img = document.getElementById(kind==="server"?"avImgServer":"avImgDefault");
+  if(!img) return;
+  const r = await api("/admin/avatar/"+kind);
+  if(r.ok){ const blob = await r.blob(); img.src = URL.createObjectURL(blob); }
+}
+function fileToB64(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>resolve((reader.result||"").split(",")[1]||"");
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+async function uploadAvatar(kind, fileInputId, msgId){
+  const input = document.getElementById(fileInputId);
+  const msg = document.getElementById(msgId);
+  if(!input.files[0]){ msg.textContent="Choose a file first."; return; }
+  const b64 = await fileToB64(input.files[0]);
+  const r = await api("/admin/avatar", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({kind, data_b64:b64})});
+  if(r.ok){ msg.textContent="✓ Updated."; msg.style.color="var(--ok)"; await loadAvatarPreview(kind); }
+  else { const j = await r.json().catch(()=>({error:"error"})); msg.textContent="✕ "+(j.error||"error"); msg.style.color="var(--danger)"; }
+}
+
 function renderSettings(){
   return `<div class="card"><h2>Server configuration (astra.toml)</h2>
     <p class="muted">Edit the raw config. Changes are validated and written to the file.
@@ -375,6 +619,40 @@ function wire(){
   if(g("faddBtn"))g("faddBtn").onclick=()=>run(`/addfilter ${g("fpat").value} ${g("fact").value}`);
   if(g("cmdRun")){const runc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=runc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")runc();};}
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
+  document.querySelectorAll("[data-cmdlvl]").forEach(s=>s.onchange=()=>{ if(s.value) run(`/cmdlevel ${s.dataset.cmdlvl} ${s.value}`); });
+  document.querySelectorAll("[data-cmdreset]").forEach(b=>b.onclick=()=>run(`/cmdlevel ${b.dataset.cmdreset} reset`));
+  if(g("cfgSrvSave")){ fillServerCfg(); g("cfgSrvSave").onclick=saveServerCfg; }
+  if(g("cfgLinkSave")){
+    fillLinking();
+    g("cfgLinkSave").onclick=saveLinking;
+    g("cfgLeafAdd").onclick=async()=>{
+      const c = await loadConfig();
+      const name = g("cfgLeafName").value.trim(), guid = g("cfgLeafGuid").value.trim();
+      if(!name||!guid) return;
+      c.link_trusted_leaves = c.link_trusted_leaves||[];
+      c.link_trusted_leaves.push({name, guid});
+      renderLeavesTable(c.link_trusted_leaves);
+      g("cfgLeafName").value=""; g("cfgLeafGuid").value="";
+    };
+  }
+  if(g("cfgAdvSave")){ fillAdvanced(); g("cfgAdvSave").onclick=saveAdvanced; }
+  if(g("proxyAdd")){
+    g("proxyAdd").onclick=async()=>{
+      const ip=g("proxyIn").value.trim(); if(!ip) return;
+      await api("/admin/proxy/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ip})});
+      g("proxyIn").value=""; await refresh();
+    };
+  }
+  document.querySelectorAll("[data-rmproxy]").forEach(a=>a.onclick=async e=>{
+    e.preventDefault();
+    await api("/admin/proxy/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ip:a.dataset.rmproxy})});
+    await refresh();
+  });
+  if(g("avUpdateServer")){
+    loadAvatarPreview("server"); loadAvatarPreview("default");
+    g("avUpdateServer").onclick=()=>uploadAvatar("server","avFileServer","avMsgServer");
+    g("avUpdateDefault").onclick=()=>uploadAvatar("default","avFileDefault","avMsgDefault");
+  }
 }
 
 document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>{

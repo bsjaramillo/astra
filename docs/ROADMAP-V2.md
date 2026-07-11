@@ -476,6 +476,84 @@ avatar/pmsg de un usuario nativo ya conectado; un update de avatar en vivo
 (nativo→nativo, nativo→web, web→nativo) llega a todos sin reconectar. 18
 suites en verde, clippy limpio.
 
+### Panel de administración: paridad con las pantallas de sb0t — IMPLEMENTADO (2026-07-11)
+
+Pedido explícito: el panel web (`/admin`) solo tenía Dashboard/Users/Bans/
+Room/Filters/Accounts/Settings(TOML crudo)/Console, mientras que la GUI WPF
+de sb0t (`gui/MainWindow.xaml`) tenía 7 tabs (Main, Admin, Linking, Advanced,
+Proxy, Avatars, Plugins). Se pidió paridad completa, incluyendo dos
+funcionalidades que **no existían en absoluto** en Astra (proxy trust,
+avatares de sala/default) — confirmado explícitamente "todo junto, incluyendo
+backend nuevo". "Plugins/Extensions" y "Start/stop server" quedaron fuera:
+no aplican a la arquitectura de Astra (scripting JS embebido en archivos, no
+un instalador de plugins; no es una app de escritorio con botón de arranque).
+
+Seis pestañas nuevas, cada una con su propio nivel de "vivo" vs "requiere
+restart":
+
+- **Command Levels** (vivo, sin backend nuevo — ya existía de la tanda
+  anterior): tabla de todos los comandos gestionados por
+  `CommandLevelManager` con su nivel efectivo y un `<select>`/botón reset
+  por fila que reusa `/cmdlevel` (sin rutas HTTP nuevas). `state_json` ahora
+  incluye `commandLevels`.
+- **Server / Linking / Advanced** (requieren restart, igual que la pestaña
+  "Settings" de TOML crudo ya existente — son campos de `Settings`, cargado
+  una sola vez al arrancar): vistas estructuradas (inputs, no textarea) del
+  mismo `Settings`, vía dos funciones nuevas en `admin.rs`
+  (`settings_json`/`write_settings_json`, JSON en vez de TOML pero mismo
+  archivo/mismo `Settings::save`) y dos rutas nuevas
+  (`GET`/`POST /admin/config`). La pestaña TOML cruda queda intacta como
+  escape hatch — ambas leen/escriben el mismo archivo, así que son
+  consistentes entre sí.
+- **Proxy trust** (backend nuevo, 100% vivo — sin restart, paridad con sb0t
+  que también lee su lista en caliente desde el registro): nueva tabla
+  SQLite `trusted_proxies` + manager `server_core::proxy_trust::
+  TrustedProxyManager` (mismo patrón que `RoomFlags`), nuevo campo
+  `AppContext::trusted_proxies`. Confirmado en el C# de referencia
+  (`ib0tClient.ApplyForwardedIP`, `core/ib0t/ib0tClient.cs:949-970`) que el
+  trust de `X-Forwarded-For`/`X-Real-IP` **solo aplica al handshake WS/
+  ib0t** — el TCP Ares nativo no tiene headers HTTP y nunca se toca. Nueva
+  `resolve_client_ip` en `crates/web/src/ws.rs` (peer directo debe estar en
+  la lista, o ser loopback — siempre confiable — para que los headers
+  cuenten; `X-Real-IP` gana sobre el primer valor de `X-Forwarded-For`),
+  enhebrada como parámetro nuevo (`resolved_ip: IpAddr`) por
+  `handle_connection`/`ws_handshake_login` en `handler.rs`, reemplazando el
+  antiguo `let external_ip = peer.ip();`. Nuevas rutas
+  `/admin/proxy/add`/`/admin/proxy/remove`.
+- **Avatares** (backend nuevo, mayormente vivo): dos campos nuevos en
+  `AppContext` (`server_avatar`/`default_avatar`, cargados al arrancar desde
+  `<data_dir>/avatars/{server,default}` si existen — Astra no tiene GUI que
+  los persista como sb0t, así que se cargan de archivo en vez de en el
+  registro/GUI). Confirmado en `core/Avatars.cs` de sb0t: el avatar de sala
+  se manda a todo Ares nativo en cada login (`TCPProcessor.cs:902/959`) y se
+  empuja en vivo a todos cuando se actualiza (mismo patrón que ya usábamos
+  para avatares de usuario); el avatar default es un timer que cada ~2s
+  asigna el avatar default a cualquier Ares nativo con >10s conectado sin
+  haber mandado el suyo (`Avatars.CheckAvatars`), solo para clientes nativos
+  (no web). Portado: nuevo campo `AresUser::avatar_received` (reusa
+  `join_time`, que ya existía, para el chequeo de los 10s — no hizo falta
+  agregar otro timestamp), nueva task periódica en `main.rs` (mismo patrón
+  que el FastPing existente), `send_initial_state` (tcp_handler.rs) y el
+  estado inicial WS (`handler.rs`) ahora mandan el avatar del bot si hay
+  uno configurado. Simplificación deliberada: sin reescalar a 48x48/JPEG-69
+  como sb0t (evita sumar la dependencia `image`); en su lugar, un tope de
+  64 KiB en la subida. Nuevas rutas `POST /admin/avatar` y
+  `GET /admin/avatar/{server,default}` (bytes crudos, Content-Type
+  adivinado por magic bytes).
+
+Verificado E2E contra un binario real: cambiar un nivel de comando desde el
+panel se refleja al instante; `GET`/`POST /admin/config` mantiene
+consistencia con el editor TOML crudo; agregar una IP a la lista de proxies
+confiables y mandar `X-Forwarded-For` con IPs distintas en conexiones WS
+consecutivas desde el mismo loopback demuestra que cada una se trata como
+un cliente distinto (sin choque de anti-join-flood); subir un avatar de
+sala se ve reflejado tanto en el `USERINFO` del bot para clientes web como
+en un paquete `Avatar` binario para un cliente Ares nativo crudo en su
+login; un cliente nativo que no manda su propio avatar recibe el avatar
+default a los ~10s y se difunde en vivo. 18 suites en verde (133 tests en
+`server-core`, +5 nuevos: 3 de `TrustedProxyManager` + validaciones ya
+cubiertas), clippy limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

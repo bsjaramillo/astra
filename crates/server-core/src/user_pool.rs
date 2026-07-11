@@ -136,6 +136,11 @@ pub struct AresUser {
     pub avatar: parking_lot::Mutex<Option<Vec<u8>>>,
     /// Full avatar.
     pub full_avatar: parking_lot::Mutex<Option<Vec<u8>>>,
+    /// ¿Ya mandó su propio avatar (o se le asignó el default)? Paridad
+    /// `AresClient.AvatarReceived` de sb0t — evita que el timer de avatar
+    /// default (`Avatars.CheckAvatars`) pise un avatar ya recibido/limpiado
+    /// intencionalmente.
+    pub avatar_received: AtomicBool,
     /// Link.
     pub link: ILink,
     /// Join time (ms epoch).
@@ -222,6 +227,7 @@ impl AresUser {
             personal_message: parking_lot::Mutex::new(String::new()),
             avatar: parking_lot::Mutex::new(None),
             full_avatar: parking_lot::Mutex::new(None),
+            avatar_received: AtomicBool::new(false),
             link: ILink::default(),
             join_time: now,
             last_scribble: 0,

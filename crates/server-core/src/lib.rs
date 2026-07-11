@@ -99,9 +99,13 @@ pub mod custom_data;
 /// Niveles de permiso configurables por comando (`/cmdlevel`).
 pub mod command_levels;
 
+/// Lista de proxies reversos confiables (panel Proxy).
+pub mod proxy_trust;
+
 /// Re-exports comunes.
 pub use app::{admin_action, AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
 pub use command_levels::CommandLevelManager;
+pub use proxy_trust::TrustedProxyManager;
 pub use greets::{GreetContext, GreetManager};
 pub use geoip::GeoIp;
 pub use ip_bans::{AsnBanManager, RangeBanManager};

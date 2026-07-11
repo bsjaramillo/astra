@@ -121,8 +121,45 @@ async fn handle_ws_connection(
     stream.write_all(response.as_bytes()).await?;
     debug!("WS handshake completado con {}", peer);
 
-    // 5) Pasar al modo WebSocket
-    handle_connection(ctx, stream, peer).await
+    // 5) Pasar al modo WebSocket. Si `peer` es un reverse proxy confiable
+    // (paridad `ib0tClient.ApplyForwardedIP` de sb0t), resolvemos la IP real
+    // del cliente desde `X-Real-IP`/`X-Forwarded-For` acá — es el único
+    // punto donde tenemos los headers HTTP del handshake.
+    let resolved_ip = resolve_client_ip(&ctx, peer.ip(), &request.headers);
+    handle_connection(ctx, stream, peer, resolved_ip).await
+}
+
+/// Resuelve la IP "real" de un cliente WS, confiando en `X-Real-IP`/
+/// `X-Forwarded-For` solo si el peer directo (`peer_ip`) está en la lista
+/// de proxies confiables (o es loopback). Si no se confía, o los headers
+/// no están/no parsean, retorna `peer_ip` sin cambios.
+///
+/// Paridad `ib0tClient.ApplyForwardedIP` de sb0t: `X-Real-IP` gana si está
+/// presente y parsea; si no, se usa el primer valor (el más a la izquierda,
+/// el cliente original) de `X-Forwarded-For`.
+fn resolve_client_ip(
+    ctx: &AppContext,
+    peer_ip: std::net::IpAddr,
+    headers: &[(String, String)],
+) -> std::net::IpAddr {
+    if !ctx.trusted_proxies.is_trusted(peer_ip) {
+        return peer_ip;
+    }
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+    if let Some(real) = header("x-real-ip").and_then(|v| v.trim().parse::<std::net::IpAddr>().ok()) {
+        return real;
+    }
+    if let Some(xff) = header("x-forwarded-for") {
+        if let Some(first) = xff.split(',').next().and_then(|s| s.trim().parse::<std::net::IpAddr>().ok()) {
+            return first;
+        }
+    }
+    peer_ip
 }
 
 /// Lee un HTTP request completo (headers + body si hay Content-Length).
@@ -300,6 +337,58 @@ async fn handle_admin_route(
                 }
             }
         }
+        ("GET", "/admin/config") => {
+            let json = crate::admin::settings_json(ctx);
+            send_http_json(stream, 200, &json).await?;
+        }
+        (m, "/admin/config") if m.eq_ignore_ascii_case("POST") => {
+            match crate::admin::write_settings_json(ctx, &req.body) {
+                Ok(()) => send_http_json(stream, 200, "{\"ok\":true}").await?,
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
+        (m, "/admin/proxy/add") if m.eq_ignore_ascii_case("POST") => {
+            let ip = json_field(&req.body, "ip").unwrap_or_default();
+            let body = format!("{{\"ok\":{}}}", crate::admin::add_trusted_proxy(ctx, &ip));
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/proxy/remove") if m.eq_ignore_ascii_case("POST") => {
+            let ip = json_field(&req.body, "ip").unwrap_or_default();
+            let body = format!("{{\"ok\":{}}}", crate::admin::remove_trusted_proxy(ctx, &ip));
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/avatar") if m.eq_ignore_ascii_case("POST") => {
+            let kind = json_field(&req.body, "kind").unwrap_or_default();
+            let data_b64 = json_field(&req.body, "data_b64").unwrap_or_default();
+            use base64::Engine as _;
+            match base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes()) {
+                Ok(bytes) => match crate::admin::set_avatar(ctx, &kind, bytes) {
+                    Ok(()) => send_http_json(stream, 200, "{\"ok\":true}").await?,
+                    Err(e) => {
+                        let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                        send_http_json(stream, 400, &body).await?;
+                    }
+                },
+                Err(_) => {
+                    send_http_json(stream, 400, "{\"error\":\"invalid base64\"}").await?;
+                }
+            }
+        }
+        ("GET", "/admin/avatar/server") => {
+            match crate::admin::get_avatar_bytes(ctx, "server") {
+                Some(bytes) => send_http_bytes(stream, 200, &bytes).await?,
+                None => send_http_bytes(stream, 404, b"").await?,
+            }
+        }
+        ("GET", "/admin/avatar/default") => {
+            match crate::admin::get_avatar_bytes(ctx, "default") {
+                Some(bytes) => send_http_bytes(stream, 200, &bytes).await?,
+                None => send_http_bytes(stream, 404, b"").await?,
+            }
+        }
         _ => {
             send_http_json(stream, 404, "{\"error\":\"not found\"}").await?;
         }
@@ -377,6 +466,36 @@ async fn send_http_error(
         code, msg, msg.len(), msg
     );
     stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+/// Responde 200 OK con bytes crudos (imagen), adivinando el Content-Type
+/// por los magic bytes. Usado para servir avatares (`GET /admin/avatar/*`).
+async fn send_http_bytes(stream: &mut TcpStream, code: u16, bytes: &[u8]) -> anyhow::Result<()> {
+    let (status, content_type): (&str, &str) = if code != 200 {
+        ("404 Not Found", "text/plain")
+    } else if bytes.starts_with(b"\x89PNG") {
+        ("200 OK", "image/png")
+    } else if bytes.starts_with(b"\xFF\xD8") {
+        ("200 OK", "image/jpeg")
+    } else {
+        ("200 OK", "application/octet-stream")
+    };
+    let header = format!(
+        "HTTP/1.1 {}\r\n\
+         Content-Type: {}\r\n\
+         Content-Length: {}\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Connection: close\r\n\
+         \r\n",
+        status,
+        content_type,
+        bytes.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    if code == 200 {
+        stream.write_all(bytes).await?;
+    }
     Ok(())
 }
 

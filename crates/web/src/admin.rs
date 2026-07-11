@@ -306,8 +306,143 @@ pub fn state_json(ctx: &AppContext) -> String {
     }
     s.push(']');
 
+    // command levels
+    s.push_str(",\"commandLevels\":[");
+    for (i, (name, level, is_override)) in ctx.command_levels.list().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let lvl = *level as u8;
+        write!(
+            s,
+            "{{\"name\":\"{}\",\"level\":{},\"levelName\":\"{}\",\"isOverride\":{}}}",
+            esc(name),
+            lvl,
+            level_name(lvl),
+            is_override
+        )
+        .ok();
+    }
+    s.push(']');
+
+    // trusted proxies
+    s.push_str(",\"trustedProxies\":[");
+    for (i, ip) in ctx.trusted_proxies.list().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        write!(s, "\"{}\"", esc(ip)).ok();
+    }
+    s.push(']');
+
     s.push('}');
     s
+}
+
+/// Snapshot JSON de `Settings` completo (para las pestañas estructuradas de
+/// configuración: Server/Linking/Advanced). A diferencia de
+/// [`read_settings`]/[`write_settings`] (editor TOML crudo), este par usa
+/// JSON para que el panel pueda editar campos individuales sin tocar texto
+/// libre. Misma fuente de verdad: lee/escribe el mismo archivo via
+/// `ctx.config_path()`, reusando `Settings::save`.
+pub fn settings_json(ctx: &AppContext) -> String {
+    let settings: server_core::settings::Settings = match ctx.config_path() {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str(&text).unwrap_or_else(|_| (*ctx.settings).clone()),
+            Err(_) => (*ctx.settings).clone(),
+        },
+        None => (*ctx.settings).clone(),
+    };
+    serde_json::to_string(&settings).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Parsea y persiste un `Settings` completo enviado como JSON. Retorna
+/// error de validación (sin escribir nada) si el JSON no calza con
+/// `Settings`, o si no hay `config_path` configurado.
+pub fn write_settings_json(ctx: &AppContext, json: &str) -> Result<(), String> {
+    let settings: server_core::settings::Settings =
+        serde_json::from_str(json).map_err(|e| format!("invalid settings: {}", e))?;
+    let path = ctx
+        .config_path()
+        .ok_or_else(|| "no config file path configured (started without --config)".to_string())?;
+    settings.save(&path).map_err(|e| format!("write failed: {}", e))
+}
+
+/// Agrega una IP a la lista de proxies confiables (panel Proxy). Retorna
+/// `false` si la IP no parsea.
+pub fn add_trusted_proxy(ctx: &AppContext, ip: &str) -> bool {
+    ctx.trusted_proxies.add(ip)
+}
+
+/// Quita una IP de la lista de proxies confiables. Retorna `false` si no
+/// existía.
+pub fn remove_trusted_proxy(ctx: &AppContext, ip: &str) -> bool {
+    ctx.trusted_proxies.remove(ip)
+}
+
+/// Kinds válidos de avatar administrable (sala/default).
+const AVATAR_KINDS: &[&str] = &["server", "default"];
+/// Tamaño máximo aceptado para un avatar subido (64 KiB). sb0t reescala a
+/// 48x48/JPEG-q69 en el cliente GUI; acá no reescalamos (evita sumar una
+/// dependencia de procesamiento de imágenes), así que en su lugar ponemos
+/// un techo de tamaño para no dejar subir archivos gigantes.
+const MAX_AVATAR_BYTES: usize = 65_536;
+
+/// Sube (o reemplaza) el avatar de sala (`"server"`) o el avatar default
+/// (`"default"`). Persiste en `<data_dir>/avatars/{kind}`, actualiza el
+/// estado en memoria, y si es el avatar de sala lo difunde en vivo a todos
+/// los conectados (paridad `Avatars.UpdateServerAvatar`, que también
+/// empuja de inmediato a todo `AUsers`/`WUsers`).
+pub fn set_avatar(ctx: &AppContext, kind: &str, bytes: Vec<u8>) -> Result<(), String> {
+    if !AVATAR_KINDS.contains(&kind) {
+        return Err(format!("invalid avatar kind: '{}' (expected server|default)", kind));
+    }
+    if bytes.len() > MAX_AVATAR_BYTES {
+        return Err(format!("avatar too large ({} bytes, max {})", bytes.len(), MAX_AVATAR_BYTES));
+    }
+    let dir = std::path::Path::new(&ctx.settings.data_dir).join("avatars");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
+    std::fs::write(dir.join(kind), &bytes).map_err(|e| format!("write failed: {}", e))?;
+
+    let lock = if kind == "server" { &ctx.server_avatar } else { &ctx.default_avatar };
+    *lock.write() = Some(bytes.clone());
+
+    if kind == "server" {
+        broadcast_server_avatar(ctx, &bytes);
+    }
+    Ok(())
+}
+
+/// Difunde el avatar de sala actualizado a todos los usuarios conectados:
+/// paquete binario `Avatar` para clientes Ares nativos, ident `AVATAR:` de
+/// texto para clientes web/inbizier.
+fn broadcast_server_avatar(ctx: &AppContext, bytes: &[u8]) {
+    use base64::Engine as _;
+    let bot_name = &ctx.settings.bot_name;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    for u in ctx.user_pool.users() {
+        if !u.logged_in {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            if u.inbizier_web || u.inbizier_mobile {
+                let _ = tx.send(crate::protocol::build_avatar(bot_name, &b64));
+            }
+        } else {
+            let _ = u.send(server_core::outbound::build_avatar_c(bot_name, bytes, u.ares_crypto));
+        }
+    }
+}
+
+/// Lee los bytes actuales del avatar de sala/default (para
+/// `GET /admin/avatar/{kind}`). Retorna `None` si el kind es inválido o no
+/// hay avatar configurado.
+pub fn get_avatar_bytes(ctx: &AppContext, kind: &str) -> Option<Vec<u8>> {
+    match kind {
+        "server" => ctx.server_avatar.read().clone(),
+        "default" => ctx.default_avatar.read().clone(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
