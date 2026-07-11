@@ -1,0 +1,23 @@
+<svg width="980" height="320" viewBox="0 0 980 320" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Astra" style="color:#141a2e">
+  <defs>
+    <linearGradient id="wtile" x1="72" y1="48" x2="440" y2="464" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff9a3d"/>
+      <stop offset="1" stop-color="#ff5e00"/>
+    </linearGradient>
+  </defs>
+  <!-- Icono -->
+  <g transform="translate(28,44) scale(0.453)">
+    <rect x="40" y="40" width="432" height="432" rx="112" fill="url(#wtile)"/>
+    <g stroke="#ffffff" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <path d="M164 392 L256 200 L348 392"/>
+      <path d="M198 330 L314 330" stroke-width="40"/>
+    </g>
+    <path d="M256 114 Q260.7 135.3 282 140 Q260.7 144.7 256 166 Q251.3 144.7 230 140 Q251.3 135.3 256 114 Z" fill="#ffffff"/>
+  </g>
+  <!-- Wordmark. Nota: usa una tipografía del sistema; para el logo definitivo
+       conviene convertir el texto a curvas en un editor vectorial. -->
+  <text x="300" y="216" font-family="'Segoe UI',system-ui,-apple-system,Helvetica,Arial,sans-serif"
+        font-size="176" font-weight="800" letter-spacing="-4" fill="currentColor">astra</text>
+  <!-- chispa de acento tras la palabra -->
+  <path d="M872 96 Q878 122 904 128 Q878 134 872 160 Q866 134 840 128 Q866 122 872 96 Z" fill="#ff6a12"/>
+</svg>

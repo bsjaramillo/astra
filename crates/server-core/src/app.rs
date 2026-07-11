@@ -1,5 +1,12 @@
 //! Contexto global de la aplicación: configuración, estado, DB y ciclo de vida.
 
+/// Logo de Astra (variante "Principal", tile naranja) usado como avatar de
+/// sala/bot por defecto si el admin no subió uno propio. PNG 256×256.
+pub const DEFAULT_ROOM_AVATAR: &[u8] = include_bytes!("../assets/room_avatar.png");
+/// Logo de Astra (variante "Espacial", fondo oscuro) usado como avatar por
+/// defecto de los usuarios que no mandan el suyo. PNG 256×256.
+pub const DEFAULT_USER_AVATAR: &[u8] = include_bytes!("../assets/default_avatar.png");
+
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -446,8 +453,17 @@ impl AppContext {
         let trusted_proxies = Arc::new(TrustedProxyManager::new(db.clone()));
         let ip_autologins = Arc::new(IpAutologinManager::new(db.clone()));
         let avatars_dir = std::path::Path::new(&settings.data_dir).join("avatars");
-        let server_avatar = RwLock::new(std::fs::read(avatars_dir.join("server")).ok());
-        let default_avatar = RwLock::new(std::fs::read(avatars_dir.join("default")).ok());
+        // Si el admin no subió un avatar propio, se usa el logo de Astra como
+        // default: la variante naranja ("Principal") para el bot/sala y la
+        // variante espacial para los usuarios sin avatar.
+        let server_avatar = RwLock::new(Some(
+            std::fs::read(avatars_dir.join("server"))
+                .unwrap_or_else(|_| DEFAULT_ROOM_AVATAR.to_vec()),
+        ));
+        let default_avatar = RwLock::new(Some(
+            std::fs::read(avatars_dir.join("default"))
+                .unwrap_or_else(|_| DEFAULT_USER_AVATAR.to_vec()),
+        ));
         let geoip = Arc::new(GeoIp::load(std::path::Path::new(&settings.data_dir)));
         let (link_events, _) = broadcast::channel(1024);
         Self {

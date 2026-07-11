@@ -171,7 +171,8 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
 
   header{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:9px;padding:9px 12px;padding-top:calc(9px + env(safe-area-inset-top));background:rgba(23,26,33,.94);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
   .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px}
-  .logo{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--acc),#ff9d4d);color:#241100;display:flex;align-items:center;justify-content:center;font-weight:800;flex:none}
+  .logo{width:28px;height:28px;border-radius:8px;background:linear-gradient(147deg,#ff9a3d,#ff5e00);display:flex;align-items:center;justify-content:center;flex:none}
+  .logo svg{width:68%;height:68%;color:#fff;display:block}
   .hstats{color:var(--mut);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
   .spacer{flex:1}
   .only-desktop{display:none}
@@ -270,9 +271,15 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
 </head>
 <body>
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="astramark" viewBox="0 0 512 512">
+  <g stroke="currentColor" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M164 392 L256 200 L348 392"/><path d="M198 330 L314 330" stroke-width="40"/></g>
+  <path d="M256 114 Q260.7 135.3 282 140 Q260.7 144.7 256 166 Q251.3 144.7 230 140 Q251.3 135.3 256 114 Z" fill="currentColor"/>
+</symbol></svg>
+
 <div id="login">
   <div class="logincard">
-    <div class="logo">A</div>
+    <div class="logo"><svg viewBox="0 0 512 512"><use href="#astramark"/></svg></div>
     <h2 id="loginTitle">Panel de Astra</h2>
     <p class="sub" id="loginSub">Ingresá la contraseña de dueño para administrar tu sala.</p>
     <input id="pw" type="password" placeholder="Contraseña de dueño" autofocus>
@@ -287,7 +294,7 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
 <div id="app" class="hidden">
 <header>
   <button id="menuBtn" class="iconbtn only-mobile" aria-label="Menu">☰</button>
-  <div class="brand"><span class="logo">A</span><span class="only-desktop">Astra</span></div>
+  <div class="brand"><span class="logo"><svg viewBox="0 0 512 512"><use href="#astramark"/></svg></span><span class="only-desktop">Astra</span></div>
   <div class="hstats" id="hdrStat">…</div>
   <div class="spacer"></div>
   <button id="langBtn" class="btn ghost sm" title="Idioma / Language">ES</button>
@@ -651,6 +658,16 @@ async function cmd(line) {
 function esc(s){return (s==null?"":""+s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 function lvlClass(l){return l>=100?"owner":l>=80?"admin":l>=50?"mod":l>=2?"voice":"";}
 function fmtUptime(sec){const d=Math.floor(sec/86400),h=Math.floor(sec/3600)%24,m=Math.floor(sec/60)%60;return (d?d+"d ":"")+h+"h "+m+"m";}
+
+// ¿El usuario está escribiendo en algún campo de la vista? El re-render del
+// auto-refresh destruye el DOM (borra lo tipeado y saca el foco), así que el
+// poll se saltea mientras haya un input/textarea/select enfocado en #view.
+function isEditingView(){
+  const a=document.activeElement; if(!a) return false;
+  if(!/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return false;
+  const v=document.getElementById("view");
+  return !!(v && v.contains(a));
+}
 
 function toast(msg, kind){
   if(!msg) return;
@@ -1173,7 +1190,7 @@ async function enterApp(){
   document.getElementById("app").classList.remove("hidden");
   buildNav();
   await refresh();
-  if(!window._poll) window._poll=setInterval(()=>{ if(!STATIC.has(TAB)) refresh(); }, 5000);
+  if(!window._poll) window._poll=setInterval(()=>{ if(!STATIC.has(TAB) && !isEditingView()) refresh(); }, 5000);
 }
 async function login(){
   const pw=document.getElementById("pw").value;

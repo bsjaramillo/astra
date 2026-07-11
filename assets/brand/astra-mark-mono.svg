@@ -1,0 +1,8 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Astra">
+  <!-- Marca monocromática: hereda el color vía currentColor. -->
+  <g stroke="currentColor" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M164 392 L256 200 L348 392"/>
+    <path d="M198 330 L314 330" stroke-width="40"/>
+  </g>
+  <path d="M256 114 Q260.7 135.3 282 140 Q260.7 144.7 256 166 Q251.3 144.7 230 140 Q251.3 135.3 256 114 Z" fill="currentColor"/>
+</svg>

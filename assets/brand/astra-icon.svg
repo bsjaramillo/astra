@@ -1,0 +1,19 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Astra">
+  <defs>
+    <linearGradient id="tile" x1="72" y1="48" x2="440" y2="464" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff9a3d"/>
+      <stop offset="1" stop-color="#ff5e00"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="256" y1="40" x2="256" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity=".20"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="40" y="40" width="432" height="432" rx="112" fill="url(#tile)"/>
+  <rect x="40" y="40" width="432" height="432" rx="112" fill="url(#sheen)"/>
+  <g stroke="#ffffff" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M164 392 L256 200 L348 392"/>
+    <path d="M198 330 L314 330" stroke-width="40"/>
+  </g>
+  <path d="M256 114 Q260.7 135.3 282 140 Q260.7 144.7 256 166 Q251.3 144.7 230 140 Q251.3 135.3 256 114 Z" fill="#ffffff"/>
+</svg>
