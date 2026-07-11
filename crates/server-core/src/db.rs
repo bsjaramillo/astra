@@ -230,6 +230,11 @@ impl Database {
                 PRIMARY KEY (kind, pattern)
             );
 
+            CREATE TABLE IF NOT EXISTS command_levels (
+                command TEXT NOT NULL PRIMARY KEY,
+                level INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -1081,6 +1086,42 @@ impl Database {
         let mut stmt = conn.prepare("SELECT key, value FROM room_flags")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ========================================================================
+    // Command levels (overrides de nivel por comando, `/cmdlevel`)
+    // ========================================================================
+
+    /// Setea (upsert) el nivel override de un comando.
+    pub fn set_command_level(&self, command: &str, level: u8) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO command_levels (command, level) VALUES (?1, ?2) \
+             ON CONFLICT(command) DO UPDATE SET level = ?2",
+            params![command, level as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Elimina el override de un comando (revierte a su default en código).
+    pub fn remove_command_level(&self, command: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM command_levels WHERE command = ?1", params![command])?;
+        Ok(n > 0)
+    }
+
+    /// Lee todos los overrides de nivel de comando persistidos.
+    pub fn list_command_levels(&self) -> DbResult<Vec<(String, u8)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT command, level FROM command_levels")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u8))
         })?;
         let mut out = Vec::new();
         for r in rows {

@@ -51,6 +51,7 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/login <password> - log into your account",
     "/grant <nick> <level> - set user level",
     "/revoke <nick> - reset user to regular",
+    "/cmdlevel <command> [level|reset] - view or set a command's required level (owner)",
     "/greets [on|off] - toggle or show greet status",
     "/addgreet <text> - add a greeting (placeholders +n +ip +uc +rn ...)",
     "/remgreet <index> - remove greeting by index",
@@ -191,6 +192,17 @@ pub fn dispatch_builtin(
     {
         send_system_line(ctx, user, "Admin commands are currently disabled.");
         return (true, vec![]);
+    }
+
+    // Gate centralizado y configurable por comando (paridad con el sistema
+    // de `[CommandLevel]` + registro de sb0t). Solo aplica a comandos
+    // gestionados por `CommandLevelManager`; los demás (p.ej. registrados
+    // por scripts) no se ven afectados.
+    if let Some(required) = ctx.command_levels.get(&cmd) {
+        if !has_level(user, required) {
+            send_system_line(ctx, user, access_denied_text(required));
+            return (true, vec![]);
+        }
     }
 
     match cmd.as_str() {
@@ -386,6 +398,10 @@ pub fn dispatch_builtin(
                 None => vec![],
             };
             (true, events)
+        }
+        "cmdlevel" => {
+            handle_cmdlevel(ctx, user, args);
+            (true, vec![])
         }
         "greets" => {
             handle_greets(ctx, user, args);
@@ -782,8 +798,28 @@ fn is_user_command(cmd: &str) -> bool {
     )
 }
 
+/// Extrae el nombre de comando al inicio de una línea de `DEFAULT_HELP_LINES`
+/// (ej. `"/ban <nick> - ..."` → `Some("ban")`). Retorna `None` para líneas
+/// que no describen un comando (ej. el encabezado `"Available commands:"`).
+fn help_line_command(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('/')?;
+    let end = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
+    if end == 0 {
+        None
+    } else {
+        Some(&rest[..end])
+    }
+}
+
 fn handle_help(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     for line in DEFAULT_HELP_LINES {
+        if let Some(name) = help_line_command(line) {
+            if let Some(required) = ctx.command_levels.get(name) {
+                if !has_level(user, required) {
+                    continue;
+                }
+            }
+        }
         send_system_line(ctx, user, line);
     }
     // Agregar líneas registradas por scripts vía `Help_addLine(cmd, line)`.
@@ -1565,6 +1601,74 @@ fn handle_revoke(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<S
     }
 }
 
+/// `/cmdlevel [name] [level|reset]` — ver o configurar el nivel mínimo
+/// requerido por un comando gestionado. Equivalente a la GUI de
+/// `gui/CommandManager.cs` de sb0t (registro de Windows); Astra no tiene
+/// GUI, así que esto se expone como comando in-room, gateado a Owner porque
+/// permite reconfigurar los demás gates (evita auto-escalado por un Admin).
+fn handle_cmdlevel(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let rest = parts.next().unwrap_or("").trim();
+
+    if name.is_empty() {
+        send_system_line(ctx, user, "Usage: /cmdlevel <command> [level|reset]");
+        let overridden: Vec<String> = ctx
+            .command_levels
+            .list()
+            .into_iter()
+            .filter(|(_, _, is_override)| *is_override)
+            .map(|(cmd, level, _)| format!("{}={}", cmd, level_name(level)))
+            .collect();
+        if overridden.is_empty() {
+            send_system_line(ctx, user, "No command levels are overridden (all at default).");
+        } else {
+            send_system_line(ctx, user, &format!("Overridden: {}", overridden.join(", ")));
+        }
+        return;
+    }
+
+    if !server_core::CommandLevelManager::is_managed(&name) {
+        send_system_line(ctx, user, &format!("'{}' is not a managed command.", name));
+        return;
+    }
+
+    if rest.is_empty() {
+        let current = ctx.command_levels.get(&name).unwrap_or(ILevel::Regular);
+        let default = server_core::CommandLevelManager::default_level(&name).unwrap_or(ILevel::Regular);
+        if current == default {
+            send_system_line(ctx, user, &format!("/{}: {} (default).", name, level_name(current)));
+        } else {
+            send_system_line(
+                ctx,
+                user,
+                &format!("/{}: {} (default {}).", name, level_name(current), level_name(default)),
+            );
+        }
+        return;
+    }
+
+    if rest.eq_ignore_ascii_case("reset") {
+        if ctx.command_levels.reset(&name) {
+            send_system_line(ctx, user, &format!("/{} reset to its default level.", name));
+        } else {
+            send_system_line(ctx, user, &format!("/{} was already at its default.", name));
+        }
+        return;
+    }
+
+    let Some(level) = parse_level(rest) else {
+        send_system_line(
+            ctx,
+            user,
+            "Usage: /cmdlevel <command> <regular|voice|moderator|admin|owner|reset>",
+        );
+        return;
+    };
+    ctx.command_levels.set(&name, level);
+    send_system_line(ctx, user, &format!("/{} now requires {}+.", name, level_name(level)));
+}
+
 /// Aplica un nivel a `target`: actualiza el nivel en vivo, persiste en la
 /// cuenta si existe, envía OpChange y notifica. Retorna `true` si cambió.
 fn apply_level(
@@ -1655,7 +1759,26 @@ fn level_name(level: ILevel) -> &'static str {
 }
 
 fn has_level(user: &AresUser, min: ILevel) -> bool {
-    (*user.level.read() as u8) >= min as u8
+    // Todo usuario conectado se trata como Regular como mínimo aunque su
+    // `level` en memoria siga en `Anonymous` (el valor default de
+    // `AresUser::new`, paridad de "sin nivel asignado aún"): de lo
+    // contrario, los comandos gateados a Regular (la mayoría de los
+    // comandos de autoservicio) quedarían inaccesibles para cualquier
+    // usuario que no haya recibido explícitamente un nivel.
+    let level = (*user.level.read() as u8).max(ILevel::Regular as u8);
+    level >= min as u8
+}
+
+/// Texto de rechazo para el gate centralizado por comando, en el mismo
+/// estilo que los mensajes que ya usaban los handlers individuales.
+fn access_denied_text(required: ILevel) -> &'static str {
+    match required {
+        ILevel::Owner => "Access denied. Owner required.",
+        ILevel::Admin => "Access denied. Admin+ required.",
+        ILevel::Moderator => "Access denied. Moderator+ required.",
+        ILevel::Voice => "Access denied. Voice+ required.",
+        _ => "Access denied.",
+    }
 }
 
 /// Propaga una acción `host*` a los servidores enlazados (si hay link activo).
@@ -3427,18 +3550,32 @@ mod tests {
 
     #[test]
     fn builtin_help_sends_lines() {
+        // Un usuario Regular no debe ver comandos Moderator+/Admin+/Owner
+        // (ver `handle_help`); solo el owner ve la lista completa.
         let ctx = make_test_ctx();
-        let (user, mut rx) = make_test_user(1, "Alice");
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
 
-        let (handled, _) = dispatch_builtin(&ctx, &user, "help", "");
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "help", "");
         assert!(handled);
+        let mut lines = Vec::new();
+        while let Ok(pkt) = alice_rx.try_recv() {
+            lines.push(decode_pvt(pkt).1);
+        }
+        assert!(lines.contains(&"/help - show this help".to_string()));
+        assert!(lines.contains(&"/nick <name> - change your nickname".to_string()));
+        assert!(!lines.iter().any(|l| l.starts_with("/ban ")), "Regular no debe ver /ban");
+        assert!(lines.len() < DEFAULT_HELP_LINES.len(), "debe filtrar al menos una línea");
 
+        let (owner, mut owner_rx) = make_test_user(2, "Owner");
+        *owner.level.write() = ILevel::Owner;
+        let (handled, _) = dispatch_builtin(&ctx, &owner, "help", "");
+        assert!(handled);
         for expected in DEFAULT_HELP_LINES {
-            let pkt = rx.try_recv().expect("expected help line");
+            let pkt = owner_rx.try_recv().expect("expected help line for owner");
             let (_from, text) = decode_pvt(pkt);
             assert_eq!(&text, expected);
         }
-        assert!(rx.try_recv().is_err(), "no extra lines expected");
+        assert!(owner_rx.try_recv().is_err(), "no extra lines expected");
     }
 
     #[test]
@@ -4394,10 +4531,11 @@ mod tests {
         let (bob, _bob_rx) = make_test_user(2, "Bob");
         ctx.user_pool.add(bob.clone());
 
-        // Admin no alcanza el gate Host (Owner).
+        // Admin no alcanza el gate Owner (ahora aplicado centralizadamente
+        // por `command_levels` antes de llegar a `require_host`).
         let (handled, _) = dispatch_builtin(&ctx, &admin, "hostban", "Bob");
         assert!(handled);
-        assert!(next_pvt_text(&mut admin_rx).contains("Host (Owner) required"));
+        assert!(next_pvt_text(&mut admin_rx).contains("Owner required"));
 
         // Como Owner, hostban banea a Bob.
         *admin.level.write() = ILevel::Owner;

@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 use super::accounts::AccountManager;
 use super::bans::BanSystem;
 use super::captcha::CaptchaManager;
+use super::command_levels::CommandLevelManager;
 use super::custom_data::CustomDataStore;
 use super::db::Database;
 use super::greets::GreetManager;
@@ -330,6 +331,8 @@ pub struct AppContext {
     pub join_filters: Arc<NameFilterManager>,
     /// Filtros de nombres de archivo (`/filefilter`).
     pub file_filters: Arc<NameFilterManager>,
+    /// Niveles de permiso configurables por comando (`/cmdlevel`).
+    pub command_levels: Arc<CommandLevelManager>,
     /// Resolución GeoIP/ASN (bases MMDB opcionales en `data_dir`).
     pub geoip: Arc<GeoIp>,
     /// Log reciente de acciones de ban para `/banstats`: `(banner, target, ip)`.
@@ -390,6 +393,7 @@ impl AppContext {
         let pm_custom_data = Arc::new(CustomDataStore::new());
         let join_filters = Arc::new(NameFilterManager::new(db.clone(), "join"));
         let file_filters = Arc::new(NameFilterManager::new(db.clone(), "file"));
+        let command_levels = Arc::new(CommandLevelManager::new(db.clone()));
         let geoip = Arc::new(GeoIp::load(std::path::Path::new(&settings.data_dir)));
         let (link_events, _) = broadcast::channel(1024);
         Self {
@@ -414,6 +418,7 @@ impl AppContext {
             pm_custom_data,
             join_filters,
             file_filters,
+            command_levels,
             geoip,
             ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             admins_disabled: std::sync::atomic::AtomicBool::new(false),

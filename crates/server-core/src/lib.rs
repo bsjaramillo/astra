@@ -96,8 +96,12 @@ pub mod geoip;
 /// Reensamblado de transferencias CUSTOM_DATA (imágenes/audio ib0t web).
 pub mod custom_data;
 
+/// Niveles de permiso configurables por comando (`/cmdlevel`).
+pub mod command_levels;
+
 /// Re-exports comunes.
 pub use app::{admin_action, AppContext, LinkEvent, LinkRequest, LinkUserSnapshot};
+pub use command_levels::CommandLevelManager;
 pub use greets::{GreetContext, GreetManager};
 pub use geoip::GeoIp;
 pub use ip_bans::{AsnBanManager, RangeBanManager};

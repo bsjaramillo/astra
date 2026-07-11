@@ -309,6 +309,119 @@ con nombre/topic correctos, `/login` propaga UPDATE a ambos usuarios, imagen
 pública llega con SCRIBBLE_HEAD+BLOCK y el base64 exacto, audio público llega
 con AUDIO_HEAD+BLOCK. 18 suites de tests en verde, clippy limpio.
 
+### Nicks duplicados y largos UTF-16 (emoji/unicode) — IMPLEMENTADO (2026-07-11)
+
+Dos bugs más de la misma tanda de pruebas contra clientes reales:
+
+- **Nicks duplicados no se rechazaban**: ni el login TCP nativo ni el WS
+  verificaban si el nick ya estaba en uso por otra sesión conectada — dos
+  usuarios podían coexistir con el mismo nombre, dejando ambiguo a quién
+  apunta `get_by_name` (PMs, kicks, bans por nick, etc. solo afectaban a una
+  de las dos sesiones). Fix: si `ctx.user_pool.get_by_name(nick)` ya
+  encuentra un usuario logueado, se rechaza el nuevo login ("Nickname
+  already in use") antes de crear el `AresUser`, en `tcp_handler.rs` y
+  `web/handler.rs`. Es una paridad *simplificada* de sb0t: sb0t además
+  soporta "hijack" cuando el reconectante viene de la misma IP; Astra solo
+  rechaza (lo pedido explícitamente), sin ese caso especial.
+- **Nicks/mensajes/topics con unicode o emoji rompían el parseo del
+  protocolo de texto ib0t** (`ws: login malformado`): todo el esquema de
+  largos-declarados (`IDENT:len1,len2,...:val1val2...`) usaba
+  `.chars().count()` (valores escalares Unicode), pero el cliente real es
+  JavaScript y calcula los largos con `String.length`, que cuenta *code
+  units UTF-16* — un emoji o carácter astral (fuera del BMP) cuenta 2, no 1.
+  Cualquier nick/mensaje con esos caracteres desalineaba el parseo. Fix:
+  nueva `utf16_len()`/`ws_len()` (`s.encode_utf16().count()`) reemplazando
+  `.chars().count()` en TODOS los puntos donde se declaran o parsean largos:
+  `crates/web/src/protocol.rs` (`clen`, `build_with_lens`,
+  `parse_lens_args` — reescrito para avanzar por code units UTF-16, no
+  chars, y detectar cortes a mitad de un surrogate pair), y
+  `crates/server-core/src/user_pool.rs` (`send_pvt`/`send_public`/
+  `send_emote`/`print`), y 3 puntos en `crates/commands/src/lib.rs`
+  (mensajes `UPDATE`/`PART`/`TOPIC`).
+- **De paso, se corrigió la confusión `PART` vs `OFFLINE`**: al salir de la
+  sala, Astra mandaba `OFFLINE:` (el ident real de sb0t para "el
+  destinatario de tu PM no está conectado") en vez de `PART:` (el ident real
+  de "un usuario salió de la sala", que el cliente usa para mostrar "X ha
+  salido" y borrarlo de su lista). Nuevo `build_part()` en `protocol.rs`
+  (se mantiene `build_offline()` intacto para su uso real); corregido en
+  `ws_outbound.rs` (`translate_broadcast`) y `commands/lib.rs`
+  (`force_part_user`).
+
+Verificado E2E: login con nick `✮ ℓυηα ❥luna💖✨` (emoji + caracteres
+astrales) exitoso; segundo login con el mismo nick rechazado; al
+desconectarse un usuario, el resto recibe `PART:` (no `OFFLINE:`). 18 suites
+en verde, clippy limpio.
+
+### Niveles de permiso configurables por comando + `/help` filtrado — IMPLEMENTADO (2026-07-11)
+
+Reportado también contra el cliente real: `#help`/`/help` mostraba
+literalmente **todos** los comandos sin filtrar por nivel del usuario, y
+además preguntaba si los comandos se gatean por nivel al ejecutarse (sí,
+pero estaba hardcodeado a 3 umbrales: `can_edit_topic` = Moderator+,
+`has_level(Admin)`, `has_level(Owner)`) y si eso era configurable como en
+sb0t (sb0t sí lo permite, vía `[CommandLevel]` + registro de Windows +
+GUI `gui/CommandManager.cs`).
+
+Implementado el equivalente sin GUI:
+
+- **`server_core::command_levels::CommandLevelManager`**: tabla
+  `DEFAULT_COMMAND_LEVELS` con el nivel default de ~141 nombres de comando
+  (incluyendo cada alias por separado, ej. `kick`/`kill`), reflejando
+  exactamente el gate que cada handler ya tenía hardcodeado (para no
+  cambiar comportamiento por defecto). Overrides persistidos en SQLite
+  (tabla `command_levels`), con `get`/`set`/`reset`/`list`. Nuevo campo
+  `AppContext::command_levels`.
+- **Gate centralizado en `dispatch_builtin`** (`crates/commands/src/lib.rs`):
+  antes del `match cmd.as_str()`, si el comando está en la tabla y el
+  usuario no alcanza el nivel requerido (efectivo = override o default), se
+  rechaza sin llegar al handler. Los checks internos de cada handler
+  (`can_edit_topic`, `has_level`, `require_host`) se mantienen intactos como
+  defensa en profundidad — ahora son redundantes en el camino feliz, pero no
+  estorban.
+- **`/help` filtrado por nivel**: cada línea de `DEFAULT_HELP_LINES` se
+  mapea a su nombre de comando y se omite si el nivel del usuario no
+  alcanza el requerido.
+- **`/cmdlevel <comando> [nivel|reset]`** (Owner-only — a propósito más
+  restrictivo que Admin, porque permite reconfigurar los demás gates y un
+  Admin no debe poder auto-escalarse): sin nivel, muestra el efectivo y el
+  default; con `reset`, revierte al default; si no, lo persiste.
+- **Fix colateral necesario**: `has_level()` ahora trata a todo usuario
+  conectado como mínimo `Regular`, aunque su `level` en memoria siga en
+  `Anonymous` (el default real de `AresUser::new` — ningún path de login
+  seteaba `Regular` explícitamente). Antes no importaba porque ningún gate
+  comparaba contra exactamente `Regular`; con comandos de autoservicio
+  (`/topic`, `/whois`, `/users`, etc.) ahora gateados a `Regular`, sin este
+  piso quedaban inaccesibles para cualquier usuario sin nivel explícito.
+
+**Nombres de comando**: ya casi todos los nombres originales de sb0t existen
+como alias en Astra (sección "Aliases con los nombres originales de sb0t").
+Lo que sigue diferente, documentado pero **no cambiado por defecto** (para
+no alterar comportamiento sin pedido explícito — reconfigurable con
+`/cmdlevel`):
+
+- **`/whois` no tiene ningún gate en Astra** (cualquiera puede ver IP/GUID
+  de cualquier usuario), mientras sb0t lo requiere Moderator+. Vale la pena
+  revisar si esto es intencional.
+- **Varios comandos Host-only en sb0t están en Admin (o Moderator) en
+  Astra**, porque Astra no tiene un tier "Host" separado de Owner: todo el
+  subsistema de greets (`greets`/`addgreet`/.../`greetmsg`/...), `url`,
+  `customnames`, `history`, `lastseen`, `mtimeout`, `idle`,
+  `listquarantined`/`unquarantine`, `clearbans`/`cbans`, `link`/`unlink`
+  (estos dos sí quedaron en Owner).
+- **`ban`/`unban`/`banstats`/`oldname`/`trace` son Moderator+ en Astra pero
+  Administrator+ en sb0t.**
+- **`/cname`/`customname` tienen semántica distinta**: en Astra es
+  autoservicio (cada usuario setea SU PROPIO nombre custom, sin gate); en
+  sb0t `customname` es un comando de Moderator+ que asigna un nombre custom
+  A OTRO usuario. No se tocó por ser un cambio de diseño, no un bug.
+
+Verificado E2E: un usuario Regular no ve `/ban` en `/help` y lo recibe
+rechazado ("Access denied. Moderator+ required."); el Owner ve la lista
+completa incluyendo `/cmdlevel`; `/cmdlevel ban admin` sube el requisito en
+caliente y un Moderator queda bloqueado hasta el `reset`. 18 suites en
+verde (130 tests en `astra-commands`, 5 nuevos en `command_levels`),
+clippy limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
