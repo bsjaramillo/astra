@@ -3376,7 +3376,13 @@ fn guid_to_hex(guid: &[u8; 16]) -> String {
     guid.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
+/// Saca a `target` de la sala: lo quita del pool y difunde su PART a todo
+/// el mundo (paridad `AresClient.Disconnect`/`SendDepart` de sb0t). No
+/// cierra el socket subyacente (la sesión vieja, si sigue viva, se
+/// autolimpia cuando su loop de lectura falle); alcanza con liberar el
+/// nombre y notificar la salida. Usado por `/kick` y por el hijack de
+/// login (nick duplicado desde la misma IP externa).
+pub fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
     let tname = target.name.read().clone();
     let ws_part = format!("PART:{}:{}", tname.encode_utf16().count(), tname);
 

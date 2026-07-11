@@ -554,6 +554,34 @@ default a los ~10s y se difunde en vivo. 18 suites en verde (133 tests en
 `server-core`, +5 nuevos: 3 de `TrustedProxyManager` + validaciones ya
 cubiertas), clippy limpio.
 
+### Nick "pegado" tras una desconexión — hijack por misma IP (2026-07-11) — IMPLEMENTADO
+
+Reportado en producción: un usuario perdió la conexión a internet (el
+server nunca se enteró — la sesión murió sin un FIN/RST limpio, algo
+común con desconexiones reales) y al volver a intentar entrar con el mismo
+nick, quedaba rechazado con "Nickname already in use" indefinidamente
+(hasta que la sesión vieja expirara sola, hasta 30 min con el
+`idle_timeout_secs` actual). Esto era una consecuencia directa de la
+simplificación deliberada del fix de nicks duplicados de una tanda
+anterior (rechazar siempre, documentado ahí mismo como más simple que sb0t
+pero con este trade-off).
+
+Portado el comportamiento real de sb0t (`TCPProcessor.cs:738-756`): al
+encontrar un nick ya en uso, en vez de rechazar siempre, se compara la IP
+externa de la sesión existente con la de la conexión nueva. Si es la
+**misma IP**, es una reconexión — se saca la sesión vieja (`force_part_user`,
+ahora `pub` en `astra_commands`, reusado tal cual: mismo camino que
+`/kick`) y se deja pasar la nueva. Si es una IP **distinta**, se sigue
+rechazando como antes ("name in use" real, no es la misma persona).
+Aplicado en ambos paths de login (`tcp_handler.rs` y `web/handler.rs`) —
+funciona cross-protocol también (ej. reconectar por WS tras perder una
+sesión TCP desde la misma IP).
+
+Verificado E2E con clientes reales (nativo Ares crudo y WS): una segunda
+conexión con el mismo nick desde la misma IP recibe el login exitoso
+(hijack) en vez del rechazo; con una IP distinta, se sigue rechazando. 18
+suites en verde, clippy limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

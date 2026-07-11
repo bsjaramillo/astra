@@ -340,11 +340,21 @@ async fn ws_handshake_login(
         let _ = tx.send(Bytes::from_static(b"ERROR:Joining too quickly"));
         return Ok(None);
     }
-    // Nick duplicado: rechazar (paridad sb0t "name in use").
-    if ctx.user_pool.get_by_name(&login.name).is_some() {
-        warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.name);
-        let _ = tx.send(Bytes::from_static(b"ERROR:Nickname already in use"));
-        return Ok(None);
+    // Nick duplicado: si la sesión existente es de la MISMA IP (ya resuelta
+    // vía proxy trust si aplica), es una reconexión — hijack, paridad
+    // sb0t. Si es otra IP, se rechaza como antes.
+    if let Some(existing) = ctx.user_pool.get_by_name(&login.name) {
+        if existing.external_ip == external_ip {
+            info!(
+                "hijack (misma IP): peer={} nick='{}' reemplaza sesión vieja id={}",
+                peer, login.name, existing.id
+            );
+            astra_commands::force_part_user(ctx, &existing);
+        } else {
+            warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.name);
+            let _ = tx.send(Bytes::from_static(b"ERROR:Nickname already in use"));
+            return Ok(None);
+        }
     }
 
     let id = ctx.user_pool.next_id();

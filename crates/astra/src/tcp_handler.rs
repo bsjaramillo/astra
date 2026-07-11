@@ -411,11 +411,25 @@ async fn process_handshake(
                         return Ok(None);
                     }
 
-                    // Nick duplicado: rechazar (paridad sb0t "name in use").
-                    if ctx.user_pool.get_by_name(&login.org_name).is_some() {
-                        warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.org_name);
-                        let _ = tx.send(server_error_packet("Nickname already in use"));
-                        return Ok(None);
+                    // Nick duplicado: si la sesión existente es de la MISMA IP
+                    // externa, es una reconexión (el cliente perdió la conexión
+                    // sin que el server se enterara todavía) — la tratamos como
+                    // un hijack, paridad `TCPProcessor.cs` de sb0t (busca por
+                    // Name/OrgName, compara `OriginalIP`): se saca la sesión
+                    // vieja y se deja pasar la nueva. Si es una IP DISTINTA, se
+                    // rechaza como antes ("name in use" real).
+                    if let Some(existing) = ctx.user_pool.get_by_name(&login.org_name) {
+                        if existing.external_ip == external_ip {
+                            info!(
+                                "hijack (misma IP): peer={} nick='{}' reemplaza sesión vieja id={}",
+                                peer, login.org_name, existing.id
+                            );
+                            astra_commands::force_part_user(ctx, &existing);
+                        } else {
+                            warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.org_name);
+                            let _ = tx.send(server_error_packet("Nickname already in use"));
+                            return Ok(None);
+                        }
                     }
 
                     // ASN ban (requiere base GeoIP-ASN cargada; si no, no-op)
