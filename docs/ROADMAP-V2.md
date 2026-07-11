@@ -917,6 +917,32 @@ ambos endpoints; y lo importante — un usuario WS recibió el MOTD al entrar
 con `+n`/`+rn`/`+uc` sustituidos, y el override de `kick.confirm` cambió el
 mensaje real al kickearlo ("Chau Watcher, te fuiste!").
 
+### Textos del sistema: catálogo completo (todos los mensajes) — IMPLEMENTADO (2026-07-11)
+
+Continuación de la pestaña "Textos del sistema": el usuario pidió que estén
+cargados **todos los mensajes que usa el server**, no solo los 17 de
+moderación de la Fase 1. En vez de keyear a mano los ~410 call sites de
+`send_system_line` (riesgoso), se usó **resolución central por texto**:
+
+- Se extrajeron automáticamente los **148 mensajes estáticos distintos** que
+  emite `send_system_line` en `commands/lib.rs` y se agregaron a
+  `TEMPLATE_DEFAULTS` (145 nuevos + los 3 ya presentes deduplicados). El
+  catálogo pasó de 17 a **162 entradas**.
+- `TemplateManager` ganó un índice inverso `texto por defecto → clave` y
+  `resolve(text)`: si el texto coincide con el default de una clave, devuelve
+  su override (o el mismo default); si no, lo pasa tal cual. `send_system_line`
+  llama `resolve()` una sola vez, de forma centralizada — así **todos** los
+  mensajes estáticos son editables sin tocar ningún call site.
+- Los mensajes con valores insertados (`+n`/`+a`/`+l`/`+i`) siguen ruteados
+  vía `render(key, subs)` en su call site (moderación). El panel avisa que hay
+  que mantener el comodín para que el dato aparezca.
+
+Verificado E2E contra un binario real: el catálogo servido tiene 162 entradas;
+overridear un mensaje que antes NO estaba ruteado (`Usage: /whois <nick>`)
+cambió la salida real del comando en vivo (`/whois` → "Uso correcto: /whois
+<apodo>"). Tests: 162 en server-core (incl. `resolve` + "todo default es
+resolvable"), 79 en commands; clippy limpio.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

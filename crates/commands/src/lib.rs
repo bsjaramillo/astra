@@ -3957,7 +3957,12 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
 
 fn send_system_line(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
     let from = &ctx.settings.bot_name;
-    let _ = user.print(from, text);
+    // Resolución central de textos del sistema: si `text` coincide con el
+    // default de una clave del catálogo, se manda el override configurado por
+    // el admin (o el mismo default). Los textos dinámicos o no catalogados
+    // pasan tal cual.
+    let resolved = ctx.templates.resolve(text);
+    let _ = user.print(from, &resolved);
 }
 
 /// Helper: parsea y dispatcha un mensaje en un solo paso.

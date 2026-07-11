@@ -436,8 +436,8 @@ const I18N = {
     motd_saved:"MOTD guardado.",
 
     tpl_h:"Textos del sistema", tpl_sub:"Personalizá (o traducí) los mensajes de moderación que ve la gente.",
-    tpl_note:"Editá el texto después del <code>=</code> en cada línea. Comodines: <code>+n</code> = usuario · <code>+a</code> = admin · <code>+l</code> = nivel · <code>+i</code> = ident. Para restaurar un texto, dejalo igual al original.",
-    tpl_warn:"⚠️ Fase 1: por ahora se editan los avisos de moderación y control de acceso. El resto de los mensajes del servidor siguen fijos (se irán sumando en próximas versiones).",
+    tpl_note:"Editá el texto después del <code>=</code> en cada línea (formato <code>clave = texto</code>). Comodines: <code>+n</code> = usuario · <code>+a</code> = admin · <code>+l</code> = nivel · <code>+i</code> = ident. Para restaurar un texto, dejalo igual al original.",
+    tpl_warn:"Están cargados todos los mensajes que el servidor le muestra a la gente por los comandos. Los que tienen comodines (como <code>+n</code>) insertan valores al vivo — mantené el comodín si querés que aparezca ese dato.",
     tpl_saved:"Textos guardados ({0} aplicados).",
   },
   en:{
@@ -557,8 +557,8 @@ const I18N = {
     motd_saved:"MOTD saved.",
 
     tpl_h:"System texts", tpl_sub:"Customize (or translate) the moderation messages people see.",
-    tpl_note:"Edit the text after the <code>=</code> on each line. Placeholders: <code>+n</code> = user · <code>+a</code> = admin · <code>+l</code> = level · <code>+i</code> = ident. To restore a text, set it back to the original.",
-    tpl_warn:"⚠️ Phase 1: for now the moderation and access-control notices are editable. The rest of the server messages are still fixed (more will be added in future versions).",
+    tpl_note:"Edit the text after the <code>=</code> on each line (format <code>key = text</code>). Placeholders: <code>+n</code> = user · <code>+a</code> = admin · <code>+l</code> = level · <code>+i</code> = ident. To restore a text, set it back to the original.",
+    tpl_warn:"All the messages the server shows people through commands are loaded here. The ones with placeholders (like <code>+n</code>) insert live values — keep the placeholder if you want that data to appear.",
     tpl_saved:"Texts saved ({0} applied).",
   }
 };
