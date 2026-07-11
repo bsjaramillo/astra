@@ -148,6 +148,8 @@ pub async fn handle_tcp_client(
 
     // Greet de bienvenida (PM del bot al usuario que entra)
     send_greet(&ctx, &user);
+    // MOTD (message of the day), tras el greet.
+    send_motd(&ctx, &user);
 
     // Feeds de admin: ipsend (IP del que entra) y logsend (log de join).
     {
@@ -1262,6 +1264,24 @@ fn send_greet(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
     };
     let text = server_core::greets::render_greet(&template, &gctx);
     let _ = user.send_pvt(&ctx.settings.bot_name, &text);
+}
+
+/// Envía el MOTD (message of the day) al usuario que entra, línea por línea
+/// como PM del bot. No-op si no hay MOTD configurado. Paridad conceptual con
+/// `ViewMOTD` de sb0t (texto plano; sin tags de media).
+fn send_motd(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
+    if ctx.motd.is_empty() {
+        return;
+    }
+    let mctx = server_core::MotdContext {
+        name: &user.name.read(),
+        room_name: &ctx.settings.room_name,
+        ip: &user.external_ip.to_string(),
+        user_count: ctx.user_pool.len(),
+    };
+    for line in ctx.motd.rendered_lines(&mctx) {
+        let _ = user.send_pvt(&ctx.settings.bot_name, &line);
+    }
 }
 
 /// Aplica la acción de un word filter a un mensaje bloqueado: notifica al

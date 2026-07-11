@@ -322,6 +322,7 @@ const I18N = {
     nav_filtros:"Filtros de palabras", nav_bienvenidas:"Bienvenidas", nav_sala:"Opciones de sala",
     nav_avatares:"Avatares", nav_servidor:"Servidor", nav_enlace:"Enlace de salas", nav_seguridad:"Seguridad",
     nav_proxies:"Proxies", nav_permisos:"Permisos de comandos", nav_config:"Config avanzada", nav_consola:"Consola",
+    nav_motd:"Mensaje de entrada", nav_plantillas:"Textos del sistema",
     common_save:"Guardar", common_save_changes:"Guardar cambios", common_add:"Agregar", common_remove:"Quitar",
     common_none:"Ninguno.", common_none_f:"Ninguna.", common_done:"Listo",
     restart_note:"⚠️ Estos cambios se guardan en el archivo de configuración y se aplican al <b>reiniciar el servidor</b>.",
@@ -421,6 +422,16 @@ const I18N = {
     con_h:"Consola", con_sub:"Ejecutá cualquier comando como Dueño.",
     con_note:"Ejemplos: <code>/ban Pedro</code> · <code>/announce hola a todos</code> · <code>/roomflags</code> · <code>/addline 0, texto</code>",
     con_ph:"/comando argumentos", con_run:"Ejecutar",
+
+    motd_h:"Mensaje de entrada (MOTD)", motd_sub:"Se le muestra a cada persona cuando entra a la sala.",
+    motd_note:"Una línea por mensaje. Comodines: <code>+n</code> = nombre de quien entra · <code>+rn</code> = nombre de la sala · <code>+uc</code> = usuarios conectados · <code>+ip</code> = IP. Dejalo vacío para no mostrar nada.",
+    motd_ph:"¡Bienvenido/a +n a +rn!\nDisfrutá tu estadía :)",
+    motd_saved:"MOTD guardado.",
+
+    tpl_h:"Textos del sistema", tpl_sub:"Personalizá (o traducí) los mensajes de moderación que ve la gente.",
+    tpl_note:"Editá el texto después del <code>=</code> en cada línea. Comodines: <code>+n</code> = usuario · <code>+a</code> = admin · <code>+l</code> = nivel · <code>+i</code> = ident. Para restaurar un texto, dejalo igual al original.",
+    tpl_warn:"⚠️ Fase 1: por ahora se editan los avisos de moderación y control de acceso. El resto de los mensajes del servidor siguen fijos (se irán sumando en próximas versiones).",
+    tpl_saved:"Textos guardados ({0} aplicados).",
   },
   en:{
     chrome_refresh:"Refresh", chrome_logout:"Log out", chrome_menu:"Menu",
@@ -432,6 +443,7 @@ const I18N = {
     nav_filtros:"Word filters", nav_bienvenidas:"Greetings", nav_sala:"Room options",
     nav_avatares:"Avatars", nav_servidor:"Server", nav_enlace:"Room linking", nav_seguridad:"Security",
     nav_proxies:"Proxies", nav_permisos:"Command permissions", nav_config:"Advanced config", nav_consola:"Console",
+    nav_motd:"Join message", nav_plantillas:"System texts",
     common_save:"Save", common_save_changes:"Save changes", common_add:"Add", common_remove:"Remove",
     common_none:"None.", common_none_f:"None.", common_done:"Done",
     restart_note:"⚠️ These changes are written to the config file and take effect after <b>restarting the server</b>.",
@@ -531,6 +543,16 @@ const I18N = {
     con_h:"Console", con_sub:"Run any command as Owner.",
     con_note:"Examples: <code>/ban Pedro</code> · <code>/announce hi everyone</code> · <code>/roomflags</code> · <code>/addline 0, text</code>",
     con_ph:"/command args", con_run:"Run",
+
+    motd_h:"Join message (MOTD)", motd_sub:"Shown to each person when they join the room.",
+    motd_note:"One line per message. Placeholders: <code>+n</code> = joining user's name · <code>+rn</code> = room name · <code>+uc</code> = connected users · <code>+ip</code> = IP. Leave it empty to show nothing.",
+    motd_ph:"Welcome +n to +rn!\nEnjoy your stay :)",
+    motd_saved:"MOTD saved.",
+
+    tpl_h:"System texts", tpl_sub:"Customize (or translate) the moderation messages people see.",
+    tpl_note:"Edit the text after the <code>=</code> on each line. Placeholders: <code>+n</code> = user · <code>+a</code> = admin · <code>+l</code> = level · <code>+i</code> = ident. To restore a text, set it back to the original.",
+    tpl_warn:"⚠️ Phase 1: for now the moderation and access-control notices are editable. The rest of the server messages are still fixed (more will be added in future versions).",
+    tpl_saved:"Texts saved ({0} applied).",
   }
 };
 function t(k, ...args){
@@ -596,6 +618,7 @@ const TABS = [
   ]},
   {gk:"g_sala", items:[
     {id:"sala", icon:"⚙️", k:"nav_sala"},
+    {id:"motd", icon:"📢", k:"nav_motd"},
     {id:"avatares", icon:"🖼️", k:"nav_avatares"},
   ]},
   {gk:"g_avanzado", items:[
@@ -604,13 +627,14 @@ const TABS = [
     {id:"seguridad", icon:"🛡️", k:"nav_seguridad"},
     {id:"proxies", icon:"🌐", k:"nav_proxies"},
     {id:"permisos", icon:"🔑", k:"nav_permisos"},
+    {id:"plantillas", icon:"💬", k:"nav_plantillas"},
     {id:"config", icon:"📝", k:"nav_config"},
     {id:"consola", icon:"⌨️", k:"nav_consola"},
   ]},
 ];
 // Pestañas que NO se auto-refrescan (tienen formularios que se borrarían al
 // re-renderizar mientras el admin escribe).
-const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","avatares"]);
+const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","avatares","motd","plantillas"]);
 
 /* ============================ helpers ============================ */
 async function api(path, opts={}) {
@@ -705,9 +729,9 @@ function render(){
   const map = {
     inicio:renderInicio, usuarios:renderUsuarios, cuentas:renderCuentas,
     baneos:renderBaneos, filtros:renderFiltros, bienvenidas:renderBienvenidas,
-    sala:renderSala, avatares:renderAvatares, servidor:renderServidor,
+    sala:renderSala, motd:renderMotd, avatares:renderAvatares, servidor:renderServidor,
     enlace:renderEnlace, seguridad:renderSeguridad, proxies:renderProxies,
-    permisos:renderPermisos, config:renderConfig, consola:renderConsola
+    permisos:renderPermisos, plantillas:renderPlantillas, config:renderConfig, consola:renderConsola
   };
   document.getElementById("view").innerHTML = (map[TAB] || renderInicio)();
   wire();
@@ -996,6 +1020,41 @@ function renderPermisos(){
     <tbody>${rows||'<tr><td colspan=3 class=mut>—</td></tr>'}</tbody></table></div></div>`;
 }
 
+function renderMotd(){
+  return `<div class="cardhead"><h2>${t("motd_h")}</h2><p class="sub">${t("motd_sub")}</p></div>
+    <div class="note">${t("motd_note")}</div>
+    <div class="card"><textarea id="motdEd" spellcheck="false" style="width:100%;height:34vh;font-family:inherit;font-size:14px" placeholder="${esc(t("motd_ph"))}"></textarea>
+    <div class="rowend"><button class="btn primary" id="motdSave">${t("common_save")}</button></div></div>`;
+}
+async function loadMotd(){
+  const r=await api("/admin/motd"); const el=document.getElementById("motdEd"); if(!el) return;
+  if(r.ok){ const j=await r.json(); el.value=j.text||""; }
+}
+async function saveMotd(){
+  const el=document.getElementById("motdEd");
+  const r=await api("/admin/motd",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:el.value})});
+  if(r.ok) toast(t("motd_saved"),"ok");
+  else toast(t("err_prefix")+t("err_save"),"err");
+}
+
+function renderPlantillas(){
+  return `<div class="cardhead"><h2>${t("tpl_h")}</h2><p class="sub">${t("tpl_sub")}</p></div>
+    <div class="note">${t("tpl_note")}</div>
+    <div class="warnbox">${t("tpl_warn")}</div>
+    <div class="card"><textarea id="tplEd" spellcheck="false" style="width:100%;height:46vh;font-family:ui-monospace,monospace;font-size:12.5px" placeholder="…"></textarea>
+    <div class="rowend"><button class="btn primary" id="tplSave">${t("common_save")}</button></div></div>`;
+}
+async function loadPlantillas(){
+  const r=await api("/admin/template"); const el=document.getElementById("tplEd"); if(!el) return;
+  if(r.ok){ const j=await r.json(); el.value=j.text||""; }
+}
+async function savePlantillas(){
+  const el=document.getElementById("tplEd");
+  const r=await api("/admin/template",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text:el.value})});
+  if(r.ok){ const j=await r.json().catch(()=>({applied:0})); toast(t("tpl_saved", j.applied!=null?j.applied:0),"ok"); }
+  else toast(t("err_prefix")+t("err_save"),"err");
+}
+
 function renderConfig(){
   return `<div class="cardhead"><h2>${t("cfg_h")}</h2><p class="sub">${t("cfg_sub")}</p></div>
     <div class="warnbox">${t("cfg_warn")}</div>
@@ -1069,6 +1128,8 @@ function wire(){
   if(g("faddBtn"))g("faddBtn").onclick=()=>{ const p=g("fpat").value.trim(); if(p) run(`/addfilter ${p} ${g("fact").value}`,t("toast_filter_add")); };
   if(g("cmdRun")){const rc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=rc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")rc();};}
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
+  if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }
+  if(g("tplEd")){ loadPlantillas(); g("tplSave").onclick=savePlantillas; }
   if(g("cfgSrvSave")){ fillServerCfg(); g("cfgSrvSave").onclick=saveServerCfg; }
   if(g("cfgLinkSave")){
     fillLinking(); g("cfgLinkSave").onclick=saveLinking;

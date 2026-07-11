@@ -123,6 +123,8 @@ pub async fn handle_connection(
 
     // Greet de bienvenida (PM del bot al usuario WS que entra)
     send_greet_ws(&ctx, &user, &ws_text_tx);
+    // MOTD (message of the day), tras el greet.
+    send_motd_ws(&ctx, &user, &ws_text_tx);
 
     // Loop principal
     let idle_timeout = Duration::from_secs(ctx.settings.security.idle_timeout_secs);
@@ -964,6 +966,26 @@ fn send_greet_ws(
     };
     let text = server_core::greets::render_greet(&template, &gctx);
     let _ = ws_text_tx.send(crate::protocol::build_pm(&ctx.settings.bot_name, &text));
+}
+
+/// Envía el MOTD al usuario WS que entra, línea por línea como PM del bot.
+fn send_motd_ws(
+    ctx: &AppContext,
+    user: &AresUser,
+    ws_text_tx: &mpsc::UnboundedSender<String>,
+) {
+    if ctx.motd.is_empty() {
+        return;
+    }
+    let mctx = server_core::MotdContext {
+        name: &user.name.read(),
+        room_name: &ctx.settings.room_name,
+        ip: &user.external_ip.to_string(),
+        user_count: ctx.user_pool.len(),
+    };
+    for line in ctx.motd.rendered_lines(&mctx) {
+        let _ = ws_text_tx.send(crate::protocol::build_pm(&ctx.settings.bot_name, &line));
+    }
 }
 
 /// Aplica la acción de un word filter a un usuario WS.

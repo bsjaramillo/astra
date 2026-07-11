@@ -14,6 +14,8 @@ use super::command_levels::CommandLevelManager;
 use super::custom_data::CustomDataStore;
 use super::db::Database;
 use super::greets::GreetManager;
+use super::motd::MotdManager;
+use super::templates::TemplateManager;
 use super::idle::IdleManager;
 use super::geoip::GeoIp;
 use super::ip_autologin::IpAutologinManager;
@@ -338,6 +340,10 @@ pub struct AppContext {
     pub idle: Arc<IdleManager>,
     /// Manager de greets (mensajes de bienvenida).
     pub greets: Arc<GreetManager>,
+    /// MOTD (message of the day) mostrado al entrar a la sala.
+    pub motd: Arc<MotdManager>,
+    /// Textos del sistema editables ("templates").
+    pub templates: Arc<TemplateManager>,
     /// Manager de filtros de palabras del chat público.
     pub word_filter: Arc<WordFilterManager>,
     /// Manager de URLs rotadas de la sala.
@@ -425,6 +431,8 @@ impl AppContext {
         let vrooms = Arc::new(VroomManager::new());
         let idle = Arc::new(IdleManager::new());
         let greets = Arc::new(GreetManager::new(db.clone()));
+        let motd = Arc::new(MotdManager::new(db.clone()));
+        let templates = Arc::new(TemplateManager::new(db.clone()));
         let word_filter = Arc::new(WordFilterManager::new(db.clone()));
         let urls = Arc::new(UrlManager::new(db.clone()));
         let range_bans = Arc::new(RangeBanManager::new(db.clone()));
@@ -455,6 +463,8 @@ impl AppContext {
             vrooms,
             idle,
             greets,
+            motd,
+            templates,
             word_filter,
             urls,
             range_bans,

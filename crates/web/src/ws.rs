@@ -377,6 +377,25 @@ async fn handle_admin_route(
                 }
             }
         }
+        ("GET", "/admin/motd") => {
+            let body = format!("{{\"text\":\"{}\"}}", json_escape(&ctx.motd.text()));
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/motd") if m.eq_ignore_ascii_case("POST") => {
+            let text = json_field(&req.body, "text").unwrap_or_default();
+            ctx.motd.set(&text);
+            send_http_json(stream, 200, "{\"ok\":true}").await?;
+        }
+        ("GET", "/admin/template") => {
+            let body = format!("{{\"text\":\"{}\"}}", json_escape(&ctx.templates.export_text()));
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/template") if m.eq_ignore_ascii_case("POST") => {
+            let text = json_field(&req.body, "text").unwrap_or_default();
+            let n = ctx.templates.apply_bulk(&text);
+            let body = format!("{{\"ok\":true,\"applied\":{}}}", n);
+            send_http_json(stream, 200, &body).await?;
+        }
         ("GET", "/admin/avatar/server") => {
             match crate::admin::get_avatar_bytes(ctx, "server") {
                 Some(bytes) => send_http_bytes(stream, 200, &bytes).await?,

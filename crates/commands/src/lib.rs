@@ -1051,25 +1051,39 @@ fn handle_topic(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 }
 
 fn handle_motd(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    // Sin argumentos: mostrar el MOTD actual (message of the day) al que lo
+    // pide, línea por línea con los placeholders sustituidos para él.
     if args.trim().is_empty() {
-        send_system_line(ctx, user, &format!("MOTD: {}", ctx.current_room_topic()));
+        if ctx.motd.is_empty() {
+            send_system_line(ctx, user, "No MOTD is set.");
+            return;
+        }
+        let mctx = server_core::MotdContext {
+            name: &user.name.read(),
+            room_name: &ctx.settings.room_name,
+            ip: &user.external_ip.to_string(),
+            user_count: ctx.user_pool.len(),
+        };
+        for line in ctx.motd.rendered_lines(&mctx) {
+            send_system_line(ctx, user, &line);
+        }
         return;
     }
 
     if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        send_system_line(ctx, user, &ctx.templates.get("error.access_moderator"));
         return;
     }
 
-    let new_motd = truncate_text(args.trim(), 300);
-    ctx.set_room_topic(new_motd.clone());
-    broadcast_topic(ctx, &new_motd);
+    // Setear el MOTD desde el chat (una línea; el editor multilínea real es
+    // el panel de administración). No toca el topic de la sala.
+    ctx.motd.set(args.trim());
     send_system_line(ctx, user, "MOTD updated.");
 }
 
 fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        send_system_line(ctx, user, &ctx.templates.get("error.access_moderator"));
         return false;
     }
 
@@ -1080,7 +1094,7 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     }
 
     let Some(target) = ctx.user_pool.get_by_name(target_name) else {
-        send_system_line(ctx, user, "User not found.");
+        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
         return false;
     };
 
@@ -1101,9 +1115,12 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     send_system_line(
         ctx,
         user,
-        &format!("Banned '{}' (ident {}).", target.name.read(), ident),
+        &ctx.templates.render(
+            "ban.confirm",
+            &[("+n", &target.name.read()), ("+i", &ident.to_string())],
+        ),
     );
-    send_system_line(ctx, &target, "You have been banned from this room.");
+    send_system_line(ctx, &target, &ctx.templates.get("ban.target"));
 
     // Registrar la acción para /banstats.
     ctx.record_ban(
@@ -1196,7 +1213,7 @@ fn handle_unkiddy(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 
 fn handle_unban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        send_system_line(ctx, user, &ctx.templates.get("error.access_moderator"));
         return false;
     }
 
@@ -1223,9 +1240,9 @@ fn handle_unban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     };
 
     if removed {
-        send_system_line(ctx, user, "Unban successful.");
+        send_system_line(ctx, user, &ctx.templates.get("unban.success"));
     } else {
-        send_system_line(ctx, user, "No matching ban found.");
+        send_system_line(ctx, user, &ctx.templates.get("unban.none"));
     }
     removed
 }
@@ -1287,7 +1304,7 @@ fn handle_whois(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 
 fn handle_kick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        send_system_line(ctx, user, &ctx.templates.get("error.access_moderator"));
         return;
     }
 
@@ -1298,7 +1315,7 @@ fn handle_kick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 
     let Some(target) = ctx.user_pool.get_by_name(target_name) else {
-        send_system_line(ctx, user, "User not found.");
+        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
         return;
     };
 
@@ -1307,14 +1324,14 @@ fn handle_kick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         return;
     }
 
-    send_system_line(ctx, &target, "You have been kicked from this room.");
+    send_system_line(ctx, &target, &ctx.templates.get("kick.target"));
     force_part_user(ctx, &target);
-    send_system_line(ctx, user, &format!("Kicked '{}'.", target_name));
+    send_system_line(ctx, user, &ctx.templates.render("kick.confirm", &[("+n", target_name)]));
 }
 
 fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: bool) {
     if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+        send_system_line(ctx, user, &ctx.templates.get("error.access_moderator"));
         return;
     }
 
@@ -1326,7 +1343,7 @@ fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: boo
     }
 
     let Some(target) = ctx.user_pool.get_by_name(target_name) else {
-        send_system_line(ctx, user, "User not found.");
+        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
         return;
     };
 
@@ -1350,11 +1367,11 @@ fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: boo
     });
 
     if muzzle {
-        send_system_line(ctx, &target, "You have been muzzled.");
-        send_system_line(ctx, user, &format!("Muzzled '{}'.", target_name));
+        send_system_line(ctx, &target, &ctx.templates.get("muzzle.target"));
+        send_system_line(ctx, user, &ctx.templates.render("muzzle.confirm", &[("+n", target_name)]));
     } else {
-        send_system_line(ctx, &target, "You have been unmuzzled.");
-        send_system_line(ctx, user, &format!("Unmuzzled '{}'.", target_name));
+        send_system_line(ctx, &target, &ctx.templates.get("unmuzzle.target"));
+        send_system_line(ctx, user, &ctx.templates.render("unmuzzle.confirm", &[("+n", target_name)]));
     }
 }
 
@@ -1583,7 +1600,7 @@ pub fn dispatch_autologin(ctx: &AppContext, user: &Arc<AresUser>) -> bool {
 /// Retorna el nick del target si el nivel cambió.
 fn handle_grant(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<String> {
     if !has_level(user, ILevel::Admin) {
-        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        send_system_line(ctx, user, &ctx.templates.get("error.access_admin"));
         return None;
     }
 
@@ -1610,7 +1627,7 @@ fn handle_grant(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<St
     }
 
     let Some(target) = ctx.user_pool.get_by_name(target_name) else {
-        send_system_line(ctx, user, "User not found.");
+        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
         return None;
     };
 
@@ -1624,12 +1641,13 @@ fn handle_grant(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<St
         return None;
     }
 
-    let msg = format!("Your level is now {} ({}).", new_level as u8, level_name(new_level));
+    let level_disp = format!("{} ({})", new_level as u8, level_name(new_level));
+    let msg = ctx.templates.render("grant.target", &[("+l", &level_disp)]);
     if apply_level(ctx, user, &target, new_level, &msg) {
         send_system_line(
             ctx,
             user,
-            &format!("'{}' is now level {} ({}).", target_name, new_level as u8, level_name(new_level)),
+            &ctx.templates.render("grant.confirm", &[("+n", target_name), ("+l", &level_disp)]),
         );
         Some(target.name.read().clone())
     } else {
@@ -1640,7 +1658,7 @@ fn handle_grant(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<St
 /// Retorna el nick del target si el nivel cambió.
 fn handle_revoke(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<String> {
     if !has_level(user, ILevel::Admin) {
-        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        send_system_line(ctx, user, &ctx.templates.get("error.access_admin"));
         return None;
     }
 
@@ -1651,7 +1669,7 @@ fn handle_revoke(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<S
     }
 
     let Some(target) = ctx.user_pool.get_by_name(target_name) else {
-        send_system_line(ctx, user, "User not found.");
+        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
         return None;
     };
 
@@ -1660,8 +1678,9 @@ fn handle_revoke(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Option<S
         return None;
     }
 
-    if apply_level(ctx, user, &target, ILevel::Regular, "Your level has been reset to regular.") {
-        send_system_line(ctx, user, &format!("'{}' is now a regular user.", target_name));
+    let revoke_notice = ctx.templates.get("revoke.target");
+    if apply_level(ctx, user, &target, ILevel::Regular, &revoke_notice) {
+        send_system_line(ctx, user, &ctx.templates.render("revoke.confirm", &[("+n", target_name)]));
         Some(target.name.read().clone())
     } else {
         send_system_line(ctx, user, &format!("'{}' is already a regular user.", target_name));
@@ -4176,17 +4195,29 @@ mod tests {
     }
 
     #[test]
-    fn builtin_motd_without_args_shows_current_topic_as_motd() {
+    fn builtin_motd_view_when_empty_and_after_set() {
         let ctx = make_test_ctx();
+        // Alice necesita ser al menos moderador para setear el MOTD.
         let (user, mut rx) = make_test_user(1, "Alice");
+        *user.level.write() = server_core::ILevel::Owner;
         ctx.user_pool.add(user.clone());
+
+        // Sin MOTD configurado.
+        let (handled, _) = dispatch_builtin(&ctx, &user, "motd", "");
+        assert!(handled);
+        let (_from, text) = decode_pvt(rx.try_recv().expect("no-motd response"));
+        assert_eq!(text, "No MOTD is set.");
+
+        // Setear un MOTD con placeholder y volver a verlo (sustituido para Alice).
+        let (handled, _) = dispatch_builtin(&ctx, &user, "motd", "Hola +n");
+        assert!(handled);
+        let (_from, confirm) = decode_pvt(rx.try_recv().expect("set confirm"));
+        assert_eq!(confirm, "MOTD updated.");
 
         let (handled, _) = dispatch_builtin(&ctx, &user, "motd", "");
         assert!(handled);
-
-        let msg = rx.try_recv().expect("motd response");
-        let (_from, text) = decode_pvt(msg);
-        assert_eq!(text, "MOTD: Welcome to Astra");
+        let (_from, view) = decode_pvt(rx.try_recv().expect("motd view"));
+        assert_eq!(view, "Hola Alice");
     }
 
     #[test]

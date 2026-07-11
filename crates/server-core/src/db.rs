@@ -254,6 +254,16 @@ impl Database {
                 PRIMARY KEY (pattern, line_index)
             );
 
+            CREATE TABLE IF NOT EXISTS kv (
+                k TEXT NOT NULL PRIMARY KEY,
+                v TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS message_templates (
+                key TEXT NOT NULL PRIMARY KEY,
+                text TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -1277,6 +1287,67 @@ impl Database {
             conn.prepare("SELECT pattern, line_index, text FROM word_filter_lines ORDER BY pattern, line_index")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ========================================================================
+    // KV genérico (usado para el MOTD)
+    // ========================================================================
+
+    /// Lee un valor del store `kv` por clave.
+    pub fn get_kv(&self, k: &str) -> DbResult<Option<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT v FROM kv WHERE k = ?1")?;
+        let mut rows = stmt.query(params![k])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get::<_, String>(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Escribe (upsert) un valor en el store `kv`.
+    pub fn set_kv(&self, k: &str, v: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO kv (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = ?2",
+            params![k, v],
+        )?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Message templates (textos del sistema editables) — overrides por clave
+    // ========================================================================
+
+    /// Escribe (upsert) el override de un template.
+    pub fn set_template(&self, key: &str, text: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO message_templates (key, text) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET text = ?2",
+            params![key, text],
+        )?;
+        Ok(())
+    }
+
+    /// Borra el override de un template (vuelve al default).
+    pub fn remove_template(&self, key: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM message_templates WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
+    /// Lee TODOS los overrides de templates: `(key, text)`.
+    pub fn list_templates(&self) -> DbResult<Vec<(String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT key, text FROM message_templates")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         let mut out = Vec::new();
         for r in rows {

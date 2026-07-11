@@ -865,6 +865,58 @@ en **ambos** idiomas (30 renders) sin un solo error ni `undefined` filtrado;
 paridad de claves ES/EN comprobada programáticamente (210 = 210, cero
 faltantes); login → state contra un binario real OK.
 
+### MOTD real + textos del sistema editables ("templates") — IMPLEMENTADO (2026-07-11)
+
+Pedido del usuario: dos textareas nuevas en el panel para editar el "MOTD" y
+el "template". Tras confirmar la semántica sb0t con el usuario (respondió por
+AskUserQuestion): **MOTD = mensaje multilínea mostrado al entrar** (real, no
+alias del topic), y **template = los textos del sistema estilo sb0t**
+(`commands/Template.cs`), hecho **por fases** (el usuario lo aceptó
+explícitamente).
+
+**MOTD (completo):**
+- Nuevo `server-core/src/motd.rs` (`MotdManager`): texto multilínea
+  persistido en una tabla `kv` nueva (clave `motd`), con `rendered_lines()`
+  que sustituye `+n`/`+rn`/`+ip`/`+uc` y descarta líneas vacías. A diferencia
+  de sb0t, texto plano (sin tags `[youtube=]`/`[image=]`).
+- Se envía al entrar, línea por línea como PM del bot, tras el greet, en TCP
+  nativo (`tcp_handler.rs::send_motd`) y web (`handler.rs::send_motd_ws`).
+- `/motd` (sin args) ahora muestra el MOTD real (antes estaba aliaseado al
+  topic — se corrigió esa conflación); `/motd <texto>` lo setea (una línea;
+  el editor multilínea es el panel). Ya no toca el topic.
+
+**Template (Fase 1 — moderación y control de acceso):**
+- Nuevo `server-core/src/templates.rs` (`TemplateManager`): catálogo de 17
+  claves con default en inglés (`TEMPLATE_DEFAULTS`), overrides persistidos
+  en la tabla `message_templates`, `render(key, subs)` con sustitución
+  `+n`/`+a`/`+l`/`+i`, y `apply_bulk`/`export_text` para el editor `key =
+  valor` del panel. Setear un texto igual al default borra el override.
+- Se rutearon por el manager los mensajes de los handlers de moderación:
+  `kick`, `ban`/`unban`, `muzzle`/`unmuzzle`, `grant`/`revoke`, más
+  "Access denied" (moderator/admin) y "User not found". El resto de los
+  ~400 mensajes del server siguen fijos — se documentó como Fase 1 en el
+  propio panel; la infra queda lista para sumar claves (agregar entrada a
+  `TEMPLATE_DEFAULTS` + usar `templates.get/render` en el call site).
+- **Por qué no todo de una**: sb0t difunde a la sala casi toda acción de
+  admin y su template tiene ~200 strings; Astra notifica en privado y tiene
+  ~409 `send_system_line`, la mayoría errores de uso/resultados que no son
+  material de "template". Rutear los 409 de una sola pasada sería un
+  refactor gigante y riesgoso.
+
+**Panel:** dos pestañas nuevas — "Mensaje de entrada" (MOTD, en el grupo
+Sala) y "Textos del sistema" (en Avanzado) — cada una una textarea, bilingües
+(ES/EN, +18 claves i18n nuevas), excluidas del auto-refresh. Rutas
+`GET`/`POST /admin/motd` y `/admin/template` en `ws.rs` (protegidas por token
+como el resto).
+
+Verificado E2E contra un binario real: `cargo build/test/clippy` en verde
+(160 tests en server-core incl. los nuevos de motd/templates, 79 en
+commands); panel servido ~71KB, `node --check` OK, las 17 pestañas
+renderizadas en ES y EN sin errores (paridad 222=222 claves); roundtrip de
+ambos endpoints; y lo importante — un usuario WS recibió el MOTD al entrar
+con `+n`/`+rn`/`+uc` sustituidos, y el override de `kick.confirm` cambió el
+mensaje real al kickearlo ("Chau Watcher, te fuiste!").
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

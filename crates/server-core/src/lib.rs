@@ -72,6 +72,12 @@ pub mod types;
 /// Mensajes de bienvenida (greets).
 pub mod greets;
 
+/// MOTD (message of the day) mostrado al entrar.
+pub mod motd;
+
+/// Textos del sistema editables ("templates").
+pub mod templates;
+
 /// Filtro de palabras del chat público.
 pub mod word_filter;
 
@@ -114,6 +120,8 @@ pub use command_levels::CommandLevelManager;
 pub use proxy_trust::TrustedProxyManager;
 pub use ip_autologin::{IpAutologinEntry, IpAutologinManager};
 pub use greets::{GreetContext, GreetManager};
+pub use motd::{MotdContext, MotdManager};
+pub use templates::{TemplateManager, TEMPLATE_DEFAULTS};
 pub use geoip::GeoIp;
 pub use ip_bans::{AsnBanManager, RangeBanManager};
 pub use name_filters::NameFilterManager;
