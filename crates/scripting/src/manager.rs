@@ -251,6 +251,26 @@ pub struct ScriptManager {
     scripts_dir: PathBuf,
 }
 
+/// Resuelve el archivo principal de una carpeta de script. Prioridad:
+/// `<carpeta>/<carpeta>.js` (mismo nombre que la carpeta, paridad sb0t), luego
+/// `main.js`, `index.js`, y por último el primer `.js` del nivel superior.
+fn resolve_main_file(dir: &Path) -> Option<PathBuf> {
+    let dir_name = dir.file_name().and_then(|s| s.to_str())?;
+    for cand in [format!("{}.js", dir_name), "main.js".to_string(), "index.js".to_string()] {
+        let p = dir.join(&cand);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    // Fallback: el primer `.js` del nivel superior de la carpeta.
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("js"))
+}
+
 impl ScriptManager {
     /// Crea un nuevo manager. NO lo muevas a otra task.
     pub fn new(app: Arc<AppContext>, scripts_dir: PathBuf) -> Self {
@@ -343,7 +363,23 @@ impl ScriptManager {
         if let Ok(entries) = std::fs::read_dir(&self.scripts_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("js") {
+                if path.is_dir() {
+                    // Modelo de carpetas (paridad sb0t): cada carpeta es un
+                    // script, con su archivo principal `<carpeta>/<carpeta>.js`
+                    // (o `main.js`/`index.js`/el primer `.js`), sub-scripts y
+                    // datos adentro.
+                    match resolve_main_file(&path) {
+                        Some(main) => match self.load_folder_script(&path, &main) {
+                            Ok(_) => count += 1,
+                            Err(e) => warn!("error cargando script {}: {}", path.display(), e),
+                        },
+                        None => warn!(
+                            "carpeta de script sin archivo principal (.js): {}",
+                            path.display()
+                        ),
+                    }
+                } else if path.extension().and_then(|s| s.to_str()) == Some("js") {
+                    // Retrocompat: `.js` suelto en la raíz = un script.
                     match self.load_file(&path) {
                         Ok(_) => count += 1,
                         Err(e) => warn!("error cargando {}: {}", path.display(), e),
@@ -353,6 +389,19 @@ impl ScriptManager {
         }
         info!("{} scripts cargados desde {}", count, self.scripts_dir.display());
         count
+    }
+
+    /// Carga un script en carpeta: el nombre es el de la carpeta, el código es
+    /// el del archivo principal `main`.
+    fn load_folder_script(&self, dir: &Path, main: &Path) -> Result<ScriptId, String> {
+        let name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| "nombre de carpeta inválido".to_string())?
+            .to_string();
+        let source = std::fs::read_to_string(main)
+            .map_err(|e| format!("error leyendo {}: {}", main.display(), e))?;
+        self.load_source(&name, Some(main.to_path_buf()), &source)
     }
 
     /// Directorio de scripts.
@@ -405,8 +454,19 @@ impl ScriptManager {
         path: Option<PathBuf>,
         source: &str,
     ) -> Result<ScriptId, String> {
+        // Carpeta del script = carpeta del archivo principal. Para un script en
+        // carpeta (`<scripts_dir>/<name>/<name>.js`) es `<scripts_dir>/<name>`;
+        // para un `.js` plano (retrocompat) es `<scripts_dir>`. Se expone como
+        // `__SCRIPT_DIR__` para que `include()`/`File_*` sean relativos a ella.
+        let script_dir = path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
         let script = Arc::new(Script::new(name.to_string(), path));
         let mut ctx = make_context(self.app.clone());
+        if let Some(dir) = &script_dir {
+            crate::api::set_script_dir(&mut ctx, &dir.to_string_lossy());
+        }
 
         if let Err(e) = eval_script(&mut ctx, source) {
             error!("script '{}': {}", name, e);
@@ -541,8 +601,18 @@ impl ScriptManager {
                 return;
             }
             ScriptRequest::LoadScript { name, reply } => {
-                let path = self.scripts_dir.join(format!("{}.js", name));
-                let result = self.load_file(&path).map(|_| name);
+                // Primero como carpeta (`<scripts_dir>/<name>/`), luego como
+                // `.js` plano (retrocompat).
+                let folder = self.scripts_dir.join(&name);
+                let result = if folder.is_dir() {
+                    match resolve_main_file(&folder) {
+                        Some(main) => self.load_folder_script(&folder, &main).map(|_| name),
+                        None => Err(format!("carpeta '{}' sin archivo principal (.js)", name)),
+                    }
+                } else {
+                    let path = self.scripts_dir.join(format!("{}.js", name));
+                    self.load_file(&path).map(|_| name)
+                };
                 let _ = reply.send(result);
                 return;
             }

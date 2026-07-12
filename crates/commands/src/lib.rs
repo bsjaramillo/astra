@@ -3754,48 +3754,82 @@ async fn download_and_load_script(
     let filename = path.split('/').nth(1).unwrap_or("script").to_string();
     let scripts_dir = std::path::PathBuf::from(&data_dir).join("scripts");
     let zip_vec = zip_bytes.to_vec();
+    let fname = filename.clone();
     let extract_result = tokio::task::spawn_blocking(move || {
-        extract_first_js(&zip_vec, &scripts_dir, &filename)
+        extract_script_folder(&zip_vec, &scripts_dir, &fname)
     })
     .await
     .unwrap_or_else(|e| Err(format!("extraction task panicked: {}", e)));
 
-    let dest_name = match extract_result {
-        Ok(name) => name,
+    let n_files = match extract_result {
+        Ok(n) => n,
         Err(e) => return Some(format!("Unable to extract script from {}: {}", path, e)),
     };
 
     let Some(hooks) = hooks else {
         return Some(format!(
-            "Successfully downloaded from live script: {} (scripting unavailable, not auto-loaded).",
-            dest_name
+            "Successfully downloaded live script '{}' ({} files) (scripting unavailable, not auto-loaded).",
+            filename, n_files
         ));
     };
-    let load_name = dest_name.trim_end_matches(".js");
-    match (hooks.load)(load_name) {
-        Ok(_) => Some(format!("Successfully downloaded from live script: {}", dest_name)),
-        Err(e) => Some(format!("Downloaded '{}' but failed to load: {}", dest_name, e)),
+    // Se carga por NOMBRE DE CARPETA (el modelo de carpetas resuelve el
+    // archivo principal dentro de `<scripts_dir>/<filename>/`).
+    match (hooks.load)(&filename) {
+        Ok(_) => Some(format!(
+            "Successfully downloaded and loaded live script '{}' ({} files).",
+            filename, n_files
+        )),
+        Err(e) => Some(format!(
+            "Downloaded '{}' ({} files) but failed to load: {}",
+            filename, n_files, e
+        )),
     }
 }
 
-/// Extrae el primer archivo `.js` de un zip (bytes en memoria) a
-/// `<scripts_dir>/<filename>.js`. Retorna el nombre de archivo final.
-fn extract_first_js(zip_bytes: &[u8], scripts_dir: &std::path::Path, filename: &str) -> Result<String, String> {
-    std::fs::create_dir_all(scripts_dir).map_err(|e| format!("mkdir failed: {}", e))?;
+/// Extrae TODO el contenido de un zip (bytes en memoria) a la carpeta del
+/// script `<scripts_dir>/<name>/`, aplanando la carpeta raíz que agrega GitHub
+/// a sus zipballs (`owner-repo-sha/...`). Así un script con varios archivos
+/// (principal + sub-scripts + datos) queda completo, no solo el primer `.js`.
+/// Retorna cuántos archivos se escribieron.
+fn extract_script_folder(zip_bytes: &[u8], scripts_dir: &std::path::Path, name: &str) -> Result<usize, String> {
+    use std::path::PathBuf;
+    let dest = scripts_dir.join(name);
+    // Reemplazar cualquier versión previa.
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).map_err(|e| format!("mkdir failed: {}", e))?;
+
     let cursor = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("invalid zip: {}", e))?;
+    let mut written = 0usize;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| format!("zip read error: {}", e))?;
-        if !file.name().ends_with(".js") {
+        // Ruta segura (sin traversal). GitHub envuelve todo en una carpeta raíz
+        // `owner-repo-sha/`; la aplanamos saltando el primer componente.
+        let Some(enclosed) = file.enclosed_name() else {
+            continue;
+        };
+        let stripped: PathBuf = enclosed.components().skip(1).collect();
+        if stripped.as_os_str().is_empty() {
             continue;
         }
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut buf).map_err(|e| format!("zip extract error: {}", e))?;
-        let dest_name = format!("{}.js", filename);
-        std::fs::write(scripts_dir.join(&dest_name), &buf).map_err(|e| format!("write failed: {}", e))?;
-        return Ok(dest_name);
+        let out = dest.join(&stripped);
+        if file.is_dir() {
+            std::fs::create_dir_all(&out).map_err(|e| format!("mkdir failed: {}", e))?;
+        } else {
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {}", e))?;
+            }
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut buf)
+                .map_err(|e| format!("zip extract error: {}", e))?;
+            std::fs::write(&out, &buf).map_err(|e| format!("write failed: {}", e))?;
+            written += 1;
+        }
     }
-    Err("no .js file found in the downloaded archive".to_string())
+    if written == 0 {
+        return Err("the downloaded archive had no files".to_string());
+    }
+    Ok(written)
 }
 
 /// `/trace <nick|ip>` — geolocaliza una IP usando la base GeoIP (si está
@@ -4031,6 +4065,49 @@ mod tests {
 
     use proto_ares::{PacketReader, TcpMsg};
     use server_core::db::Database;
+
+    #[test]
+    fn extract_script_folder_extracts_all_and_flattens_github_root() {
+        // Arma un zip estilo zipball de GitHub: TODO bajo una carpeta raíz
+        // `owner-repo-sha/`, con varios archivos y un subdirectorio.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zw = zip::ZipWriter::new(&mut buf);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            use std::io::Write as _;
+            let root = "owner-mygame-abc123";
+            zw.start_file(format!("{root}/mygame.js"), opts).unwrap();
+            zw.write_all(b"function onLoad(){}").unwrap();
+            zw.start_file(format!("{root}/helper.js"), opts).unwrap();
+            zw.write_all(b"function h(){return 1;}").unwrap();
+            zw.start_file(format!("{root}/data/config.txt"), opts).unwrap();
+            zw.write_all(b"clave=valor").unwrap();
+            zw.start_file(format!("{root}/README.md"), opts).unwrap();
+            zw.write_all(b"# mygame").unwrap();
+            zw.finish().unwrap();
+        }
+        let zip_bytes = buf.into_inner();
+
+        let tmp = std::env::temp_dir().join(format!("astra_extract_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let n = extract_script_folder(&zip_bytes, &tmp, "mygame").expect("extract");
+        assert_eq!(n, 4, "deben extraerse los 4 archivos");
+
+        let base = tmp.join("mygame");
+        // Todo se aplanó bajo <scripts>/mygame/ (sin la carpeta raíz de GitHub).
+        assert!(base.join("mygame.js").is_file());
+        assert!(base.join("helper.js").is_file());
+        assert!(base.join("README.md").is_file());
+        // El subdirectorio se preserva.
+        assert!(base.join("data/config.txt").is_file());
+        assert_eq!(
+            std::fs::read_to_string(base.join("data/config.txt")).unwrap(),
+            "clave=valor"
+        );
+        // La carpeta raíz de GitHub NO debe aparecer.
+        assert!(!base.join("owner-mygame-abc123").exists());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
     use server_core::settings::Settings;
     use tokio::sync::mpsc;
 

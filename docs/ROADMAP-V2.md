@@ -1036,6 +1036,40 @@ Nota de testing: el cap crudo (fix #2) exime loopback, así que desde localhost
 solo se observa el fix #1 (timeout). Para ver el cap por IP hay que atacar
 desde una IP remota; su lógica está cubierta por tests unitarios.
 
+### Scripts como carpetas (paridad sb0t) + downloadscript multi-archivo — IMPLEMENTADO (2026-07-11)
+
+Dos bugs reportados, misma causa raíz: Astra trataba cada script como un `.js`
+suelto, mientras que en sb0t un script es una **carpeta**
+(`<DataPath>/<nombre>/` con el archivo principal, sub-scripts y datos adentro;
+ver `ScriptManager.cs:149` `Combine(DataPath, name, name)` y `JSGlobal.cs`
+`include`/`GetFiles("*.js")`). Efectos: (1) no se podían tener sub-scripts ni
+datos por script; (2) `downloadscript` extraía solo el primer `.js` del zip.
+
+Cambios:
+- **Carga por carpetas** (`scripting/manager.rs`): `load_all_inner` ahora
+  enumera CARPETAS (cada una = un script; nombre = nombre de la carpeta) y
+  resuelve el archivo principal con `resolve_main_file` (`<carpeta>/<carpeta>.js`,
+  luego `main.js`/`index.js`/el primer `.js`). Se mantiene la retrocompat con
+  `.js` sueltos en la raíz. `loadscript <name>` resuelve carpeta o `.js` plano.
+- **`__SCRIPT_DIR__`**: `load_source` expone la carpeta del script (derivada de
+  `path.parent()`) como global JS. `include()`/`includeAll()`/`File_*` se
+  resuelven RELATIVO a ella (`api.rs::resolve_script_path`, rechaza `..`).
+- **API sb0t**: se agregó `include("sub")` (alias del `ScriptInclude_run`
+  existente, ahora scopeado a la carpeta) y `includeAll()` (carga todos los
+  `.js` de la carpeta salvo el principal). Nuevas `File_read`/`File_write`/
+  `File_append`/`File_delete` (datos del script, relativos a su carpeta); las
+  `File_exists`/`File_size`/`File_creationTime` también se scopearon.
+- **`downloadscript`** (`commands`): `extract_first_js` → `extract_script_folder`
+  extrae TODO el zip a `<scripts_dir>/<repo>/`, aplanando la carpeta raíz que
+  GitHub agrega a sus zipballs (`owner-repo-sha/`), preservando subdirectorios;
+  luego carga por nombre de carpeta.
+
+Verificado E2E con un binario real: un script en carpeta con `include("helper")`
+cargó el sub-script, y `File_write`/`File_read`/`File_exists` escribieron/leyeron
+`state.txt` en la carpeta del script; un `.js` plano siguió cargando
+(retrocompat). Test unitario de `extract_script_folder` (zip estilo GitHub con 4
+archivos + subdir → aplanado correctamente). `build/test/clippy` en verde.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

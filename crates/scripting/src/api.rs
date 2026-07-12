@@ -77,6 +77,50 @@ fn lookup_app(_ctx: &Context) -> Option<Arc<AppContext>> {
 }
 
 // ============================================================================
+// Carpeta del script (modelo de carpetas, paridad sb0t)
+// ============================================================================
+//
+// Cada script vive en su propia carpeta (`<scripts_dir>/<nombre>/`). El
+// `include()` y las funciones `File_*` se resuelven RELATIVO a esa carpeta.
+// La ruta de la carpeta se guarda como el global JS `__SCRIPT_DIR__` en el
+// context de cada script (lo setea `load_source` al cargar), así cada script
+// ve su propia carpeta cuando corre.
+
+/// Setea la carpeta del script como global `__SCRIPT_DIR__` en su context.
+/// Lo llama el manager al cargar (`load_source`).
+pub fn set_script_dir(ctx: &mut Context, dir: &str) {
+    let global = ctx.global_object();
+    let _ = global.set(js_string!("__SCRIPT_DIR__"), JsValue::from(js_string!(dir)), false, ctx);
+}
+
+/// Carpeta del script actual (lee `__SCRIPT_DIR__` del context).
+fn current_script_dir(ctx: &mut Context) -> Option<std::path::PathBuf> {
+    let global = ctx.global_object();
+    let v = global.get(js_string!("__SCRIPT_DIR__"), ctx).ok()?;
+    jsvalue_to_string(&v).map(std::path::PathBuf::from)
+}
+
+/// Resuelve un nombre de archivo relativo a la carpeta del script. Si `arg`
+/// es una ruta absoluta se usa tal cual (retrocompat). Con `add_js`, agrega la
+/// extensión `.js` si falta (para `include`). Nunca deja escapar de la carpeta
+/// del script (rechaza rutas con `..`).
+fn resolve_script_path(ctx: &mut Context, arg: &str, add_js: bool) -> Option<std::path::PathBuf> {
+    if arg.is_empty() || arg.contains("..") {
+        return None;
+    }
+    let mut name = arg.to_string();
+    if add_js && !name.to_ascii_lowercase().ends_with(".js") {
+        name.push_str(".js");
+    }
+    let p = std::path::Path::new(&name);
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    let dir = current_script_dir(ctx)?;
+    Some(dir.join(name))
+}
+
+// ============================================================================
 // make_context
 // ============================================================================
 
@@ -165,6 +209,18 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
     context
         .register_global_builtin_callable(js_string!("File_creationTime"), 1, NativeFunction::from_fn_ptr(file_creation_time_fn))
         .expect("File_creationTime should be registered");
+    context
+        .register_global_builtin_callable(js_string!("File_read"), 1, NativeFunction::from_fn_ptr(file_read_fn))
+        .expect("File_read should be registered");
+    context
+        .register_global_builtin_callable(js_string!("File_write"), 2, NativeFunction::from_fn_ptr(file_write_fn))
+        .expect("File_write should be registered");
+    context
+        .register_global_builtin_callable(js_string!("File_append"), 2, NativeFunction::from_fn_ptr(file_append_fn))
+        .expect("File_append should be registered");
+    context
+        .register_global_builtin_callable(js_string!("File_delete"), 1, NativeFunction::from_fn_ptr(file_delete_fn))
+        .expect("File_delete should be registered");
 
     // ============ Compresión ============
 
@@ -175,11 +231,19 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("Zip_decompress"), 1, NativeFunction::from_fn_ptr(zip_decompress_fn))
         .expect("Zip_decompress should be registered");
 
-    // ============ Script include ============
+    // ============ Script include (modelo de carpetas, paridad sb0t) ============
 
     context
         .register_global_builtin_callable(js_string!("ScriptInclude_run"), 1, NativeFunction::from_fn_ptr(script_include_fn))
         .expect("ScriptInclude_run should be registered");
+    // Alias sb0t: `include("sub")` carga `<carpeta_del_script>/sub.js`.
+    context
+        .register_global_builtin_callable(js_string!("include"), 1, NativeFunction::from_fn_ptr(script_include_fn))
+        .expect("include should be registered");
+    // `includeAll()` carga todos los `.js` de la carpeta salvo el principal.
+    context
+        .register_global_builtin_callable(js_string!("includeAll"), 0, NativeFunction::from_fn_ptr(include_all_fn))
+        .expect("includeAll should be registered");
 
     // ============ Spell check ============
 
@@ -564,26 +628,81 @@ fn b64_dec_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<J
 
 // ============ File I/O ============
 
-fn file_exists_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
-    let path = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    Ok(JsValue::from(std::path::Path::new(&path).exists()))
+fn file_exists_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let exists = resolve_script_path(ctx, &arg, false)
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    Ok(JsValue::from(exists))
 }
 
-fn file_size_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
-    let path = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    let size = std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(-1);
+fn file_size_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let size = resolve_script_path(ctx, &arg, false)
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len() as i64)
+        .unwrap_or(-1);
     Ok(JsValue::from(size))
 }
 
-fn file_creation_time_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
-    let path = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    let secs = std::fs::metadata(&path)
-        .and_then(|m| m.created())
-        .ok()
+fn file_creation_time_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let secs = resolve_script_path(ctx, &arg, false)
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.created().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     Ok(JsValue::from(secs))
+}
+
+/// `File_read(name)` → contenido del archivo (relativo a la carpeta del
+/// script), o `null` si no existe. Para datos del script.
+fn file_read_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    match resolve_script_path(ctx, &arg, false).and_then(|p| std::fs::read_to_string(p).ok()) {
+        Some(s) => Ok(JsValue::from(js_string!(s))),
+        None => Ok(JsValue::null()),
+    }
+}
+
+/// `File_write(name, text)` → escribe (sobrescribe) el archivo en la carpeta
+/// del script. Retorna true/false.
+fn file_write_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let ok = match resolve_script_path(ctx, &arg, false) {
+        Some(p) => std::fs::write(p, text.as_bytes()).is_ok(),
+        None => false,
+    };
+    Ok(JsValue::from(ok))
+}
+
+/// `File_append(name, text)` → agrega al final del archivo.
+fn file_append_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    use std::io::Write as _;
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let ok = match resolve_script_path(ctx, &arg, false) {
+        Some(p) => std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .is_ok(),
+        None => false,
+    };
+    Ok(JsValue::from(ok))
+}
+
+/// `File_delete(name)` → borra el archivo de la carpeta del script.
+fn file_delete_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let ok = match resolve_script_path(ctx, &arg, false) {
+        Some(p) => std::fs::remove_file(p).is_ok(),
+        None => false,
+    };
+    Ok(JsValue::from(ok))
 }
 
 // ============ Zip ============
@@ -706,8 +825,51 @@ fn zip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
 
 // ============ Script include ============
 
+/// `includeAll()` — carga todos los `.js` de la carpeta del script EXCEPTO el
+/// archivo principal (`<carpeta>.js`). Paridad sb0t (`includeAll`). Retorna la
+/// cantidad de sub-scripts cargados.
+fn include_all_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let Some(dir) = current_script_dir(ctx) else {
+        return Ok(JsValue::from(0));
+    };
+    let main_name = dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|n| format!("{}.js", n));
+    let mut files: Vec<std::path::PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("js"))
+            .collect(),
+        Err(_) => return Ok(JsValue::from(0)),
+    };
+    files.sort();
+    let mut count = 0i64;
+    for p in files {
+        let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if Some(fname) == main_name.as_deref() {
+            continue; // no re-evaluar el principal
+        }
+        if let Ok(source) = std::fs::read_to_string(&p) {
+            match ctx.eval(boa_engine::Source::from_bytes(source.as_bytes())) {
+                Ok(_) => count += 1,
+                Err(e) => tracing::warn!("includeAll: error en {}: {}", p.display(), e),
+            }
+        }
+    }
+    Ok(JsValue::from(count))
+}
+
 fn script_include_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
-    let path = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    // Resolver relativo a la carpeta del script (paridad sb0t: `include(name)`
+    // carga `<carpeta_del_script>/<name>.js`).
+    let Some(path) = resolve_script_path(ctx, &arg, true) else {
+        tracing::warn!("ScriptInclude: ruta inválida '{}'", arg);
+        return Ok(JsValue::from(false));
+    };
+    let path = path.display().to_string();
     match std::fs::read_to_string(&path) {
         Ok(source) => {
             // Evaluar el script en el MISMO context. Las funciones/constantes
