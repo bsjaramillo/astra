@@ -113,6 +113,13 @@ impl ScriptRequest {
         }
     }
 
+    /// Índice del argumento con el nombre de usuario a convertir en objeto
+    /// `user` (paridad sb0t). Todas las variantes `*Before`/`ScribbleCheck`
+    /// llevan el emisor en el argumento 0.
+    fn user_arg_index(&self) -> Option<usize> {
+        Some(0)
+    }
+
     fn args(&self) -> Vec<String> {
         match self {
             ScriptRequest::TextBefore { from, text, .. } => vec![from.clone(), text.clone()],
@@ -485,7 +492,7 @@ impl ScriptManager {
             return Err(e);
         }
 
-        let onload_result = call_void_handler(&mut ctx, "onLoad", &[]);
+        let onload_result = call_void_handler(&mut ctx, "onLoad", &[], None);
         if let Err(e) = onload_result {
             warn!("script '{}' onLoad() error: {}", name, e);
         }
@@ -592,7 +599,7 @@ impl ScriptManager {
             }
             let mut ctx_guard = script.context.lock();
             if let Some(ctx) = ctx_guard.as_mut() {
-                if let Err(e) = call_void_handler(ctx, handler_name, &args) {
+                if let Err(e) = call_void_handler(ctx, handler_name, &args, event.user_arg_index()) {
                     let msg = format!("error en handler '{}': {}", handler_name, e);
                     warn!("script '{}': {}", script.name(), msg);
                     script.set_error(msg.clone());
@@ -680,7 +687,7 @@ impl ScriptManager {
             }
             let mut ctx_guard = script.context.lock();
             if let Some(ctx) = ctx_guard.as_mut() {
-                match call_handler_with_return(ctx, handler_name, &args) {
+                match call_handler_with_return(ctx, handler_name, &args, request.user_arg_index()) {
                     Ok(Some(false)) => {
                         // El script retornó false explícitamente → cancela
                         allow = false;
@@ -727,20 +734,36 @@ impl ScriptManager {
         let ctx = ctx_guard
             .as_mut()
             .ok_or_else(|| "context no inicializado".to_string())?;
-        call_void_handler(ctx, event.handler_name(), &event.args())
+        call_void_handler(ctx, event.handler_name(), &event.args(), event.user_arg_index())
     }
 }
 
 /// Llama a una función JS sin retorno con los argumentos dados.
+/// Convierte los argumentos string en `JsValue`, transformando el arg en
+/// `user_idx` (si lo hay) en un objeto `user` (JSUser) para paridad sb0t.
+fn build_handler_args(
+    ctx: &mut boa_engine::Context,
+    args: &[String],
+    user_idx: Option<usize>,
+) -> Vec<JsValue> {
+    let mut out = Vec::with_capacity(args.len());
+    for (i, s) in args.iter().enumerate() {
+        if Some(i) == user_idx {
+            out.push(crate::api::build_user_object(ctx, s));
+        } else {
+            out.push(JsValue::from(boa_engine::js_string!(s.as_str())));
+        }
+    }
+    out
+}
+
 fn call_void_handler(
     ctx: &mut boa_engine::Context,
     name: &str,
     args: &[String],
+    user_idx: Option<usize>,
 ) -> Result<(), String> {
-    let js_args: Vec<JsValue> = args
-        .iter()
-        .map(|s| JsValue::from(boa_engine::js_string!(s.as_str())))
-        .collect();
+    let js_args = build_handler_args(ctx, args, user_idx);
     call_global_function(ctx, name, &js_args)
 }
 
@@ -755,6 +778,7 @@ fn call_handler_with_return(
     ctx: &mut boa_engine::Context,
     name: &str,
     args: &[String],
+    user_idx: Option<usize>,
 ) -> Result<Option<bool>, String> {
     use boa_engine::js_string;
     use boa_engine::property::PropertyKey;
@@ -772,10 +796,7 @@ fn call_handler_with_return(
         return Ok(None);
     }
 
-    let js_args: Vec<JsValue> = args
-        .iter()
-        .map(|s| JsValue::from(js_string!(s.as_str())))
-        .collect();
+    let js_args = build_handler_args(ctx, args, user_idx);
 
     let result = func
         .as_object()
@@ -817,6 +838,56 @@ mod tests {
         let db = Database::in_memory().unwrap();
         let app = AppContext::new(Settings::default(), db);
         ScriptManager::new(Arc::new(app), std::env::temp_dir().join("astra_scripts_test"))
+    }
+
+    #[test]
+    fn event_handler_receives_user_object() {
+        use server_core::user_pool::AresUser;
+        let db = Database::in_memory().unwrap();
+        let app = Arc::new(AppContext::new(Settings::default(), db));
+
+        let mut u = AresUser::new(3, "127.0.0.1".parse().unwrap(), [0u8; 16]);
+        *u.name.write() = "Alice".to_string();
+        u.logged_in = true;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        u.sender = Some(tx);
+        app.user_pool.add(Arc::new(u));
+
+        let mgr = ScriptManager::new(
+            app.clone(),
+            std::env::temp_dir().join("astra_scripts_test_p4"),
+        );
+        // Handler estilo sb0t: primer arg es un JSUser (objeto), no string.
+        // Sólo PMea si TODO se cumple: propiedades del objeto + método +
+        // compat-string (toString/valueOf).
+        mgr.load_source(
+            "p4",
+            None,
+            r#"
+            function onTextReceived(user, text){
+                if (typeof user === "object" &&
+                    user.name === "Alice" &&
+                    typeof user.level === "number" &&
+                    typeof user.ban === "function" &&
+                    (user == "Alice") &&
+                    ("got " + user) === "got Alice" &&
+                    text === "hi"){
+                    sendPM("bot", "Alice", "OK");
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        mgr.dispatch(&ScriptEvent::TextReceived {
+            from: "Alice".into(),
+            text: "hi".into(),
+        });
+
+        let pkt = rx
+            .try_recv()
+            .expect("Alice debe recibir el PM => el handler recibió un objeto user funcional");
+        assert_eq!(pkt[0], 25, "esperado opcode Pmt (25), got {}", pkt[0]);
     }
 
     #[test]

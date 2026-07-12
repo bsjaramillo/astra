@@ -511,6 +511,11 @@ function __mkUser(name){
   u.sendHTML = function(t){ return __user_do(u.__name, "sendHTML", t == null ? "" : "" + t); };
   u.sendEmote = function(t){ return __user_do(u.__name, "sendEmote", t == null ? "" : "" + t); };
   u.exists = function(){ return userExists(u.__name); };
+  // En contexto string el objeto se comporta como su nombre: mantiene
+  // compat con handlers "nativos" de Astra que usaban el nombre (string)
+  // como primer argumento (concatenación, ==, plantillas).
+  u.toString = function(){ return u.__name; };
+  u.valueOf = function(){ return u.__name; };
   return u;
 }
 function user(name){ return __mkUser(name); }
@@ -2904,6 +2909,27 @@ pub fn eval_script(ctx: &mut Context, source: &str) -> Result<(), String> {
     ctx.eval(boa_engine::Source::from_bytes(source.as_bytes()))
         .map_err(|e| format!("eval error: {}", e))?;
     Ok(())
+}
+
+/// Construye el objeto `user` (JSUser) para `name` invocando el global
+/// `user(name)` del prelude. Si el prelude no está disponible, cae al string
+/// del nombre. Se usa para pasar un JSUser a los handlers (paridad sb0t);
+/// el objeto tiene toString/valueOf = nombre, así que sigue funcionando en
+/// contexto string.
+pub fn build_user_object(ctx: &mut Context, name: &str) -> JsValue {
+    let user_fn = match ctx.global_object().get(js_string!("user"), ctx) {
+        Ok(v) if v.is_object() => v,
+        _ => return JsValue::from(js_string!(name)),
+    };
+    let obj = match user_fn.as_object() {
+        Some(o) => o.clone(),
+        None => return JsValue::from(js_string!(name)),
+    };
+    let arg = JsValue::from(js_string!(name));
+    match obj.call(&JsValue::undefined(), &[arg], ctx) {
+        Ok(u) if !u.is_null_or_undefined() => u,
+        _ => JsValue::from(js_string!(name)),
+    }
 }
 
 /// Llama a una función JS global con los argumentos dados.

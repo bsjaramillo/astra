@@ -376,6 +376,33 @@ impl ScriptEvent {
         }
     }
 
+    /// Índice del argumento que es un **nombre de usuario** y que debe
+    /// convertirse en objeto `user` (JSUser) al invocar el handler, para
+    /// paridad con sb0t (que pasa un JSUser como primer argumento). `None`
+    /// si el evento no lleva un usuario en esa posición (IP, comando de
+    /// link, timers, etc.).
+    pub fn user_arg_index(&self) -> Option<usize> {
+        use ScriptEvent::*;
+        match self {
+            Connect { .. }
+            | Disconnect { .. }
+            | ProxyDetected { .. }
+            | Nick { .. }
+            | Help { .. }
+            | BansAutoCleared
+            | Linked { .. }
+            | Unlinked { .. }
+            | LinkError { .. }
+            | LinkedAdminDisabled
+            | LeafJoin { .. }
+            | LeafPart { .. }
+            | Timer { .. }
+            | HttpComplete { .. } => None,
+            // El resto lleva el nombre del usuario en el argumento 0.
+            _ => Some(0),
+        }
+    }
+
     /// Argumentos que se pasarán al handler JS.
     /// Compatibles con el orden esperado por los scripts del sb0t original.
     pub fn args(&self) -> Vec<String> {
