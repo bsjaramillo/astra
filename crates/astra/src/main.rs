@@ -122,21 +122,8 @@ async fn seed_refresh(settings: &Settings, url: &str) -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Init tracing
-    let log_level = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-        )
-        .init();
-
-    info!("╔════════════════════════════════════════╗");
-    info!("║      Astra Chat Server v{}         ║", env!("CARGO_PKG_VERSION"));
-    info!("║   Compatible con Ares Galaxy           ║");
-    info!("╚════════════════════════════════════════╝");
-
-    // Cargar configuración
+    // Cargar configuración PRIMERO: necesitamos `data_dir` para saber dónde
+    // escribir el archivo de log.
     let mut settings = Settings::load_or_default(&cli.config);
     if let Some(port) = cli.port {
         settings.port = port;
@@ -151,6 +138,38 @@ async fn main() -> anyhow::Result<()> {
         settings.data_dir = d.clone();
     }
     let web_enabled = settings.web_enabled && !cli.no_web;
+
+    // Init tracing: a consola Y a archivo rotativo diario en <data_dir>/logs/.
+    // El `WorkerGuard` del appender no-bloqueante debe vivir todo el programa
+    // (si se dropea, se deja de vaciar el buffer al archivo).
+    let log_level = if cli.verbose { "debug" } else { "info" };
+    let logs_dir = std::path::Path::new(&settings.data_dir).join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
+    let file_appender = tracing_appender::rolling::daily(&logs_dir, "astra.log");
+    let (file_writer, _log_guard) = tracing_appender::non_blocking(file_appender);
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+        tracing_subscriber::registry()
+            .with(filter)
+            // Consola (con colores).
+            .with(tracing_subscriber::fmt::layer())
+            // Archivo (sin códigos ANSI de color).
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(file_writer),
+            )
+            .init();
+    }
+
+    info!("╔════════════════════════════════════════╗");
+    info!("║      Astra Chat Server v{}         ║", env!("CARGO_PKG_VERSION"));
+    info!("║   Compatible con Ares Galaxy           ║");
+    info!("╚════════════════════════════════════════╝");
+    info!("logs → {}/astra.log (rotación diaria)", logs_dir.display());
 
     // Subcomandos: se ejecutan y terminan sin levantar el server.
     if let Some(Command::SeedRefresh { url }) = &cli.command {
