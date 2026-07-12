@@ -633,7 +633,7 @@ async fn handle_muxed_connection(
 
     match route {
         ConnectionKind::Web if web_enabled => {
-            astra_web::handle_stream(ctx, stream, peer).await?;
+            astra_web::handle_stream(ctx, stream, peer, scripting).await?;
         }
         ConnectionKind::Link if link_enabled => {
             astra_link::handle_stream(ctx, stream).await.map_err(|e| anyhow::anyhow!(e))?;

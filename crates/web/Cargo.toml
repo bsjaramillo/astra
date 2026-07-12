@@ -10,6 +10,7 @@ authors.workspace = true
 proto-ares = { path = "../proto-ares" }
 server-core = { path = "../server-core" }
 astra-commands = { path = "../commands" }
+astra-scripting = { path = "../scripting" }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

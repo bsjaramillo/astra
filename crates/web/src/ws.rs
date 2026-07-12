@@ -10,8 +10,8 @@ use base64::Engine;
 use bytes::{Buf, BytesMut};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, warn};
+use tokio::net::TcpStream;
+use tracing::{debug, info, warn};
 
 use server_core::AppContext;
 
@@ -20,49 +20,16 @@ use crate::handler::handle_connection;
 /// GUID mágica del estándar WebSocket (RFC 6455).
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/// WebSocket server.
-pub struct WsServer {
-    ctx: Arc<AppContext>,
-    port: u16,
-}
-
-/// Maneja una conexión TCP potencialmente WebSocket: handshake HTTP y luego frames WS.
+/// Maneja una conexión TCP potencialmente WebSocket: handshake HTTP y luego
+/// frames WS. `scripting` se propaga para poder despachar eventos de los
+/// clientes web a los scripts (onJoin/onPart/onPublic/onCommand/...).
 pub async fn handle_stream(
     ctx: Arc<AppContext>,
     stream: TcpStream,
     peer: SocketAddr,
+    scripting: astra_scripting::ScriptHandle,
 ) -> anyhow::Result<()> {
-    handle_ws_connection(ctx, stream, peer).await
-}
-
-impl WsServer {
-    /// Crea un nuevo WebSocket server.
-    pub fn new(ctx: Arc<AppContext>, port: u16) -> Self {
-        Self { ctx, port }
-    }
-
-    /// Inicia el loop principal. Escucha en `0.0.0.0:port`.
-    pub async fn serve(self) -> anyhow::Result<()> {
-        let bind_addr: SocketAddr = format!("0.0.0.0:{}", self.port).parse()?;
-        let listener = TcpListener::bind(bind_addr).await?;
-        info!("WebSocket server escuchando en {} (clientes ib0t/HTML5)", bind_addr);
-
-        loop {
-            match listener.accept().await {
-                Ok((stream, peer)) => {
-                    let ctx = self.ctx.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_ws_connection(ctx, stream, peer).await {
-                            debug!("ws connection {} cerrada: {}", peer, e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("ws accept error: {}", e);
-                }
-            }
-        }
-    }
+    handle_ws_connection(ctx, stream, peer, scripting).await
 }
 
 /// Maneja una conexión WS entrante: hace el handshake y delega a `handle_connection`.
@@ -70,6 +37,7 @@ async fn handle_ws_connection(
     ctx: Arc<AppContext>,
     mut stream: TcpStream,
     peer: SocketAddr,
+    scripting: astra_scripting::ScriptHandle,
 ) -> anyhow::Result<()> {
     info!("nueva conexión WS desde {}", peer);
 
@@ -126,7 +94,7 @@ async fn handle_ws_connection(
     // del cliente desde `X-Real-IP`/`X-Forwarded-For` acá — es el único
     // punto donde tenemos los headers HTTP del handshake.
     let resolved_ip = resolve_client_ip(&ctx, peer.ip(), &request.headers);
-    handle_connection(ctx, stream, peer, resolved_ip).await
+    handle_connection(ctx, stream, peer, resolved_ip, scripting).await
 }
 
 /// Resuelve la IP "real" de un cliente WS, confiando en `X-Real-IP`/

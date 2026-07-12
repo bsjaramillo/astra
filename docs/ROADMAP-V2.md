@@ -961,6 +961,45 @@ paniquear. Fix: reemplazado por un shuffle real
 usan claves u órdenes válidos). **Requiere reconstruir la imagen Docker y
 redeployar.**
 
+### Scripts: comandos y eventos también para clientes web + fix `#help` — IMPLEMENTADO (2026-07-11)
+
+Reportado: `#help` no mostraba los comandos agregados por un script cargado, y
+en general los comandos/eventos no se evaluaban con los scripts. Tres causas y
+fixes (aplican a TCP y web):
+
+1. **`HELP_LINES` era `thread_local`** (`scripting/src/api.rs`): los scripts
+   llaman `Help_addLine` en el hilo dedicado de scripting, pero
+   `extra_help_lines()` lo lee `handle_help` desde un hilo de tokio → leía un
+   almacén vacío y las líneas de ayuda de los scripts nunca aparecían.
+   Convertido a un `static Mutex` global (visible cross-thread) + dedup en el
+   push (evita duplicados al recargar un script).
+2. **Los builtins cortaban antes de despachar `onCommand`**
+   (`tcp_handler.rs::route_command_text`): solo los comandos DESCONOCIDOS
+   llegaban a los scripts. Ahora se despacha el evento `Command` (onCommand)
+   para TODO comando, lo maneje un builtin o no (paridad sb0t: los scripts ven
+   todos los comandos y pueden reaccionar, ej. sumar salida a `/help`).
+3. **El path web no despachaba NINGÚN evento a los scripts** — el crate `web`
+   ni dependía de `astra-scripting`, así que los usuarios web eran invisibles
+   para los scripts. Se agregó la dependencia (sin ciclo: scripting no depende
+   de web), se propagó el `ScriptHandle` por `handle_stream` →
+   `handle_ws_connection` → `handle_connection` → `dispatch_ws_message` → los
+   sub-handlers, y se despachan los mismos eventos que el path nativo:
+   `Connect`, `Join` + `LoginGranted` (al entrar), `Public`, `Emote`,
+   `Command`, `Avatar` (mensajes), y `Part` + `Logout` + `Disconnect` (al
+   salir). También se despachan ahora los eventos side-effect de los builtins
+   (ej. `AdminLevelChanged` tras `/ban` desde web). De paso se removió
+   `WsServer` (código muerto: el server real usa `handle_stream` multiplexado).
+
+`onLoad()` de scripts ya funcionaba (manager.rs llama `call_void_handler("onLoad")`
+al cargar). Quedan sin despachar en web algunos eventos de nicho que sí tiene el
+nativo (Flood, InvalidLoginAttempt, ProxyDetected, VroomJoin, Unidled,
+UserList/End) — pendientes si se necesitan.
+
+Verificado E2E con un binario real y un script de prueba: un usuario **web**
+disparó `onJoin`, `onPublic`, `onCommand` (incluido `#help`) y `onPart`, y
+`#help` incluyó la línea registrada por el script vía `Help_addLine`.
+`cargo build/test/clippy --workspace` en verde.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

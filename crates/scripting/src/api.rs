@@ -800,12 +800,14 @@ thread_local! {
         = std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
-/// Almacén thread-local de líneas extra para /help (Fase 20).
-/// Scripts pueden llamar `Help_addLine(cmd, line)` para extender el comando.
-thread_local! {
-    static HELP_LINES: std::cell::RefCell<Vec<(String, String)>>
-        = std::cell::RefCell::new(Vec::new());
-}
+/// Almacén GLOBAL de líneas extra para /help (Fase 20).
+///
+/// OJO: debe ser global, no thread-local. Los scripts llaman `Help_addLine`
+/// en el hilo dedicado de scripting, pero `extra_help_lines()` lo lee
+/// `handle_help` desde un hilo de tokio (el que procesa el comando). Con un
+/// thread-local, el lector veía un almacén vacío y las líneas de ayuda de los
+/// scripts nunca aparecían en `/help` (bug reportado en producción).
+static HELP_LINES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 /// Contador monotónico de timer IDs (Fase 20).
 thread_local! {
@@ -1558,18 +1560,21 @@ fn help_add_line_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Re
     if cmd.is_empty() || line.is_empty() {
         return Ok(JsValue::from(false));
     }
-    HELP_LINES.with(|s| s.borrow_mut().push((cmd, line)));
+    if let Ok(mut lines) = HELP_LINES.lock() {
+        let entry = (cmd, line);
+        // Dedup: evitar duplicados si un script se recarga y re-registra.
+        if !lines.contains(&entry) {
+            lines.push(entry);
+        }
+    }
     Ok(JsValue::from(true))
 }
 
 /// Retorna una copia de las líneas extra de help registradas por scripts.
 /// Usado por `handle_help` en el crate `commands` para agregar líneas
-/// antes de mandar el PM al user.
-///
-/// **Importante**: requiere que el script corra en el MISMO thread que
-/// está llamando (que es el caso en el manager dedicado).
+/// antes de mandar el PM al user. Global → visible desde cualquier hilo.
 pub fn extra_help_lines() -> Vec<(String, String)> {
-    HELP_LINES.with(|s| s.borrow().clone())
+    HELP_LINES.lock().map(|l| l.clone()).unwrap_or_default()
 }
 
 // ============================================================================

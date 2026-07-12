@@ -36,8 +36,12 @@ pub async fn handle_connection(
     stream: TcpStream,
     peer: SocketAddr,
     resolved_ip: std::net::IpAddr,
+    scripting: astra_scripting::ScriptHandle,
 ) -> anyhow::Result<()> {
+    use astra_scripting::ScriptEvent;
     info!("WS conectado: {}", peer);
+    // Un cliente web se conectó (equivalente al onConnect del TCP nativo).
+    scripting.dispatch(ScriptEvent::Connect { ip: peer.ip().to_string() });
 
     // Split del stream
     let (mut read_half, mut write_half) = stream.into_split();
@@ -117,6 +121,16 @@ pub async fn handle_connection(
     // Enviar estado inicial (directo a ws_text_tx como strings)
     send_initial_state_ws(&ctx, &user, &ws_text_tx).await;
 
+    // Eventos de scripting del join (paridad con el path TCP nativo).
+    {
+        let jname = user.name.read().clone();
+        scripting.dispatch(ScriptEvent::Join {
+            name: jname.clone(),
+            ip: user.external_ip.to_string(),
+        });
+        scripting.dispatch(ScriptEvent::LoginGranted { name: jname });
+    }
+
     // Broadcast del JOIN a usuarios Ares
     let join_pkt = outbound::build_join_or_userlist(&user);
     broadcast_to_room(&ctx, &user, join_pkt);
@@ -153,7 +167,7 @@ pub async fn handle_connection(
                     Ok(t) => t,
                     Err(_) => continue,
                 };
-                if let Err(e) = dispatch_ws_message(&ctx, &user, &text).await {
+                if let Err(e) = dispatch_ws_message(&ctx, &user, &text, &scripting).await {
                     warn!("ws error dispatch de id={}: {}", user_id, e);
                 }
             }
@@ -167,8 +181,14 @@ pub async fn handle_connection(
     }
 
     // Cleanup
+    let part_name = user.name.read().clone();
     ctx.user_pool.remove(user_id);
     ctx.stats.on_user_part();
+
+    // Eventos de scripting de la salida (paridad con el path TCP nativo).
+    scripting.dispatch(ScriptEvent::Part { name: part_name.clone() });
+    scripting.dispatch(ScriptEvent::Logout { name: part_name });
+    scripting.dispatch(ScriptEvent::Disconnect { ip: user.external_ip.to_string() });
 
     // Broadcast del PART
     let part_pkt = outbound::build_part(&user);
@@ -538,6 +558,7 @@ async fn dispatch_ws_message(
     ctx: &Arc<AppContext>,
     user: &Arc<AresUser>,
     text: &str,
+    scripting: &astra_scripting::ScriptHandle,
 ) -> anyhow::Result<()> {
     let (ident, args) = match protocol::parse_incoming(text) {
         Some(p) => p,
@@ -545,15 +566,15 @@ async fn dispatch_ws_message(
     };
 
     match ident {
-        "PUBLIC" => handle_ws_public(ctx, user, args),
-        "EMOTE" => handle_ws_emote(ctx, user, args),
+        "PUBLIC" => handle_ws_public(ctx, user, args, scripting),
+        "EMOTE" => handle_ws_emote(ctx, user, args, scripting),
         "PING" => {
             debug!("ws PING de id={}", user.id);
         }
-        "COMMAND" => handle_ws_command(ctx, user, args),
-        "PM" => handle_ws_pm(ctx, user, args),
+        "COMMAND" => handle_ws_command(ctx, user, args, scripting),
+        "PM" => handle_ws_pm(ctx, user, args, scripting),
         "PERMSG" => handle_ws_permsg(ctx, user, args),
-        "AVATAR" => handle_ws_avatar(ctx, user, args),
+        "AVATAR" => handle_ws_avatar(ctx, user, args, scripting),
         "CUSTOM_DATA_HEAD" => handle_ws_custom_data_head(ctx, user, args, false),
         "CUSTOM_DATA_BODY" => handle_ws_custom_data_body(ctx, args, false),
         "PM_CUSTOM_DATA_HEAD" => handle_ws_custom_data_head(ctx, user, args, true),
@@ -567,7 +588,12 @@ async fn dispatch_ws_message(
 
 /// Ejecuta un comando recibido por el ident `COMMAND` o por texto público
 /// que empieza con `/` o `#`. Acepta el comando con o sin prefijo.
-fn handle_ws_command(ctx: &AppContext, user: &Arc<AresUser>, raw: &str) {
+fn handle_ws_command(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    raw: &str,
+    scripting: &astra_scripting::ScriptHandle,
+) {
     let raw = raw.trim().trim_start_matches(['/', '#']).trim();
     if raw.is_empty() {
         return;
@@ -576,22 +602,34 @@ fn handle_ws_command(ctx: &AppContext, user: &Arc<AresUser>, raw: &str) {
         Some((c, a)) => (c, a.trim()),
         None => (raw, ""),
     };
-    let (handled, _events) = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);
-    if !handled {
-        let _ = user.print(
-            &ctx.settings.bot_name,
-            &format!("Unknown command: {}", cmd),
-        );
+    let (_handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);
+    // Eventos side-effect del builtin (ej. AdminLevelChanged tras /ban).
+    for ev in events {
+        scripting.dispatch(ev);
     }
+    // Notificar a los scripts de TODO comando (onCommand), lo maneje un builtin
+    // o no — igual que el path TCP nativo. Un comando desconocido no imprime
+    // "unknown": puede estar manejado por un script vía onCommand.
+    let from = user.name.read().clone();
+    scripting.dispatch(astra_scripting::ScriptEvent::Command {
+        from,
+        command: cmd.to_string(),
+        args: cargs.to_string(),
+    });
 }
 
-fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
+fn handle_ws_public(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    text: &str,
+    scripting: &astra_scripting::ScriptHandle,
+) {
     if text.is_empty() {
         return;
     }
     // Comando: `/cmd` o `#cmd` (paridad WebProcessor.Text de sb0t).
     if text.starts_with('/') || text.starts_with('#') {
-        handle_ws_command(ctx, user, text);
+        handle_ws_command(ctx, user, text, scripting);
         return;
     }
     // Word filter: solo aplica (censura) a usuarios regulares (Moderator+ exentos).
@@ -608,6 +646,11 @@ fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
         broadcast_announce_lines_ws(ctx, &sender_name, user.external_ip, &lines, &remainder);
     }
     let name = user.name.read().clone();
+    // Evento de scripting (onPublic), paridad con el path TCP nativo.
+    scripting.dispatch(astra_scripting::ScriptEvent::Public {
+        from: name.clone(),
+        text: text.to_string(),
+    });
     let pkt = outbound::build_public(&name, text);
     broadcast_to_room(ctx, user, pkt);
     ctx.record_message(&name, text, false);
@@ -615,7 +658,12 @@ fn handle_ws_public(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
 
 /// PM saliente de un usuario web: `PM:{nameLen},{textLen}:{target}{text}`.
 /// Paridad `WebProcessor.PM` de sb0t (incluye `#cmd`//`/cmd` al bot = comando).
-fn handle_ws_pm(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_ws_pm(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    args: &str,
+    scripting: &astra_scripting::ScriptHandle,
+) {
     let Some(items) = protocol::parse_lens_args(args) else {
         return;
     };
@@ -634,7 +682,7 @@ fn handle_ws_pm(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     // PM al bot: los comandos `/x` o `#x` se ejecutan (paridad sb0t).
     if target_name == ctx.settings.bot_name {
         if text.starts_with('/') || text.starts_with('#') {
-            handle_ws_command(ctx, user, &text);
+            handle_ws_command(ctx, user, &text, scripting);
         }
         return;
     }
@@ -713,7 +761,12 @@ fn handle_ws_permsg(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 /// Avatar subido por un usuario web: `AVATAR:{len1},{len2}:{arg0}{base64}`.
 /// Se guarda y se re-anuncia a los inbizier de la sala (USERINFO con el
 /// avatar nuevo) para que se actualice en vivo.
-fn handle_ws_avatar(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_ws_avatar(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    args: &str,
+    scripting: &astra_scripting::ScriptHandle,
+) {
     use base64::Engine as _;
     if !ctx.room_flags.get("avatars") {
         return;
@@ -728,6 +781,11 @@ fn handle_ws_avatar(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
         return;
     };
+    // Evento de scripting (onAvatar), paridad con el path TCP nativo.
+    scripting.dispatch(astra_scripting::ScriptEvent::Avatar {
+        name: user.name.read().clone(),
+        png: bytes.clone(),
+    });
     *user.full_avatar.lock() = Some(bytes.clone());
     *user.avatar.lock() = Some(bytes);
     user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1057,11 +1115,21 @@ fn filter_remove_user_ws(ctx: &AppContext, user: &Arc<AresUser>) {
     }
 }
 
-fn handle_ws_emote(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
+fn handle_ws_emote(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    text: &str,
+    scripting: &astra_scripting::ScriptHandle,
+) {
     if text.is_empty() {
         return;
     }
     let name = user.name.read().clone();
+    // Evento de scripting (onEmote), paridad con el path TCP nativo.
+    scripting.dispatch(astra_scripting::ScriptEvent::Emote {
+        from: name.clone(),
+        text: text.to_string(),
+    });
     let pkt = outbound::build_emote(&name, text);
     broadcast_to_room(ctx, user, pkt);
     ctx.record_message(&name, text, true);

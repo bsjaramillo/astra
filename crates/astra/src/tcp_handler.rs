@@ -872,13 +872,15 @@ fn route_command_text(
         format!("/{}", text)
     };
     if let Some((cmd, args)) = astra_commands::parse_command(&slashed) {
-        let (handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
-        if handled {
-            for ev in events {
-                scripting.dispatch(ev);
-            }
-            return;
+        let (_handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
+        // Eventos side-effect del builtin (ej. AdminLevelChanged tras /ban).
+        for ev in events {
+            scripting.dispatch(ev);
         }
+        // Notificar a los scripts de TODO comando (onCommand), lo haya manejado
+        // un builtin o no. Paridad sb0t: los scripts ven todos los comandos y
+        // pueden reaccionar (ej. sumar salida a /help). Antes solo llegaban los
+        // comandos desconocidos.
         let name = user.name.read().clone();
         astra_commands::dispatch(ctx, scripting, &name, cmd, args);
     }
