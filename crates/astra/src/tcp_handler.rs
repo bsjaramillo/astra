@@ -678,7 +678,7 @@ async fn dispatch_message(
             handle_pvt(ctx, user, &pkt.data[1..], scripting).await;
         }
         TcpMsg::PersonalMessage => {
-            handle_personal_message(ctx, user, &pkt.data[1..]).await;
+            handle_personal_message(ctx, user, &pkt.data[1..], scripting).await;
         }
         TcpMsg::ClientCommand => {
             // Canal de comandos de Ares (sin '/'). Se rutea a los built-ins.
@@ -937,18 +937,10 @@ async fn handle_public(
         if handled {
             debug!("comando built-in de '{}': /{} {}", name, cmd, args);
             // Disparar los side-effects de scripting que el comando generó
+            // (incluye onVroomJoin, onNick, onRegistered, etc., que ahora
+            // emite el propio handler en `commands`).
             for ev in events {
                 scripting.dispatch(ev);
-            }
-            // Post-dispatch hooks: disparan eventos de scripting
-            // que commands no puede emitir (no depende de scripting).
-            if cmd.eq_ignore_ascii_case("vroom") {
-                if let Ok(new_vroom) = args.trim().parse::<u16>() {
-                    scripting.dispatch(astra_scripting::ScriptEvent::VroomJoin {
-                        name: name.clone(),
-                        vroom: new_vroom,
-                    });
-                }
             }
             return;
         }
@@ -1132,6 +1124,12 @@ async fn handle_pvt(
                 to: target_name,
             });
         } else {
+            // Evento onPrivate (tras pasar el hook onPMBefore y los bloqueos).
+            scripting.dispatch(astra_scripting::ScriptEvent::Private {
+                from: from.clone(),
+                to: target_name.clone(),
+                text: text.clone(),
+            });
             // El PM se cifra con la key del DESTINATARIO.
             let pkt = outbound::build_pvt_c(&from, &text, target.ares_crypto);
             if !target.send(pkt) {
@@ -1174,13 +1172,18 @@ fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8])
 }
 
 /// Maneja MSG_CHAT_CLIENT_PERSONAL_MESSAGE (13).
-async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) {
+async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>, data: &[u8], scripting: &ScriptHandle) {
     let mut r = PacketReader::new_crypto(data, user.ares_crypto);
     let text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
     };
     *user.personal_message.lock() = text.clone();
+    // Evento onPersonalMessage.
+    scripting.dispatch(astra_scripting::ScriptEvent::PersonalMessage {
+        name: user.name.read().clone(),
+        text: text.clone(),
+    });
 
     // Broadcast a la sala: cada uno recibe un "MSG_CHAT_SERVER_PERSONAL_MESSAGE"
     // con el nuevo PM. Lo simplificamos: el server reenvía a cada user.

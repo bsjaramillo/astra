@@ -76,7 +76,7 @@ pub async fn handle_connection(
     let mut buf = BytesMut::with_capacity(8192);
     let handshake_timeout = Duration::from_secs(15);
     let user = match timeout(handshake_timeout, async {
-        ws_handshake_login(&ctx.clone(), &mut read_half, &mut buf, &ws_text_tx, peer, resolved_ip).await
+        ws_handshake_login(&ctx.clone(), &mut read_half, &mut buf, &ws_text_tx, peer, resolved_ip, &scripting).await
     })
     .await
     {
@@ -119,7 +119,7 @@ pub async fn handle_connection(
     let _ = astra_commands::dispatch_autologin(&ctx, &user);
 
     // Enviar estado inicial (directo a ws_text_tx como strings)
-    send_initial_state_ws(&ctx, &user, &ws_text_tx).await;
+    send_initial_state_ws(&ctx, &user, &ws_text_tx, &scripting).await;
 
     // Eventos de scripting del join (paridad con el path TCP nativo).
     {
@@ -337,6 +337,7 @@ async fn ws_handshake_login(
     ws_text_tx: &mpsc::UnboundedSender<String>,
     peer: SocketAddr,
     resolved_ip: std::net::IpAddr,
+    scripting: &astra_scripting::ScriptHandle,
 ) -> anyhow::Result<Option<Arc<AresUser>>> {
     let frame = read_ws_frame(read_half, buf).await?;
     let (opcode, payload) = match frame {
@@ -380,6 +381,8 @@ async fn ws_handshake_login(
     }
     if ctx.user_history.is_join_flooding(external_ip, now_ms) {
         warn!("REJECTED (join-flood): peer={} nick='{}'", peer, login.name);
+        // Evento onFlood (paridad TCP nativo).
+        scripting.dispatch(astra_scripting::ScriptEvent::Flood { name: login.name.clone() });
         let _ = ws_text_tx.send("ERROR:Joining too quickly".to_string());
         return Ok(None);
     }
@@ -481,6 +484,7 @@ async fn send_initial_state_ws(
     ctx: &AppContext,
     user: &Arc<AresUser>,
     tx: &mpsc::UnboundedSender<String>,
+    scripting: &astra_scripting::ScriptHandle,
 ) {
     use server_core::ILevel;
 
@@ -531,10 +535,18 @@ async fn send_initial_state_ws(
                 other.inbizier_web,
                 other.inbizier_mobile,
             ));
+            // Evento onUserList por cada usuario (paridad TCP nativo).
+            scripting.dispatch(astra_scripting::ScriptEvent::UserList {
+                name,
+                users_csv: String::new(),
+            });
         }
     }
     // 6) Fin de la userlist.
     let _ = tx.send(build_userlist_end());
+    scripting.dispatch(astra_scripting::ScriptEvent::UserListEnd {
+        name: user.name.read().clone(),
+    });
 }
 
 /// Base64 del avatar de un usuario para USERINFO/JOININFO (sb0t manda el
@@ -573,7 +585,7 @@ async fn dispatch_ws_message(
         }
         "COMMAND" => handle_ws_command(ctx, user, args, scripting),
         "PM" => handle_ws_pm(ctx, user, args, scripting),
-        "PERMSG" => handle_ws_permsg(ctx, user, args),
+        "PERMSG" => handle_ws_permsg(ctx, user, args, scripting),
         "AVATAR" => handle_ws_avatar(ctx, user, args, scripting),
         "CUSTOM_DATA_HEAD" => handle_ws_custom_data_head(ctx, user, args, false),
         "CUSTOM_DATA_BODY" => handle_ws_custom_data_body(ctx, args, false),
@@ -646,6 +658,11 @@ fn handle_ws_public(
         broadcast_announce_lines_ws(ctx, &sender_name, user.external_ip, &lines, &remainder);
     }
     let name = user.name.read().clone();
+    // Hook cancelable onTextBefore (paridad TCP): un script puede bloquear el
+    // mensaje devolviendo false.
+    if !scripting.check_text_before(&name, text) {
+        return;
+    }
     // Evento de scripting (onPublic), paridad con el path TCP nativo.
     scripting.dispatch(astra_scripting::ScriptEvent::Public {
         from: name.clone(),
@@ -710,13 +727,27 @@ fn handle_ws_pm(
         );
         return;
     }
+    // Hook cancelable onPMBefore + evento onPrivate (paridad TCP).
+    if !scripting.check_pm_before(&from, target_name, &text) {
+        return;
+    }
+    scripting.dispatch(astra_scripting::ScriptEvent::Private {
+        from: from.clone(),
+        to: target_name.to_string(),
+        text: text.clone(),
+    });
     let _ = target.send_pvt(&from, &text);
 }
 
 /// Cambio de personal message: `PERMSG:{len1},{len2}:{arg0}{texto}`.
 /// Se guarda (máx 50 chars) y se difunde como PERSMSG a los inbizier y como
 /// PersonalMessage binario a los clientes Ares (paridad sb0t).
-fn handle_ws_permsg(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_ws_permsg(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    args: &str,
+    scripting: &astra_scripting::ScriptHandle,
+) {
     let Some(items) = protocol::parse_lens_args(args) else {
         return;
     };
@@ -733,6 +764,11 @@ fn handle_ws_permsg(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         *pmsg = text.clone();
     }
     let name = user.name.read().clone();
+    // Evento de scripting (onPersonalMessage).
+    scripting.dispatch(astra_scripting::ScriptEvent::PersonalMessage {
+        name: name.clone(),
+        text: text.clone(),
+    });
     let vroom = *user.vroom.read();
     let ws_msg = protocol::build_persmsg(&name, &text);
     for u in ctx.user_pool.users() {
@@ -1125,6 +1161,10 @@ fn handle_ws_emote(
         return;
     }
     let name = user.name.read().clone();
+    // Hook cancelable onEmoteBefore (paridad TCP).
+    if !scripting.check_emote_before(&name, text) {
+        return;
+    }
     // Evento de scripting (onEmote), paridad con el path TCP nativo.
     scripting.dispatch(astra_scripting::ScriptEvent::Emote {
         from: name.clone(),

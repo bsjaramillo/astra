@@ -220,15 +220,15 @@ pub fn dispatch_builtin(
     match cmd.as_str() {
         "help" => {
             handle_help(ctx, user, args);
-            (true, vec![])
+            (true, vec![astra_scripting::ScriptEvent::Help { command: args.to_string() }])
         }
         "nick" => {
-            handle_nick(ctx, user, args);
-            (true, vec![])
+            let events = handle_nick(ctx, user, args);
+            (true, events)
         }
         "vroom" => {
-            handle_vroom(ctx, user, args);
-            (true, vec![])
+            let events = handle_vroom(ctx, user, args);
+            (true, events)
         }
         "users" => {
             handle_users(ctx, user, args);
@@ -363,12 +363,12 @@ pub fn dispatch_builtin(
             (true, vec![])
         }
         "register" => {
-            handle_register(ctx, user, args);
-            (true, vec![])
+            let events = handle_register(ctx, user, args);
+            (true, events)
         }
         "unregister" | "rempassword" => {
-            handle_unregister(ctx, user, args);
-            (true, vec![])
+            let events = handle_unregister(ctx, user, args);
+            (true, events)
         }
         "whisper" => {
             handle_whisper(ctx, user, args);
@@ -886,25 +886,25 @@ fn handle_help(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
 }
 
-fn handle_nick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_nick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Vec<astra_scripting::ScriptEvent> {
     let new_name = args.trim();
     if new_name.is_empty() {
         send_system_line(ctx, user, "Usage: /nick <name>");
-        return;
+        return vec![];
     }
     if new_name.chars().count() > 30 {
         send_system_line(ctx, user, "Nickname too long.");
-        return;
+        return vec![];
     }
 
     let old_name = user.name.read().clone();
     if old_name.eq_ignore_ascii_case(new_name) {
         send_system_line(ctx, user, "You already have that nickname.");
-        return;
+        return vec![];
     }
     if ctx.user_pool.get_by_name(new_name).is_some() {
         send_system_line(ctx, user, "Nickname already in use.");
-        return;
+        return vec![];
     }
 
     *user.name.write() = new_name.to_string();
@@ -922,23 +922,27 @@ fn handle_nick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 
     ctx.publish_link_event(server_core::LinkEvent::NickChanged {
         origin: None,
-        old_name,
+        old_name: old_name.clone(),
         user: server_core::LinkUserSnapshot::from_user(user),
     });
 
     send_system_line(ctx, user, "Nickname updated.");
+    vec![astra_scripting::ScriptEvent::Nick {
+        old: old_name,
+        new: new_name.to_string(),
+    }]
 }
 
-fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Vec<astra_scripting::ScriptEvent> {
     let Ok(new_vroom) = args.trim().parse::<u16>() else {
         send_system_line(ctx, user, "Usage: /vroom <id>");
-        return;
+        return vec![];
     };
 
     let old_vroom = *user.vroom.read();
     if old_vroom == new_vroom {
         send_system_line(ctx, user, "You are already in that vroom.");
-        return;
+        return vec![];
     }
 
     // Auto-crear el vroom destino si no existe (compat con sb0t)
@@ -970,11 +974,14 @@ fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         origin: None,
         user: server_core::LinkUserSnapshot::from_user(user),
     });
-    // El evento de scripting (onVroomJoin) lo dispara tcp_handler.rs
-    // después de dispatch_builtin, porque commands no tiene acceso a
-    // ScriptHandle (commands no depende de scripting).
 
     send_system_line(ctx, user, &format!("Moved to vroom {}.", new_vroom));
+    // onVroomJoin — path-independent: lo despachan tanto el path TCP como el
+    // web al dispatchear los eventos que retorna el builtin.
+    vec![astra_scripting::ScriptEvent::VroomJoin {
+        name: user.name.read().clone(),
+        vroom: new_vroom,
+    }]
 }
 
 fn handle_cname(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
@@ -1457,35 +1464,45 @@ fn handle_version(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     );
 }
 
-fn handle_register(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_register(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Vec<astra_scripting::ScriptEvent> {
     if !ctx.settings.allow_registration {
         send_system_line(ctx, user, "Registration is disabled in this room.");
-        return;
+        return vec![];
     }
 
     let password = args.trim();
     if password.len() < 4 {
         send_system_line(ctx, user, "Usage: /register <password> (4+ chars)");
-        return;
+        return vec![];
     }
 
     match ctx.accounts.find_by_guid(&user.guid) {
         Ok(Some(_)) => {
             send_system_line(ctx, user, "Already registered. Use /unregister first.");
-            return;
+            return vec![];
         }
         Ok(None) => {}
         Err(_) => {
             send_system_line(ctx, user, "Registration failed (database error).");
-            return;
+            return vec![];
         }
     }
 
     let name = user.name.read().clone();
+    let ip = user.external_ip.to_string();
     let live_level = (*user.level.read() as u8).max(ILevel::Regular as u8);
     match ctx.accounts.register(&name, &user.guid, password, live_level) {
-        Ok(()) => send_system_line(ctx, user, "Account registered. Use /login <password>."),
-        Err(_) => send_system_line(ctx, user, "Registration failed (database error)."),
+        Ok(()) => {
+            send_system_line(ctx, user, "Account registered. Use /login <password>.");
+            vec![
+                astra_scripting::ScriptEvent::Registering { name: name.clone(), ip: ip.clone() },
+                astra_scripting::ScriptEvent::Registered { name, ip },
+            ]
+        }
+        Err(_) => {
+            send_system_line(ctx, user, "Registration failed (database error).");
+            vec![]
+        }
     }
 }
 
@@ -1523,11 +1540,20 @@ fn handle_pmblock(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     );
 }
 
-fn handle_unregister(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+fn handle_unregister(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) -> Vec<astra_scripting::ScriptEvent> {
     match ctx.accounts.unregister(&user.guid) {
-        Ok(true) => send_system_line(ctx, user, "Account deleted."),
-        Ok(false) => send_system_line(ctx, user, "You are not registered."),
-        Err(_) => send_system_line(ctx, user, "Unregister failed (database error)."),
+        Ok(true) => {
+            send_system_line(ctx, user, "Account deleted.");
+            vec![astra_scripting::ScriptEvent::Unregistered { name: user.name.read().clone() }]
+        }
+        Ok(false) => {
+            send_system_line(ctx, user, "You are not registered.");
+            vec![]
+        }
+        Err(_) => {
+            send_system_line(ctx, user, "Unregister failed (database error).");
+            vec![]
+        }
     }
 }
 
