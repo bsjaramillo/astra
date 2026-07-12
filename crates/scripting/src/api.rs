@@ -592,6 +592,14 @@ var File = {
   kill: File_delete, "delete": File_delete
 };
 
+// ---- Puente de nombres de handler Astra→sb0t ----
+// Astra dispara onPublic/onEmote; los scripts de sb0t definen
+// onTextReceived/onEmoteReceived. Si el script NO define el handler nativo de
+// Astra (lo sobreescribiría, ya que corre después del prelude), reenviamos al
+// nombre de sb0t. El primer arg ya es un objeto `user` (Fase 4).
+function onPublic(user, text){ if (typeof onTextReceived === "function") return onTextReceived(user, text); }
+function onEmote(user, text){ if (typeof onEmoteReceived === "function") return onEmoteReceived(user, text); }
+
 // ---- Globals sb0t ----
 var sendText = sendPublic;
 function scriptName(){ return (typeof __SCRIPT_DIR__ === "string") ? __SCRIPT_DIR__.replace(/[\\/]+$/,"").split(/[\\/]/).pop() : ""; }
