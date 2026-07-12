@@ -618,6 +618,9 @@ var File = {
 // nombre de sb0t. El primer arg ya es un objeto `user` (Fase 4).
 function onPublic(user, text){ if (typeof onTextReceived === "function") return onTextReceived(user, text); }
 function onEmote(user, text){ if (typeof onEmoteReceived === "function") return onEmoteReceived(user, text); }
+// Astra dispara onPrivate(emisor, destino, texto); sb0t define onPM(emisor,
+// destino) — ambos JSUser. Reenviamos si el script no definió onPrivate.
+function onPrivate(from, to, text){ if (typeof onPM === "function") return onPM(from, to); }
 
 // ---- Globals sb0t ----
 var sendText = sendPublic;
@@ -833,6 +836,19 @@ PM.prototype.remove = function(s){ this.__t = this.__t.split(s).join(""); return
 PM.prototype.replace = function(a, b){ this.__t = this.__t.split(a).join(b); return this; };
 PM.prototype.toString = function(){ return this.__t; };
 PM.prototype.valueOf = function(){ return this.__t; };
+
+// __mkPM: el mensaje que se pasa a onPMBefore. Es un String OBJECT (tiene
+// TODOS los métodos de string nativos → compat con scripts que lo usan como
+// string) MÁS los helpers JSPM de sb0t (contains/remove/replace/isScribble).
+function __mkPM(text){
+  var t = text == null ? "" : "" + text;
+  var s = new String(t);
+  s.contains = function(x){ return t.indexOf(x) >= 0; };
+  s.remove = function(x){ return __mkPM(t.split(x).join("")); };
+  s.replace = function(a, b){ return __mkPM(t.split(a).join(b)); };
+  Object.defineProperty(s, "isScribble", { get: function(){ return t.indexOf('#scribble') === 0 || /^data:image/i.test(t); } });
+  return s;
+}
 
 // ---- Leaf: hub linkeado (JSLeaf). Astra no linkea → stub con defaults seguros. ----
 function Leaf(){ this.externalIp = ""; this.port = 0; this.name = ""; this.hashlink = ""; }
@@ -3079,6 +3095,25 @@ pub fn build_user_object(ctx: &mut Context, name: &str) -> JsValue {
     }
 }
 
+/// Construye el objeto `PM` (JSPM) para `text` invocando el global `__mkPM`
+/// del prelude (un String con helpers contains/remove/replace/isScribble).
+/// Cae al string plano si el prelude no está disponible.
+pub fn build_pm_object(ctx: &mut Context, text: &str) -> JsValue {
+    let mk = match ctx.global_object().get(js_string!("__mkPM"), ctx) {
+        Ok(v) if v.is_object() => v,
+        _ => return JsValue::from(js_string!(text)),
+    };
+    let obj = match mk.as_object() {
+        Some(o) => o.clone(),
+        None => return JsValue::from(js_string!(text)),
+    };
+    let arg = JsValue::from(js_string!(text));
+    match obj.call(&JsValue::undefined(), &[arg], ctx) {
+        Ok(v) if !v.is_null_or_undefined() => v,
+        _ => JsValue::from(js_string!(text)),
+    }
+}
+
 /// Llama a una función JS global con los argumentos dados.
 pub fn call_global_function(
     ctx: &mut Context,
@@ -3546,6 +3581,32 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         u.sender = Some(tx);
         (Arc::new(u), rx)
+    }
+
+    #[test]
+    fn pm_object_hybrid_string_and_jspm() {
+        let mut ctx = make_context(make_app());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            var pm = __mkPM("hello #world");
+            // métodos de string nativos (compat scripts que lo usan como string)
+            if (pm.indexOf("hello") !== 0) throw "indexOf";
+            if (pm.length !== 12) throw "length: " + pm.length;
+            if (pm.toUpperCase() !== "HELLO #WORLD") throw "toUpperCase";
+            if (("got " + pm) !== "got hello #world") throw "concat";
+            if ((pm == "hello #world") !== true) throw "loose eq";
+            // métodos JSPM de sb0t
+            if (pm.contains("world") !== true) throw "contains";
+            if (pm.contains("xyz") !== false) throw "contains neg";
+            if (("" + pm.remove("hello ")) !== '#world') throw "remove";
+            if (("" + pm.replace("world", "there")) !== "hello #there") throw "replace";
+            if (__mkPM('#scribble#x').isScribble !== true) throw "isScribble";
+            if (__mkPM("plain").isScribble !== false) throw "isScribble neg";
+        "#,
+        );
+        assert!(result.is_ok(), "pm hybrid should work: {:?}", result);
+        unregister_context(&ctx);
     }
 
     #[test]

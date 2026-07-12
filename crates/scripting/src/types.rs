@@ -113,6 +113,18 @@ impl Drop for Script {
     }
 }
 
+/// Tipo con el que se convierte un argumento string en un valor JS al
+/// invocar un handler, para paridad con sb0t.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgKind {
+    /// String plano.
+    Str,
+    /// Objeto `user` (JSUser) construido a partir del nombre.
+    User,
+    /// Objeto `PM` (JSPM): el texto con helpers contains/remove/isScribble.
+    Pm,
+}
+
 /// Evento que se puede enviar a un script.
 ///
 /// Equivalente a los 45 callbacks del sb0t original. Los nombres
@@ -400,6 +412,29 @@ impl ScriptEvent {
             | HttpComplete { .. } => None,
             // El resto lleva el nombre del usuario en el argumento 0.
             _ => Some(0),
+        }
+    }
+
+    /// Tipo con el que se debe pasar el argumento `idx` al handler JS, para
+    /// paridad con sb0t: `User` = objeto JSUser, `Pm` = objeto JSPM (texto de
+    /// privado con helpers), `Str` = string plano.
+    pub fn arg_kind(&self, idx: usize) -> ArgKind {
+        use ScriptEvent::*;
+        match self {
+            // PMs: (emisor JSUser, destino JSUser, mensaje JSPM) — igual que
+            // sb0t onPM/onPMBefore/onPrivate.
+            Private { .. } | PM { .. } | PMBefore { .. } => match idx {
+                0 | 1 => ArgKind::User,
+                2 => ArgKind::Pm,
+                _ => ArgKind::Str,
+            },
+            _ => {
+                if self.user_arg_index() == Some(idx) {
+                    ArgKind::User
+                } else {
+                    ArgKind::Str
+                }
+            }
         }
     }
 

@@ -113,11 +113,25 @@ impl ScriptRequest {
         }
     }
 
-    /// Índice del argumento con el nombre de usuario a convertir en objeto
-    /// `user` (paridad sb0t). Todas las variantes `*Before`/`ScribbleCheck`
-    /// llevan el emisor en el argumento 0.
-    fn user_arg_index(&self) -> Option<usize> {
-        Some(0)
+    /// Tipo de conversión del argumento `idx` (paridad sb0t). El emisor va en
+    /// 0; `PMBefore` además lleva el destino (JSUser) en 1 y el mensaje (JSPM)
+    /// en 2, igual que sb0t `onPMBefore(u, t, pm)`.
+    fn arg_kind(&self, idx: usize) -> crate::types::ArgKind {
+        use crate::types::ArgKind;
+        match self {
+            ScriptRequest::PMBefore { .. } => match idx {
+                0 | 1 => ArgKind::User,
+                2 => ArgKind::Pm,
+                _ => ArgKind::Str,
+            },
+            _ => {
+                if idx == 0 {
+                    ArgKind::User
+                } else {
+                    ArgKind::Str
+                }
+            }
+        }
     }
 
     fn args(&self) -> Vec<String> {
@@ -492,7 +506,7 @@ impl ScriptManager {
             return Err(e);
         }
 
-        let onload_result = call_void_handler(&mut ctx, "onLoad", &[], None);
+        let onload_result = call_void_handler(&mut ctx, "onLoad", &[], |_| crate::types::ArgKind::Str);
         if let Err(e) = onload_result {
             warn!("script '{}' onLoad() error: {}", name, e);
         }
@@ -599,7 +613,7 @@ impl ScriptManager {
             }
             let mut ctx_guard = script.context.lock();
             if let Some(ctx) = ctx_guard.as_mut() {
-                if let Err(e) = call_void_handler(ctx, handler_name, &args, event.user_arg_index()) {
+                if let Err(e) = call_void_handler(ctx, handler_name, &args, |i| event.arg_kind(i)) {
                     let msg = format!("error en handler '{}': {}", handler_name, e);
                     warn!("script '{}': {}", script.name(), msg);
                     script.set_error(msg.clone());
@@ -687,7 +701,7 @@ impl ScriptManager {
             }
             let mut ctx_guard = script.context.lock();
             if let Some(ctx) = ctx_guard.as_mut() {
-                match call_handler_with_return(ctx, handler_name, &args, request.user_arg_index()) {
+                match call_handler_with_return(ctx, handler_name, &args, |i| request.arg_kind(i)) {
                     Ok(Some(false)) => {
                         // El script retornó false explícitamente → cancela
                         allow = false;
@@ -734,25 +748,27 @@ impl ScriptManager {
         let ctx = ctx_guard
             .as_mut()
             .ok_or_else(|| "context no inicializado".to_string())?;
-        call_void_handler(ctx, event.handler_name(), &event.args(), event.user_arg_index())
+        call_void_handler(ctx, event.handler_name(), &event.args(), |i| event.arg_kind(i))
     }
 }
 
 /// Llama a una función JS sin retorno con los argumentos dados.
-/// Convierte los argumentos string en `JsValue`, transformando el arg en
-/// `user_idx` (si lo hay) en un objeto `user` (JSUser) para paridad sb0t.
+/// Convierte los argumentos string en `JsValue` según el `ArgKind` de cada
+/// posición: `User` → objeto JSUser, `Pm` → objeto JSPM, `Str` → string.
+/// Da paridad con sb0t (handlers que reciben usuarios y mensajes-objeto).
 fn build_handler_args(
     ctx: &mut boa_engine::Context,
     args: &[String],
-    user_idx: Option<usize>,
+    kind: impl Fn(usize) -> crate::types::ArgKind,
 ) -> Vec<JsValue> {
+    use crate::types::ArgKind;
     let mut out = Vec::with_capacity(args.len());
     for (i, s) in args.iter().enumerate() {
-        if Some(i) == user_idx {
-            out.push(crate::api::build_user_object(ctx, s));
-        } else {
-            out.push(JsValue::from(boa_engine::js_string!(s.as_str())));
-        }
+        out.push(match kind(i) {
+            ArgKind::User => crate::api::build_user_object(ctx, s),
+            ArgKind::Pm => crate::api::build_pm_object(ctx, s),
+            ArgKind::Str => JsValue::from(boa_engine::js_string!(s.as_str())),
+        });
     }
     out
 }
@@ -761,9 +777,9 @@ fn call_void_handler(
     ctx: &mut boa_engine::Context,
     name: &str,
     args: &[String],
-    user_idx: Option<usize>,
+    kind: impl Fn(usize) -> crate::types::ArgKind,
 ) -> Result<(), String> {
-    let js_args = build_handler_args(ctx, args, user_idx);
+    let js_args = build_handler_args(ctx, args, kind);
     call_global_function(ctx, name, &js_args)
 }
 
@@ -778,7 +794,7 @@ fn call_handler_with_return(
     ctx: &mut boa_engine::Context,
     name: &str,
     args: &[String],
-    user_idx: Option<usize>,
+    kind: impl Fn(usize) -> crate::types::ArgKind,
 ) -> Result<Option<bool>, String> {
     use boa_engine::js_string;
     use boa_engine::property::PropertyKey;
@@ -796,7 +812,7 @@ fn call_handler_with_return(
         return Ok(None);
     }
 
-    let js_args = build_handler_args(ctx, args, user_idx);
+    let js_args = build_handler_args(ctx, args, kind);
 
     let result = func
         .as_object()
@@ -838,6 +854,59 @@ mod tests {
         let db = Database::in_memory().unwrap();
         let app = AppContext::new(Settings::default(), db);
         ScriptManager::new(Arc::new(app), std::env::temp_dir().join("astra_scripts_test"))
+    }
+
+    #[test]
+    fn onpm_bridge_passes_both_users() {
+        use server_core::user_pool::AresUser;
+        let db = Database::in_memory().unwrap();
+        let app = Arc::new(AppContext::new(Settings::default(), db));
+
+        let mut a = AresUser::new(1, "10.0.0.1".parse().unwrap(), [0u8; 16]);
+        *a.name.write() = "Alice".to_string();
+        a.logged_in = true;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        a.sender = Some(tx);
+        app.user_pool.add(Arc::new(a));
+
+        let mut b = AresUser::new(2, "10.0.0.2".parse().unwrap(), [1u8; 16]);
+        *b.name.write() = "Bob".to_string();
+        b.logged_in = true;
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        b.sender = Some(tx2);
+        app.user_pool.add(Arc::new(b));
+
+        let mgr = ScriptManager::new(
+            app.clone(),
+            std::env::temp_dir().join("astra_scripts_test_onpm"),
+        );
+        // Script sb0t: onPM(sender, target), ambos JSUser (no texto).
+        mgr.load_source(
+            "onpm",
+            None,
+            r#"
+            function onPM(sender, target){
+                if (typeof sender === "object" && sender.name === "Alice" &&
+                    typeof target === "object" && target.name === "Bob" &&
+                    (sender == "Alice") && (target == "Bob") &&
+                    typeof target.ban === "function"){
+                    sendPM("srv", "Alice", "OK");
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        mgr.dispatch(&ScriptEvent::Private {
+            from: "Alice".into(),
+            to: "Bob".into(),
+            text: "hola".into(),
+        });
+
+        let pkt = rx
+            .try_recv()
+            .expect("Alice debe recibir el PM => onPM recibió emisor+destino como objetos user");
+        assert_eq!(pkt[0], 25, "esperado Pmt (25), got {}", pkt[0]);
     }
 
     #[test]
@@ -1635,9 +1704,11 @@ mod tests {
 
     #[test]
     fn pm_before_can_cancel() {
+        // sb0t: onPMBefore(emisor JSUser, destino JSUser, mensaje JSPM).
+        // `to` es un objeto user; se compara por .name o con == (string-compat).
         let src = r#"
             function onPMBefore(from, to, text) {
-                if (to === "Alice") return false;
+                if (to == "Alice") return false;
                 return true;
             }
         "#;
