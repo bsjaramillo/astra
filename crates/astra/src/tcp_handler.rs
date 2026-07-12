@@ -219,6 +219,7 @@ pub async fn handle_tcp_client(
     // Cleanup
     // ============================================================
     let user_name = user_arc.name.read().clone();
+    ctx.record_departure(&user_arc);
     ctx.user_pool.remove(user_id);
     ctx.stats.on_user_part();
     // Forget idle tracking
@@ -1367,6 +1368,7 @@ fn broadcast_announce_lines(
 
 /// Remueve un usuario del pool y difunde su PART (mismo patrón que `/kick`).
 fn filter_remove_user(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>) {
+    ctx.record_departure(user);
     ctx.user_pool.remove(user.id);
     ctx.stats.on_user_part();
     for u in ctx.user_pool.users() {

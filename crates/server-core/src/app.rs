@@ -419,6 +419,32 @@ pub struct AppContext {
     pub message_history: parking_lot::Mutex<std::collections::VecDeque<HistoryEntry>>,
     /// Bus interno de eventos Link.
     pub link_events: broadcast::Sender<LinkEvent>,
+    /// Historial reciente de usuarios que se desconectaron (ring buffer para
+    /// `Users.records()` del scripting, paridad sb0t). Cap 50, más reciente
+    /// al frente.
+    pub user_records: parking_lot::RwLock<std::collections::VecDeque<UserRecord>>,
+}
+
+/// Registro histórico de un usuario que estuvo conectado (para
+/// `Users.records()` del scripting).
+#[derive(Debug, Clone)]
+pub struct UserRecord {
+    /// Nombre.
+    pub name: String,
+    /// IP externa.
+    pub external_ip: std::net::IpAddr,
+    /// IP local.
+    pub local_ip: std::net::IpAddr,
+    /// Versión del cliente.
+    pub version: String,
+    /// Puerto de datos.
+    pub port: u16,
+    /// GUID (16 bytes).
+    pub guid: [u8; 16],
+    /// DNS.
+    pub dns: String,
+    /// Momento de conexión (epoch secs).
+    pub join_time: u64,
 }
 
 impl AppContext {
@@ -509,12 +535,32 @@ impl AppContext {
             room_status: RwLock::new(String::new()),
             message_history: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             link_events,
+            user_records: parking_lot::RwLock::new(std::collections::VecDeque::new()),
         }
     }
 
     /// Uptime en segundos.
     pub fn uptime_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
+    }
+
+    /// Registra en el historial que un usuario se desconectó (para
+    /// `Users.records()` del scripting). Ring buffer de 50, más reciente al
+    /// frente; evita duplicar el mismo GUID consecutivo.
+    pub fn record_departure(&self, user: &std::sync::Arc<crate::user_pool::AresUser>) {
+        let rec = UserRecord {
+            name: user.name.read().clone(),
+            external_ip: user.external_ip,
+            local_ip: user.local_ip,
+            version: user.version.clone(),
+            port: user.data_port,
+            guid: user.guid,
+            dns: user.dns.read().clone(),
+            join_time: user.join_time,
+        };
+        let mut recs = self.user_records.write();
+        recs.push_front(rec);
+        recs.truncate(50);
     }
 
     /// Retorna una copia del topic actual.
@@ -643,6 +689,7 @@ impl AppContext {
     /// destinatario). Helper interno para acciones admin recibidas por Link.
     fn remove_and_broadcast_part(&self, user: &std::sync::Arc<crate::user_pool::AresUser>) {
         let part = crate::outbound::build_part(user);
+        self.record_departure(user);
         self.user_pool.remove(user.id);
         self.stats.on_user_part();
         for u in self.user_pool.users() {

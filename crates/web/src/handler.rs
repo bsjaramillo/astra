@@ -182,6 +182,7 @@ pub async fn handle_connection(
 
     // Cleanup
     let part_name = user.name.read().clone();
+    ctx.record_departure(&user);
     ctx.user_pool.remove(user_id);
     ctx.stats.on_user_part();
 
@@ -1145,6 +1146,7 @@ fn broadcast_announce_lines_ws(
 
 fn filter_remove_user_ws(ctx: &AppContext, user: &Arc<AresUser>) {
     let part_pkt = outbound::build_part(user);
+    ctx.record_departure(user);
     ctx.user_pool.remove(user.id);
     ctx.stats.on_user_part();
     for u in ctx.user_pool.users() {

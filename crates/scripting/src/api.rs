@@ -197,6 +197,12 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
     context
         .register_global_builtin_callable(js_string!("__stats_get"), 1, NativeFunction::from_fn_ptr(stats_get_fn))
         .expect("__stats_get should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__records_json"), 0, NativeFunction::from_fn_ptr(records_json_fn))
+        .expect("__records_json should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__record_ban"), 6, NativeFunction::from_fn_ptr(record_ban_fn))
+        .expect("__record_ban should be registered");
 
     // ============ Hashing ============
 
@@ -537,10 +543,22 @@ var Users = {
   count: Users_count, getUserByName: function(n){ return __mkUser(n); },
   exists: userExists, names: userNames,
   local: function(){ var r = userNames(); return (r || []).map(__mkUser); },
-  // Astra no mantiene historial de records ni linking multi-servidor.
-  records: function(){ return []; },
+  // Historial de usuarios desconectados (JSRecord con ban()).
+  records: function(){
+    var arr;
+    try { arr = JSON.parse(__records_json()); } catch (e) { return []; }
+    return arr.map(function(r){
+      r.ban = function(){ return __record_ban(r.name, r.version, r.guid, r.externalIp, r.localIp, r.port); };
+      return r;
+    });
+  },
   banned: function(){ return []; },
-  linked: function(){ return []; }
+  // Usuarios remotos vía link: (linkName, userName) → objetos user.
+  linked: function(){
+    var arr;
+    try { arr = JSON.parse(Link_list()); } catch (e) { return []; }
+    return Array.isArray(arr) ? arr : [];
+  }
 };
 var Channels = { create: Channels_create, "delete": Channels_delete,
                  get: function(id){ try { return JSON.parse(Channels_get(id)); } catch (e) { return null; } },
@@ -583,7 +601,8 @@ var Link = { createLink: Link_createLink, connect: Link_createLink, disconnect: 
              getUserList: Link_getUserList, kickHub: Link_kickHub, list: Link_list,
              // sb0t: getters de estado del link (Astra no linkea multi-servidor → defaults).
              leaves: function(){ try { return JSON.parse(Link_list()); } catch (e) { return []; } },
-             leaf: function(){ return null; }, linked: function(){ return false; },
+             leaf: function(){ return null; },
+             linked: function(){ try { return JSON.parse(Link_list()).length > 0; } catch (e) { return false; } },
              name: function(){ return ""; }, externalIp: function(){ return ""; },
              port: function(){ return 0; }, hashlink: function(){ return ""; } };
 var File = {
@@ -1129,6 +1148,61 @@ fn stats_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
         _ => 0.0,
     };
     Ok(JsValue::from(v))
+}
+
+/// `__records_json()` — historial de usuarios desconectados como JSON array
+/// (para `Users.records()`). Cada entrada trae los campos + el guid en hex.
+fn records_json_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(js_string!("[]")));
+    };
+    let recs = app.user_records.read();
+    let mut items: Vec<String> = Vec::with_capacity(recs.len());
+    for r in recs.iter() {
+        let guid_hex: String = r.guid.iter().map(|b| format!("{:02x}", b)).collect();
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        items.push(format!(
+            "{{\"name\":\"{}\",\"externalIp\":\"{}\",\"localIp\":\"{}\",\"version\":\"{}\",\"port\":{},\"guid\":\"{}\",\"dns\":\"{}\",\"joinTime\":{}}}",
+            esc(&r.name),
+            r.external_ip,
+            r.local_ip,
+            esc(&r.version),
+            r.port,
+            guid_hex,
+            esc(&r.dns),
+            r.join_time
+        ));
+    }
+    Ok(JsValue::from(js_string!(format!("[{}]", items.join(",")))))
+}
+
+/// `__record_ban(name, version, guidHex, externalIp, localIp, port)` — banea
+/// a partir de los datos de un record histórico. Devuelve bool.
+fn record_ban_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let version = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let guid_hex = args.get(2).and_then(jsvalue_to_string).unwrap_or_default();
+    let ext_ip = args.get(3).and_then(jsvalue_to_string).unwrap_or_default();
+    let local_ip = args.get(4).and_then(jsvalue_to_string).unwrap_or_default();
+    let port = args.get(5).and_then(|v| v.as_number()).map(|n| n as u16).unwrap_or(0);
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(false));
+    };
+    // parsear guid hex → [u8;16]
+    let mut guid = [0u8; 16];
+    if guid_hex.len() == 32 {
+        for i in 0..16 {
+            match u8::from_str_radix(&guid_hex[i * 2..i * 2 + 2], 16) {
+                Ok(b) => guid[i] = b,
+                Err(_) => return Ok(JsValue::from(false)),
+            }
+        }
+    }
+    let (Ok(ext), Ok(loc)) = (ext_ip.parse(), local_ip.parse()) else {
+        return Ok(JsValue::from(false));
+    };
+    let ident = app.bans.ban(&name, &version, &guid, ext, loc, port);
+    Ok(JsValue::from(ident != 0))
 }
 
 fn get_topic_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
@@ -3472,6 +3546,35 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         u.sender = Some(tx);
         (Arc::new(u), rx)
+    }
+
+    #[test]
+    fn users_records_history() {
+        let app = make_app();
+        // Simular dos desconexiones.
+        let (u1, _r1) = make_user(1, "Alice", "10.0.0.1");
+        let (u2, _r2) = make_user(2, "Bob", "10.0.0.2");
+        app.record_departure(&u1);
+        app.record_departure(&u2);
+
+        let mut ctx = make_context(app.clone());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            var recs = Users.records();
+            if (recs.length !== 2) throw "expected 2 records, got " + recs.length;
+            // más reciente al frente: Bob primero
+            if (recs[0].name !== "Bob") throw "recs[0] name: " + recs[0].name;
+            if (recs[1].name !== "Alice") throw "recs[1] name: " + recs[1].name;
+            if (recs[0].externalIp !== "10.0.0.2") throw "recs[0] ip: " + recs[0].externalIp;
+            if (typeof recs[0].guid !== "string" || recs[0].guid.length !== 32) throw "guid hex";
+            if (typeof recs[0].ban !== "function") throw "record.ban missing";
+            // ban por record devuelve true (persiste)
+            if (recs[1].ban() !== true) throw "record.ban should return true";
+        "#,
+        );
+        assert!(result.is_ok(), "records history should work: {:?}", result);
+        unregister_context(&ctx);
     }
 
     #[test]
