@@ -27,3 +27,4 @@ zip = { workspace = true }
 rusqlite = { workspace = true }
 boa_engine = { workspace = true }
 boa_gc = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }

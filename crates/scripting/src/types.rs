@@ -262,6 +262,22 @@ pub enum ScriptEvent {
     /// Timer one-shot disparado. `secs` es el id del timer (para correlación),
     /// `name` es el nombre de la función JS a llamar (handler_name = "onTimer").
     Timer { secs: u64, name: String },
+
+    // --- HTTP async ---
+    /// Respuesta de un `HttpRequest.download()` completada en background.
+    /// `key` correlaciona con el callback registrado en el context;
+    /// `body` es el cuerpo (texto o base64 según `utf`), `status` el código
+    /// HTTP (0 si hubo error de red), `error` el mensaje de error (vacío si OK).
+    HttpComplete {
+        /// Clave del callback registrado por el HttpRequest que originó esto.
+        key: String,
+        /// Cuerpo de la respuesta (texto UTF-8 o base64 de los bytes crudos).
+        body: String,
+        /// Código de estado HTTP (0 si error de red/conexión).
+        status: u16,
+        /// Mensaje de error, vacío si la petición fue exitosa.
+        error: String,
+    },
 }
 
 impl ScriptEvent {
@@ -356,6 +372,7 @@ impl ScriptEvent {
 
             // Timer
             Timer { .. } => "onTimer",
+            HttpComplete { .. } => "onHttpComplete",
         }
     }
 
@@ -452,6 +469,17 @@ impl ScriptEvent {
 
             // Timer
             Timer { secs, name } => vec![secs.to_string(), name.clone()],
+            HttpComplete {
+                key,
+                body,
+                status,
+                error,
+            } => vec![
+                key.clone(),
+                body.clone(),
+                status.to_string(),
+                error.clone(),
+            ],
         }
     }
 }

@@ -325,6 +325,7 @@ impl ScriptManager {
             // Loop principal: alterna entre events y requests.
             // Como ambos usan tokio::sync::mpsc con blocking_recv, podemos
             // usar un loop simple: si no hay events, intentar requests.
+            let mut last_deferred = std::time::Instant::now();
             loop {
                 let event = rx_events.try_recv();
                 match event {
@@ -336,7 +337,12 @@ impl ScriptManager {
                 match request {
                     Ok(req) => manager.dispatch_request(req),
                     Err(mpsc::error::TryRecvError::Empty) => {
-                        // Nada que hacer, sleep breve para no quemar CPU
+                        // Sin eventos: drenar trabajo diferido (timers, HTTP)
+                        // periódicamente para que dispare aun con la sala inactiva.
+                        if last_deferred.elapsed() >= Duration::from_millis(50) {
+                            manager.drain_deferred();
+                            last_deferred = std::time::Instant::now();
+                        }
                         std::thread::sleep(Duration::from_millis(1));
                     }
                     Err(mpsc::error::TryRecvError::Disconnected) => break,
@@ -527,39 +533,56 @@ impl ScriptManager {
         self.load_all_inner()
     }
 
+    /// Procesa trabajo diferido (timers expirados y respuestas HTTP
+    /// completadas en background) despachando los eventos correspondientes.
+    /// Se invoca desde `dispatch` (antes de eventos no-diferidos) y desde el
+    /// loop del thread del manager cuando está inactivo, para que timers y
+    /// callbacks HTTP disparen aunque no haya actividad de la sala.
+    pub fn drain_deferred(&self) {
+        let now = std::time::Instant::now();
+        for timer in crate::api::pop_due_timers(now) {
+            if timer.repeat {
+                // Re-encolar el timer repetitivo. Se pierde el periodo original,
+                // heurística: re-armar a +1s.
+                let next = crate::api::PendingTimer {
+                    id: timer.id,
+                    fn_name: timer.fn_name.clone(),
+                    fire_at: now + std::time::Duration::from_secs(1),
+                    repeat: true,
+                };
+                ACTIVE_TIMERS.with(|t| t.borrow_mut().insert(timer.id));
+                crate::api::push_pending_timer(next);
+            } else {
+                ACTIVE_TIMERS.with(|t| t.borrow_mut().remove(&timer.id));
+            }
+            self.dispatch(&ScriptEvent::Timer {
+                secs: timer.id as u64,
+                name: timer.fn_name,
+            });
+        }
+        for done in crate::api::drain_http_completions() {
+            self.dispatch(&ScriptEvent::HttpComplete {
+                key: done.key,
+                body: done.body,
+                status: done.status,
+                error: done.error,
+            });
+        }
+    }
+
     /// Despacha un evento a todos los scripts activos.
     /// Se llama desde el thread del manager (no desde otros threads).
     pub fn dispatch(&self, event: &ScriptEvent) {
         let handler_name = event.handler_name();
         let args = event.args();
 
-        // Fase 20: procesar timers expirados antes del dispatch.
-        // Solo si el evento NO es un Timer (evitar recursion)
-        if !matches!(event, ScriptEvent::Timer { .. }) {
-            let now = std::time::Instant::now();
-            for timer in crate::api::pop_due_timers(now) {
-                if timer.repeat {
-                    // Re-encolar el timer (repeating)
-                    // El periodo es difícil de calcular desde aquí porque
-                    // perdimos el periodo original. Simplificación: re-encolamos
-                    // con el mismo fire_at + 1s (heurística).
-                    let next = crate::api::PendingTimer {
-                        id: timer.id,
-                        fn_name: timer.fn_name.clone(),
-                        fire_at: now + std::time::Duration::from_secs(1),
-                        repeat: true,
-                    };
-                    ACTIVE_TIMERS.with(|t| t.borrow_mut().insert(timer.id));
-                    crate::api::push_pending_timer(next);
-                } else {
-                    // One-shot: remover de activos
-                    ACTIVE_TIMERS.with(|t| t.borrow_mut().remove(&timer.id));
-                }
-                self.dispatch(&ScriptEvent::Timer {
-                    secs: timer.id as u64,
-                    name: timer.fn_name,
-                });
-            }
+        // Procesar timers expirados y respuestas HTTP antes del dispatch.
+        // Se omite cuando el propio evento es diferido (evita recursión).
+        if !matches!(
+            event,
+            ScriptEvent::Timer { .. } | ScriptEvent::HttpComplete { .. }
+        ) {
+            self.drain_deferred();
         }
 
         let scripts = self.scripts.lock().clone();

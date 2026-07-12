@@ -455,6 +455,9 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
     context
         .register_global_builtin_callable(js_string!("clearTimer"), 1, NativeFunction::from_fn_ptr(clear_timer_fn))
         .expect("clearTimer should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__http_download"), 7, NativeFunction::from_fn_ptr(http_download_fn))
+        .expect("__http_download should be registered");
 
     // ============ Sql (DB propia del script, paridad sb0t) ============
     for (name, arity, f) in [
@@ -640,6 +643,52 @@ Object.defineProperty(Scribble.prototype, "size", { get: function(){ return this
 Scribble.prototype.save = function(path){ return this.__id < 0 ? false : ScribbleImage_save(this.__id, "" + path); };
 Scribble.prototype.load = function(path){ var b = __read_file_b64("" + path); if (b == null) return false; this.__id = ScribbleImage_new(b); return this.__id >= 0; };
 Scribble.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null){ self.__id = ScribbleImage_new(Base64_encode(bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
+
+// ---- HttpRequest: petición HTTP async con oncomplete (Fase 3b) ----
+// __http_download hace la petición en un thread de background; el manager
+// entrega el resultado vía onHttpComplete(key, body, status, error), que
+// enruta al callback registrado por 'key' (sólo existe en este context).
+var __httpSeq = 0;
+var __httpCbs = {};
+function onHttpComplete(key, body, statusStr, error){
+  var cb = __httpCbs[key];
+  if (typeof cb === "function"){ delete __httpCbs[key]; cb(body, parseInt(statusStr, 10) || 0, error || ""); }
+}
+function HttpRequest(){
+  this.method = "GET"; this.src = ""; this.host = ""; this.params = "";
+  this.userAgent = ""; this.accept = ""; this.utf = true; this.oncomplete = null;
+  this.response = null; this.status = 0; this.error = "";
+}
+HttpRequest.prototype.download = function(){
+  var self = this;
+  var url = this.src || this.host;
+  var m = ("" + this.method).toUpperCase();
+  if (this.params && m === "GET"){ url += (url.indexOf("?") < 0 ? "?" : "&") + this.params; }
+  var key = "__http_" + (++__httpSeq);
+  __httpCbs[key] = function(body, status, error){
+    self.response = body; self.status = status; self.error = error;
+    if (typeof self.oncomplete === "function") self.oncomplete(body, status, error);
+  };
+  var body = (m === "POST") ? ("" + (this.params || "")) : "";
+  var ok = __http_download(m, "" + url, body, "" + this.userAgent, "" + this.accept, !!this.utf, key);
+  if (!ok) delete __httpCbs[key];
+  return ok;
+};
+
+// ---- ProxyCheck: detección de proxy/VPN vía proxycheck.io (compat sb0t) ----
+function ProxyCheck(apiKey){ this.apiKey = apiKey == null ? "" : "" + apiKey; this.includeVPN = true; this.useTLS = false; }
+ProxyCheck.prototype.query = function(u, callback){
+  var ip = (u && u.externalIp) ? u.externalIp : ("" + u);
+  var url = (this.useTLS ? "https://" : "http://") + "proxycheck.io/v1/" + ip +
+            (this.apiKey ? "&key=" + this.apiKey : "") + (this.includeVPN ? "&vpn=1" : "");
+  var r = new HttpRequest();
+  r.method = "POST"; r.src = url; r.utf = true; r.userAgent = "Astra";
+  r.oncomplete = function(body, status, error){
+    var result = null; try { result = JSON.parse(body); } catch (e) {}
+    if (typeof callback === "function") callback(result, status, error);
+  };
+  return r.download();
+};
 
 // ---- XmlParser: DOM XML minimalista, implementación pura JS ----
 function XmlNode(name){ this.nodeName = name || ""; this.nodeValue = ""; this.attributes = {}; this.childNodes = []; this.parentNode = null; }
@@ -2655,6 +2704,102 @@ fn clear_timer_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Resu
 }
 
 // ============================================================================
+// HTTP async (HttpRequest / ProxyCheck, compat sb0t) — Fase 3b
+// ============================================================================
+//
+// El engine de scripting corre en un thread dedicado (no async). Para no
+// bloquearlo, `__http_download` lanza un std::thread que hace la petición
+// con reqwest::blocking y deja el resultado en una cola GLOBAL. El manager
+// drena esa cola en cada dispatch (igual que los timers) y emite un
+// `ScriptEvent::HttpComplete` → el prelude enruta al callback por `key`.
+
+/// Resultado de una petición HTTP completada en background.
+pub struct HttpCompletion {
+    /// Clave del callback registrado en el context que originó la petición.
+    pub key: String,
+    /// Cuerpo (texto UTF-8 o base64 de los bytes crudos según `utf`).
+    pub body: String,
+    /// Código de estado HTTP (0 si error de red).
+    pub status: u16,
+    /// Mensaje de error, vacío si OK.
+    pub error: String,
+}
+
+static PENDING_HTTP: std::sync::LazyLock<std::sync::Mutex<std::collections::VecDeque<HttpCompletion>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+/// Drena las respuestas HTTP completadas (llamado por el manager en su thread).
+pub fn drain_http_completions() -> Vec<HttpCompletion> {
+    let mut q = PENDING_HTTP.lock().unwrap();
+    q.drain(..).collect()
+}
+
+/// `__http_download(method, url, body, userAgent, accept, utf, key)` — lanza
+/// la petición en background. `utf` = true → cuerpo como texto; false → base64.
+/// Devuelve true si se pudo lanzar.
+fn http_download_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let method = args.get(0).and_then(jsvalue_to_string).unwrap_or_else(|| "GET".to_string());
+    let url = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let body = args.get(2).and_then(jsvalue_to_string).unwrap_or_default();
+    let user_agent = args.get(3).and_then(jsvalue_to_string).unwrap_or_default();
+    let accept = args.get(4).and_then(jsvalue_to_string).unwrap_or_default();
+    let utf = args.get(5).map(|v| v.to_boolean()).unwrap_or(true);
+    let key = args.get(6).and_then(jsvalue_to_string).unwrap_or_default();
+    if url.is_empty() || key.is_empty() {
+        return Ok(JsValue::from(false));
+    }
+
+    let spawned = std::thread::Builder::new()
+        .name("script-http".into())
+        .spawn(move || {
+            let mut completion = HttpCompletion {
+                key: key.clone(),
+                body: String::new(),
+                status: 0,
+                error: String::new(),
+            };
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build();
+            match client {
+                Ok(client) => {
+                    let m = method.to_uppercase();
+                    let mut req = if m == "POST" {
+                        client.post(&url).body(body)
+                    } else {
+                        client.get(&url)
+                    };
+                    if !user_agent.is_empty() {
+                        req = req.header(reqwest::header::USER_AGENT, user_agent);
+                    }
+                    if !accept.is_empty() {
+                        req = req.header(reqwest::header::ACCEPT, accept);
+                    }
+                    match req.send() {
+                        Ok(resp) => {
+                            completion.status = resp.status().as_u16();
+                            match resp.bytes() {
+                                Ok(bytes) => {
+                                    completion.body = if utf {
+                                        String::from_utf8_lossy(&bytes).into_owned()
+                                    } else {
+                                        base64_encode_bytes_to_string(&bytes)
+                                    };
+                                }
+                                Err(e) => completion.error = format!("read body: {}", e),
+                            }
+                        }
+                        Err(e) => completion.error = e.to_string(),
+                    }
+                }
+                Err(e) => completion.error = format!("client build: {}", e),
+            }
+            PENDING_HTTP.lock().unwrap().push_back(completion);
+        });
+    Ok(JsValue::from(spawned.is_ok()))
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -2995,6 +3140,77 @@ mod tests {
         "#,
         );
         assert!(result.is_ok(), "phase3 apis should work: {:?}", result);
+        unregister_context(&ctx);
+    }
+
+    #[test]
+    fn http_request_end_to_end() {
+        use std::io::{Read, Write};
+        // Servidor HTTP local que responde una vez con un cuerpo fijo.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body = "HELLO_HTTP";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let mut ctx = make_context(make_app());
+        let url = format!("http://{}/", addr);
+        eval_script(
+            &mut ctx,
+            &format!(
+                r#"
+                var __result = null; var __status = 0;
+                var r = new HttpRequest();
+                r.src = "{}";
+                r.oncomplete = function(body, status, error){{ __result = body; __status = status; }};
+                if (r.download() !== true) throw "download() should return true";
+            "#,
+                url
+            ),
+        )
+        .unwrap();
+
+        // Esperar a que el thread de background complete la petición.
+        let mut completions = Vec::new();
+        for _ in 0..100 {
+            completions = drain_http_completions();
+            if !completions.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(completions.len(), 1, "expected one HTTP completion");
+        let c = &completions[0];
+        assert_eq!(c.status, 200, "status should be 200, error={}", c.error);
+
+        // Simular lo que hace el manager: enrutar la respuesta al callback.
+        let args = [
+            JsValue::from(js_string!(c.key.clone())),
+            JsValue::from(js_string!(c.body.clone())),
+            JsValue::from(js_string!(c.status.to_string())),
+            JsValue::from(js_string!(c.error.clone())),
+        ];
+        call_global_function(&mut ctx, "onHttpComplete", &args).unwrap();
+
+        let check = eval_script(
+            &mut ctx,
+            r#"
+            if (__result !== "HELLO_HTTP") throw "body mismatch: " + __result;
+            if (__status !== 200) throw "status mismatch: " + __status;
+        "#,
+        );
+        assert!(check.is_ok(), "oncomplete should receive body: {:?}", check);
+        srv.join().unwrap();
         unregister_context(&ctx);
     }
 
