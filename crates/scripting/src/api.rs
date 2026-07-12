@@ -426,6 +426,9 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("Spelling_suggest"), 1, NativeFunction::from_fn_ptr(spelling_suggest_fn))
         .expect("Spelling_suggest should be registered");
     context
+        .register_global_builtin_callable(js_string!("Spelling_confirm"), 1, NativeFunction::from_fn_ptr(spelling_confirm_fn))
+        .expect("Spelling_confirm should be registered");
+    context
         .register_global_builtin_callable(js_string!("Query_new"), 1, NativeFunction::from_fn_ptr(query_new_fn))
         .expect("Query_new should be registered");
     context
@@ -533,15 +536,28 @@ var Room = {
 var Users = {
   count: Users_count, getUserByName: function(n){ return __mkUser(n); },
   exists: userExists, names: userNames,
-  local: function(){ var r = userNames(); return (r || []).map(__mkUser); }
+  local: function(){ var r = userNames(); return (r || []).map(__mkUser); },
+  // Astra no mantiene historial de records ni linking multi-servidor.
+  records: function(){ return []; },
+  banned: function(){ return []; },
+  linked: function(){ return []; }
 };
-var Channels = { create: Channels_create, "delete": Channels_delete, get: Channels_get,
-                 list: Channels_list, broadcast: Channels_broadcast, setTopic: Channels_setTopic, kick: Channels_kick };
+var Channels = { create: Channels_create, "delete": Channels_delete,
+                 get: function(id){ try { return JSON.parse(Channels_get(id)); } catch (e) { return null; } },
+                 list: function(){ try { return JSON.parse(Channels_list()); } catch (e) { return []; } },
+                 available: function(){ try { return JSON.parse(Channels_list()); } catch (e) { return []; } },
+                 enabled: function(){ return true; },
+                 search: function(id){ try { return JSON.parse(Channels_get(id)); } catch (e) { return null; } },
+                 broadcast: Channels_broadcast, setTopic: Channels_setTopic, kick: Channels_kick };
 var Base64 = { encode: Base64_encode, decode: Base64_decode };
 var Zip = { compress: Zip_compress, uncompress: Zip_decompress, decompress: Zip_decompress };
 var Hashlink = { create: Hashlink_create, parse: Hashlink_parse, encode: Hashlink_create, decode: Hashlink_parse };
-var Entities = { list: Entities_list };
-var Spelling = { check: Spelling_check, suggest: Spelling_suggest };
+var Entities = {
+  list: Entities_list,
+  encode: function(s){ return ("" + (s == null ? "" : s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); },
+  decode: function(s){ return ("" + (s == null ? "" : s)).replace(/&#0?39;/g,"'").replace(/&apos;/g,"'").replace(/&quot;/g,'"').replace(/&gt;/g,">").replace(/&lt;/g,"<").replace(/&amp;/g,"&"); }
+};
+var Spelling = { check: Spelling_check, suggest: Spelling_suggest, confirm: Spelling_confirm };
 var Stats = {
   addStat: Stats_addStat, getStat: Stats_getStat,
   userCount: function(){ return __stats_get("userCount"); },
@@ -562,9 +578,14 @@ var Registry = {
   setValue: Registry_setValue, deleteValue: Registry_deleteValue, clear: Registry_clear
 };
 var Crypto = { hashSHA1: Crypto_hashSHA1, hashMD5: Crypto_hashMD5, sha1: Crypto_hashSHA1, md5: Crypto_hashMD5 };
-var Link = { createLink: Link_createLink, disconnect: Link_disconnect, findHub: Link_findHub,
-             findLeaf: Link_findLeaf, findUser: Link_findUser, getUserList: Link_getUserList,
-             kickHub: Link_kickHub, list: Link_list, leaves: Link_list };
+var Link = { createLink: Link_createLink, connect: Link_createLink, disconnect: Link_disconnect,
+             findHub: Link_findHub, findLeaf: Link_findLeaf, findUser: Link_findUser,
+             getUserList: Link_getUserList, kickHub: Link_kickHub, list: Link_list,
+             // sb0t: getters de estado del link (Astra no linkea multi-servidor → defaults).
+             leaves: function(){ try { return JSON.parse(Link_list()); } catch (e) { return []; } },
+             leaf: function(){ return null; }, linked: function(){ return false; },
+             name: function(){ return ""; }, externalIp: function(){ return ""; },
+             port: function(){ return 0; }, hashlink: function(){ return ""; } };
 var File = {
   exists: File_exists, load: File_read, read: File_read, save: File_write, write: File_write,
   append: File_append, appendLine: function(n, t){ return File_append(n, (t == null ? "" : t) + "\r\n"); },
@@ -776,6 +797,25 @@ Sql.prototype.value = function(col){ return __Sql_value(this.__h, "" + col); };
 Sql.prototype.close = function(){ return __Sql_close(this.__h); };
 Object.defineProperty(Sql.prototype, "canRead",   { get: function(){ return __Sql_canRead(this.__h); } });
 Object.defineProperty(Sql.prototype, "lastError", { get: function(){ return __Sql_lastError(this.__h); } });
+
+// ---- PM: texto de un privado con helpers (JSPM). Se comporta como string. ----
+function PM(text){ this.__t = text == null ? "" : "" + text; }
+Object.defineProperty(PM.prototype, "isScribble", { get: function(){ return this.__t.indexOf('#scribble') === 0 || /^data:image/i.test(this.__t); } });
+PM.prototype.contains = function(s){ return this.__t.indexOf(s) >= 0; };
+PM.prototype.remove = function(s){ this.__t = this.__t.split(s).join(""); return this; };
+PM.prototype.replace = function(a, b){ this.__t = this.__t.split(a).join(b); return this; };
+PM.prototype.toString = function(){ return this.__t; };
+PM.prototype.valueOf = function(){ return this.__t; };
+
+// ---- Leaf: hub linkeado (JSLeaf). Astra no linkea → stub con defaults seguros. ----
+function Leaf(){ this.externalIp = ""; this.port = 0; this.name = ""; this.hashlink = ""; }
+Leaf.prototype.print = function(){ return false; };
+Leaf.prototype.printAdmins = function(){ return false; };
+Leaf.prototype.users = function(){ return []; };
+Leaf.prototype.user = function(){ return null; };
+Leaf.prototype.sendText = function(){ return false; };
+Leaf.prototype.sendEmote = function(){ return false; };
+Leaf.prototype.scribble = function(){ return false; };
 "#;
 
 // ============================================================================
@@ -1072,6 +1112,12 @@ fn stats_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
         "joinCount" => app.stats.total_users() as f64,
         "dataReceived" => app.stats.bytes_in() as f64,
         "dataSent" => app.stats.bytes_out() as f64,
+        "messageCount" => app.stats.messages() as f64,
+        "pmCount" => app.stats.pms() as f64,
+        "floodCount" => app.stats.floods() as f64,
+        "partCount" => app.stats.parts() as f64,
+        "invalidLoginCount" => app.stats.invalid_logins() as f64,
+        "rejectionCount" => app.stats.rejections() as f64,
         _ => 0.0,
     };
     Ok(JsValue::from(v))
@@ -1430,10 +1476,29 @@ fn spelling_check_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> R
     if !word.chars().all(|c| c.is_alphabetic() || c == '\'' || c == '-') {
         return Ok(JsValue::from(false));
     }
-    // Verificar contra el diccionario (case-insensitive)
+    // Verificar contra el diccionario (case-insensitive) o palabras
+    // confirmadas en runtime vía Spelling.confirm.
     let lower = word.to_lowercase();
-    let known = SPELL_DICT.iter().any(|w| w.eq_ignore_ascii_case(&lower));
+    let known = SPELL_DICT.iter().any(|w| w.eq_ignore_ascii_case(&lower))
+        || CONFIRMED_WORDS.lock().unwrap().iter().any(|w| w == &lower);
     Ok(JsValue::from(known))
+}
+
+/// Palabras agregadas al diccionario en runtime vía `Spelling.confirm`.
+static CONFIRMED_WORDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// `Spelling.confirm(word)` — agrega una palabra al diccionario en runtime
+/// (paridad sb0t). Devuelve true.
+fn spelling_confirm_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let word = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let word = word.trim().to_lowercase();
+    if !word.is_empty() {
+        let mut w = CONFIRMED_WORDS.lock().unwrap();
+        if !w.iter().any(|x| x == &word) {
+            w.push(word);
+        }
+    }
+    Ok(JsValue::from(true))
 }
 
 /// `Spelling_suggest(word)` — devuelve JSON array de sugerencias de spell
@@ -3166,6 +3231,56 @@ mod tests {
         "#,
         );
         assert!(result.is_ok(), "phase3 apis should work: {:?}", result);
+        unregister_context(&ctx);
+    }
+
+    #[test]
+    fn sb0t_compat_phase5_apis() {
+        let mut ctx = make_context(make_app());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            // Entities encode/decode
+            if (Entities.encode('<a href="x">&') !== "&lt;a href=&quot;x&quot;&gt;&amp;")
+                throw "entities.encode: " + Entities.encode('<a href="x">&');
+            if (Entities.decode("&lt;b&gt;&amp;&quot;&#39;") !== "<b>&\"'")
+                throw "entities.decode: " + Entities.decode("&lt;b&gt;&amp;&quot;&#39;");
+
+            // Spelling.confirm agrega al diccionario runtime
+            if (Spelling.check("zzqqxx") !== false) throw "unknown word should be false";
+            Spelling.confirm("zzqqxx");
+            if (Spelling.check("zzqqxx") !== true) throw "confirmed word should be true";
+
+            // PM (JSPM): helpers + string-compat
+            var pm = new PM("hello world");
+            if (pm.contains("world") !== true) throw "pm.contains";
+            if (("" + pm) !== "hello world") throw "pm toString";
+            pm.replace("world", "there");
+            if (("" + pm) !== "hello there") throw "pm.replace: " + pm;
+            pm.remove("hello ");
+            if (("" + pm) !== "there") throw "pm.remove: " + pm;
+            if (new PM('#scribble#x').isScribble !== true) throw "pm.isScribble";
+
+            // Users colecciones sin datos → arrays vacíos
+            if (Users.records().length !== 0) throw "records not empty";
+            if (Users.banned().length !== 0) throw "banned not empty";
+            if (Users.linked().length !== 0) throw "linked not empty";
+
+            // Channels.list/available devuelven array parseado
+            if (!Array.isArray(Channels.list())) throw "Channels.list not array";
+            if (Channels.enabled() !== true) throw "Channels.enabled";
+
+            // Link stubs (Astra no linkea)
+            if (Link.linked() !== false) throw "Link.linked should be false";
+            if (Link.leaves().length !== 0) throw "Link.leaves not empty";
+
+            // Leaf stub
+            var lf = new Leaf();
+            if (lf.users().length !== 0) throw "Leaf.users";
+            if (lf.sendText("hi") !== false) throw "Leaf.sendText";
+        "#,
+        );
+        assert!(result.is_ok(), "phase5 apis should work: {:?}", result);
         unregister_context(&ctx);
     }
 

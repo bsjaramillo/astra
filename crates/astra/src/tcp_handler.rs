@@ -384,6 +384,7 @@ async fn process_handshake(
                         ctx.security.failed_logins.record_failure(peer.ip());
                         let _ = tx.send(server_error_packet(reason.message()));
                         // Disparar evento de scripting
+                        ctx.stats.on_invalid_login();
                         scripting.dispatch(astra_scripting::ScriptEvent::InvalidLoginAttempt {
                             name: login.org_name.clone(),
                             ip: peer.ip().to_string(),
@@ -452,6 +453,7 @@ async fn process_handshake(
                         warn!("REJECTED (join-flood): peer={}", peer);
                         let _ = tx.send(server_error_packet("Joining too quickly. Please wait 15 seconds."));
                         // Disparar evento de scripting
+                        ctx.stats.on_flood();
                         scripting.dispatch(astra_scripting::ScriptEvent::Flood {
                             name: login.org_name.clone(),
                         });
@@ -1005,6 +1007,7 @@ async fn handle_public(
         text: text.clone(),
     });
     // Disparar evento de scripting
+    ctx.stats.on_message();
     scripting.dispatch(astra_scripting::ScriptEvent::Public {
         from: name.clone(),
         text: text.clone(),
@@ -1127,6 +1130,7 @@ async fn handle_pvt(
             });
         } else {
             // Evento onPrivate (tras pasar el hook onPMBefore y los bloqueos).
+            ctx.stats.on_pm();
             scripting.dispatch(astra_scripting::ScriptEvent::Private {
                 from: from.clone(),
                 to: target_name.clone(),

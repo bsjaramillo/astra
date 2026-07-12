@@ -382,6 +382,7 @@ async fn ws_handshake_login(
     if ctx.user_history.is_join_flooding(external_ip, now_ms) {
         warn!("REJECTED (join-flood): peer={} nick='{}'", peer, login.name);
         // Evento onFlood (paridad TCP nativo).
+        ctx.stats.on_flood();
         scripting.dispatch(astra_scripting::ScriptEvent::Flood { name: login.name.clone() });
         let _ = ws_text_tx.send("ERROR:Joining too quickly".to_string());
         return Ok(None);
@@ -664,6 +665,7 @@ fn handle_ws_public(
         return;
     }
     // Evento de scripting (onPublic), paridad con el path TCP nativo.
+    ctx.stats.on_message();
     scripting.dispatch(astra_scripting::ScriptEvent::Public {
         from: name.clone(),
         text: text.to_string(),
@@ -731,6 +733,7 @@ fn handle_ws_pm(
     if !scripting.check_pm_before(&from, target_name, &text) {
         return;
     }
+    ctx.stats.on_pm();
     scripting.dispatch(astra_scripting::ScriptEvent::Private {
         from: from.clone(),
         to: target_name.to_string(),

@@ -13,6 +13,18 @@ pub struct Stats {
     bytes_in: AtomicU64,
     /// Bytes enviados.
     bytes_out: AtomicU64,
+    /// Mensajes públicos recibidos.
+    messages: AtomicU64,
+    /// Mensajes privados recibidos.
+    pms: AtomicU64,
+    /// Eventos de flood detectados.
+    floods: AtomicU64,
+    /// Usuarios que se fueron (parts).
+    parts: AtomicU64,
+    /// Logins inválidos.
+    invalid_logins: AtomicU64,
+    /// Conexiones rechazadas.
+    rejections: AtomicU64,
     /// Timestamp de arranque.
     start_time: Instant,
 }
@@ -31,6 +43,12 @@ impl Stats {
             total_users: AtomicU64::new(0),
             bytes_in: AtomicU64::new(0),
             bytes_out: AtomicU64::new(0),
+            messages: AtomicU64::new(0),
+            pms: AtomicU64::new(0),
+            floods: AtomicU64::new(0),
+            parts: AtomicU64::new(0),
+            invalid_logins: AtomicU64::new(0),
+            rejections: AtomicU64::new(0),
             start_time: Instant::now(),
         }
     }
@@ -55,6 +73,62 @@ impl Stats {
     /// Registra un usuario que se fue.
     pub fn on_user_part(&self) {
         // No decrementamos total_users (es histórico)
+        self.parts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Registra un mensaje público recibido.
+    pub fn on_message(&self) {
+        self.messages.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Registra un mensaje privado recibido.
+    pub fn on_pm(&self) {
+        self.pms.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Registra un evento de flood.
+    pub fn on_flood(&self) {
+        self.floods.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Registra un login inválido.
+    pub fn on_invalid_login(&self) {
+        self.invalid_logins.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Registra una conexión rechazada.
+    pub fn on_rejection(&self) {
+        self.rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Mensajes públicos recibidos.
+    pub fn messages(&self) -> u64 {
+        self.messages.load(Ordering::Relaxed)
+    }
+
+    /// Mensajes privados recibidos.
+    pub fn pms(&self) -> u64 {
+        self.pms.load(Ordering::Relaxed)
+    }
+
+    /// Eventos de flood.
+    pub fn floods(&self) -> u64 {
+        self.floods.load(Ordering::Relaxed)
+    }
+
+    /// Parts.
+    pub fn parts(&self) -> u64 {
+        self.parts.load(Ordering::Relaxed)
+    }
+
+    /// Logins inválidos.
+    pub fn invalid_logins(&self) -> u64 {
+        self.invalid_logins.load(Ordering::Relaxed)
+    }
+
+    /// Conexiones rechazadas.
+    pub fn rejections(&self) -> u64 {
+        self.rejections.load(Ordering::Relaxed)
     }
 
     /// Suma bytes recibidos.
