@@ -17,7 +17,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use server_core::{db::Database, settings::Settings, AppContext};
 use tokio::net::{TcpListener, UdpSocket};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod tcp_handler;
 
@@ -627,8 +627,48 @@ async fn handle_muxed_connection(
     web_enabled: bool,
     link_enabled: bool,
 ) -> anyhow::Result<()> {
+    let ip = peer.ip();
+
+    // ── FIX DDoS #2: cap de conexiones CRUDAS por IP, ANTES de clasificar.
+    // Así también cuentan las conexiones que todavía no mandaron ni un byte
+    // (Slowloris). Es un límite ALTO (default 30) — separado del límite de 5
+    // concurrentes de clientes nativos — para no romper la web detrás de un
+    // proxy (todos los usuarios web comparten la IP del proxy). Se exime a
+    // proxies reversos confiables y loopback.
+    let counted = !ctx.trusted_proxies.is_trusted(ip);
+    if counted && !ctx.security.raw_conn.try_acquire(ip) {
+        warn!("REJECTED (cap de conexiones crudas por IP, anti-Slowloris): {}", peer);
+        let _ = tcp_handler::send_server_error_to_stream(
+            stream,
+            "Too many simultaneous connections from your IP.",
+        )
+        .await;
+        return Ok(());
+    }
+    let sec = ctx.security.clone();
+    let _conn_guard = scopeguard::guard((), move |_| {
+        if counted {
+            sec.on_raw_disconnect(ip);
+        }
+    });
+
+    // ── FIX DDoS #1: timeout en la clasificación. Una conexión que no manda el
+    // primer byte dentro de `handshake_timeout_secs` se cierra, en vez de
+    // quedarse colgada en el peek para siempre (Slowloris de conexiones mudas).
     let mut peek = [0u8; 16];
-    let n = stream.peek(&mut peek).await.unwrap_or(0);
+    let peek_timeout =
+        std::time::Duration::from_secs(ctx.settings.security.handshake_timeout_secs.max(1));
+    let n = match tokio::time::timeout(peek_timeout, stream.peek(&mut peek)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => {
+            debug!("peek falló para {}: {}", peer, e);
+            return Ok(());
+        }
+        Err(_) => {
+            debug!("clasificación: timeout esperando el primer byte de {}", peer);
+            return Ok(());
+        }
+    };
     let route = classify_connection(&peek[..n]);
 
     match route {

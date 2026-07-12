@@ -61,7 +61,9 @@ pub async fn handle_tcp_client(
     });
 
     // ============================================================
-    // CAPA 1+2+5: rate-limit, concurrent limit, failed-login ban
+    // CAPA 1+2+5: rate-limit, concurrent limit (nativo), failed-login ban.
+    // (El cap anti-Slowloris de conexiones crudas por IP es aparte y ya se
+    //  aplicó antes del peek, en `handle_muxed_connection`.)
     // ============================================================
     if let Some(reason) = ctx.security.check_new_connection(ip) {
         warn!("REJECTED (capa 1/2/5): peer={} razón={:?}", peer, reason);
@@ -69,7 +71,7 @@ pub async fn handle_tcp_client(
         return Ok(());
     }
 
-    // Asegurar release al salir
+    // Asegurar release del slot de la CAPA 2 al salir.
     let security = ctx.security.clone();
     let _guard = scopeguard::guard(ip, move |ip| {
         security.on_disconnect(ip);
@@ -1384,7 +1386,7 @@ fn server_error_packet(text: &str) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
-async fn send_server_error_to_stream(mut stream: TcpStream, text: &str) -> anyhow::Result<()> {
+pub(crate) async fn send_server_error_to_stream(mut stream: TcpStream, text: &str) -> anyhow::Result<()> {
     stream.write_all(&server_error_packet(text)).await?;
     Ok(())
 }

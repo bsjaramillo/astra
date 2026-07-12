@@ -90,9 +90,18 @@ pub struct SecurityConfig {
     /// Capa 1: duración del auto-ban por connection flood (segundos).
     pub connection_flood_ban_secs: u64,
 
-    /// Capa 2: máx conexiones TCP simultáneas por IP (logged-in o no).
+    /// Capa 2: máx conexiones TCP simultáneas de clientes Ares nativos por IP.
     /// Default: 5
     pub max_concurrent_per_ip: u32,
+
+    /// Cap de conexiones CRUDAS por IP (anti-Slowloris), aplicado en el
+    /// multiplexado antes de clasificar — cuenta CUALQUIER conexión, incluso
+    /// las que no mandaron ni un byte. Más alto que `max_concurrent_per_ip`
+    /// para no romper la web detrás de un proxy (todos los usuarios web
+    /// comparten la IP del proxy; se exime a las IP en `trusted_proxies`).
+    /// `0` = sin límite. Default: 30.
+    #[serde(default = "default_max_raw_connections_per_ip")]
+    pub max_raw_connections_per_ip: u32,
 
     /// Capa 3: timeout en segundos para que el cliente envíe el primer
     /// paquete (ClientLogin). Si no llega, cerrar conexión.
@@ -131,6 +140,10 @@ pub struct SecurityConfig {
     pub captcha_max_attempts: u32,
 }
 
+fn default_max_raw_connections_per_ip() -> u32 {
+    30
+}
+
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
@@ -142,6 +155,7 @@ impl Default for SecurityConfig {
 
             // Capa 2
             max_concurrent_per_ip: 5,
+            max_raw_connections_per_ip: default_max_raw_connections_per_ip(),
 
             // Capa 3
             handshake_timeout_secs: 15,

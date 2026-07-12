@@ -292,44 +292,45 @@ def test_failed(host, port, cfg) -> Result:
 
 
 def test_slowloris(host, port, cfg) -> Result:
-    """Slowloris: conexiones que se abren y NO mandan ni un byte. Hoy se quedan
-    en el `peek()` de demux (main.rs::handle_muxed_connection) SIN timeout y sin
-    pasar por CAPA 1/2/3/5 — se pueden acumular sin límite. Este test lo
-    demuestra: abre muchas conexiones mudas y mira si siguen vivas."""
+    """Slowloris: conexiones que se abren y NO mandan ni un byte. Con el fix,
+    la clasificación (peek) tiene un timeout = handshake_timeout, así que el
+    server las cierra en vez de dejarlas colgadas para siempre. Este test abre
+    muchas conexiones mudas y verifica que el server las cierre tras el timeout.
+
+    (El cap de conexiones crudas por IP —el otro fix— exime loopback/proxies,
+    así que desde localhost no se observa; corré desde una IP remota para verlo.
+    Acá se valida el timeout, que sí aplica a todas.)"""
     r = Result("Slowloris · conexiones mudas (sin byte)")
-    hdr(r.name + "  (esperado si está protegido: cerrarlas o limitarlas)")
-    n = cfg.concurrent + 15   # muy por encima del límite concurrente
+    wait = cfg.handshake + 4
+    hdr(r.name + f"  (deben cerrarse a ~{cfg.handshake}s por el timeout de clasificación)")
+    n = cfg.concurrent + 15
     socks = []
     for _ in range(n):
         try:
             socks.append(connect(host, port))  # SIN probe: no manda nada
         except OSError:
             break
-    print(f"  abiertas {len(socks)} conexiones mudas (límite concurrente = {cfg.concurrent})")
-    print("  esperando 6s para ver si el server las cierra…")
-    time.sleep(6)
+    print(f"  abiertas {len(socks)} conexiones mudas")
+    print(f"  esperando {wait}s (handshake_timeout={cfg.handshake}s) a que el server las cierre…")
+    time.sleep(wait)
     alive = 0
     for s in socks:
-        s.settimeout(0.2)
+        s.settimeout(0.3)
         try:
-            if s.recv(1) == b"":   # EOF → cerrada por el server
-                pass
-            else:
+            if s.recv(1) != b"":   # llegó algo pero no EOF → sigue viva
                 alive += 1
         except socket.timeout:
             alive += 1             # sigue abierta, sin datos
         except OSError:
             pass
         s.close()
-    # Si el server está protegido, NO debería dejar >límite conexiones mudas vivas.
-    r.ok = alive <= cfg.concurrent
-    r.detail = f"{alive}/{len(socks)} conexiones mudas seguían vivas tras 6s"
+    r.ok = alive == 0
+    r.detail = f"{alive}/{len(socks)} conexiones mudas seguían vivas tras {wait}s"
     if r.ok:
-        print(f"\n  → ✅ PROTEGIDO: {r.detail}")
+        print(f"\n  → ✅ PROTEGIDO: el server cerró todas las conexiones mudas")
     else:
         print(f"\n  → ⚠️  HUECO (Slowloris): {r.detail}")
-        print("     Las conexiones mudas no pasan por las capas anti-flood ni tienen")
-        print("     timeout en la clasificación (peek). Un atacante puede acumularlas.")
+        print("     Las conexiones mudas no se cierran; un atacante puede acumularlas.")
     return r
 
 

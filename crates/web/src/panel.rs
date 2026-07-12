@@ -405,7 +405,7 @@ const I18N = {
     sec_conn_h:"🚪 Conexiones",
     sec_maxnew:"Máx. conexiones nuevas por IP", sec_window:"Ventana de conteo (seg)",
     sec_floodthr:"Umbral para banear por flood", sec_floodban:"Duración del ban por flood (seg)",
-    sec_maxconc:"Máx. conexiones simultáneas por IP", sec_handshake:"Tiempo máx. de login (seg)", sec_idle:"Tiempo máx. inactivo (seg)",
+    sec_maxconc:"Máx. conexiones simultáneas por IP", sec_maxraw:"Máx. conexiones crudas por IP (anti-Slowloris, 0=sin límite)", sec_handshake:"Tiempo máx. de login (seg)", sec_idle:"Tiempo máx. inactivo (seg)",
     sec_names_h:"🏷️ Nombres y logins",
     sec_minname:"Largo mínimo de nombre", sec_maxname:"Largo máximo de nombre",
     sec_maxfail:"Máx. logins fallidos", sec_failwin:"Ventana de logins fallidos (seg)", sec_failban:"Ban por logins fallidos (seg)",
@@ -526,7 +526,7 @@ const I18N = {
     sec_conn_h:"🚪 Connections",
     sec_maxnew:"Max new connections per IP", sec_window:"Counting window (sec)",
     sec_floodthr:"Flood ban threshold", sec_floodban:"Flood ban duration (sec)",
-    sec_maxconc:"Max simultaneous connections per IP", sec_handshake:"Max login time (sec)", sec_idle:"Max idle time (sec)",
+    sec_maxconc:"Max simultaneous connections per IP", sec_maxraw:"Max raw connections per IP (anti-Slowloris, 0=unlimited)", sec_handshake:"Max login time (sec)", sec_idle:"Max idle time (sec)",
     sec_names_h:"🏷️ Names & logins",
     sec_minname:"Min name length", sec_maxname:"Max name length",
     sec_maxfail:"Max failed logins", sec_failwin:"Failed login window (sec)", sec_failban:"Failed login ban (sec)",
@@ -977,6 +977,7 @@ function renderSeguridad(){
       ${fld("secFloodThresh",t("sec_floodthr"))}
       ${fld("secFloodBan",t("sec_floodban"))}
       ${fld("secMaxConc",t("sec_maxconc"))}
+      ${fld("secMaxRaw",t("sec_maxraw"))}
       ${fld("secHandshake",t("sec_handshake"))}
       ${fld("secIdle",t("sec_idle"))}
     </div></div>
@@ -997,7 +998,7 @@ async function fillAdvanced(){
   const c=await loadConfig(); const s=c.security||{}; const g=(id)=>document.getElementById(id);
   g("secMaxNew").value=s.max_new_connections_per_ip??10; g("secConnWindow").value=s.connection_window_secs??60;
   g("secFloodThresh").value=s.connection_flood_ban_threshold??3; g("secFloodBan").value=s.connection_flood_ban_secs??300;
-  g("secMaxConc").value=s.max_concurrent_per_ip??5; g("secHandshake").value=s.handshake_timeout_secs??15;
+  g("secMaxConc").value=s.max_concurrent_per_ip??5; g("secMaxRaw").value=s.max_raw_connections_per_ip??30; g("secHandshake").value=s.handshake_timeout_secs??15;
   g("secIdle").value=s.idle_timeout_secs??1800; g("secMinName").value=s.min_name_length??1; g("secMaxName").value=s.max_name_length??30;
   g("secMaxFailed").value=s.max_failed_logins??5; g("secFailedWindow").value=s.failed_login_window_secs??3600;
   g("secFailedBan").value=s.failed_login_ban_secs??3600; g("secRejectSpam").checked=!!s.reject_spam_bots;
@@ -1007,7 +1008,7 @@ async function saveAdvanced(){
   const c=await loadConfig(); c.security=c.security||{}; const s=c.security; const g=(id)=>parseInt(document.getElementById(id).value)||0;
   s.max_new_connections_per_ip=g("secMaxNew"); s.connection_window_secs=g("secConnWindow");
   s.connection_flood_ban_threshold=g("secFloodThresh"); s.connection_flood_ban_secs=g("secFloodBan");
-  s.max_concurrent_per_ip=g("secMaxConc"); s.handshake_timeout_secs=g("secHandshake"); s.idle_timeout_secs=g("secIdle");
+  s.max_concurrent_per_ip=g("secMaxConc"); s.max_raw_connections_per_ip=g("secMaxRaw"); s.handshake_timeout_secs=g("secHandshake"); s.idle_timeout_secs=g("secIdle");
   s.min_name_length=g("secMinName"); s.max_name_length=g("secMaxName"); s.max_failed_logins=g("secMaxFailed");
   s.failed_login_window_secs=g("secFailedWindow"); s.failed_login_ban_secs=g("secFailedBan");
   s.reject_spam_bots=document.getElementById("secRejectSpam").checked;

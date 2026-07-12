@@ -194,24 +194,28 @@ impl ConnectionFloodTracker {
 
 /// Límite de conexiones concurrentes por IP.
 pub struct ConcurrentConnLimiter {
-    config: SecurityConfig,
+    limit: u32,
     state: Mutex<HashMap<IpAddr, u32>>,
 }
 
 impl ConcurrentConnLimiter {
-    /// Crea el limiter.
-    pub fn new(config: SecurityConfig) -> Arc<Self> {
+    /// Crea el limiter con un tope de conexiones simultáneas por IP.
+    pub fn new(limit: u32) -> Arc<Self> {
         Arc::new(Self {
-            config,
+            limit,
             state: Mutex::new(HashMap::new()),
         })
     }
 
     /// Intenta incrementar el contador para una IP. Retorna `false` si excede.
+    /// Un `limit` de 0 se trata como "sin límite" (siempre permite).
     pub fn try_acquire(&self, ip: IpAddr) -> bool {
+        if self.limit == 0 {
+            return true;
+        }
         let mut state = self.state.lock();
         let count = state.entry(ip).or_insert(0);
-        if *count >= self.config.max_concurrent_per_ip {
+        if *count >= self.limit {
             return false;
         }
         *count += 1;
@@ -475,8 +479,12 @@ impl FailedLoginTracker {
 pub struct SecurityManager {
     /// Capa 1
     pub conn_flood: Arc<ConnectionFloodTracker>,
-    /// Capa 2
+    /// Capa 2 — conexiones simultáneas de clientes Ares nativos (post-login).
     pub concurrent: Arc<ConcurrentConnLimiter>,
+    /// Cap de conexiones CRUDAS por IP, aplicado en el multiplexado antes de
+    /// clasificar (anti-Slowloris): cuenta cualquier conexión (muda o no).
+    /// Límite más alto que `concurrent` para no romper web detrás de un proxy.
+    pub raw_conn: Arc<ConcurrentConnLimiter>,
     /// Capa 3
     pub handshake_timeout: HandshakeTimeout,
     /// Capa 4
@@ -490,15 +498,25 @@ impl SecurityManager {
     pub fn new(config: SecurityConfig) -> Arc<Self> {
         Arc::new(Self {
             conn_flood: ConnectionFloodTracker::new(config.clone()),
-            concurrent: ConcurrentConnLimiter::new(config.clone()),
+            concurrent: ConcurrentConnLimiter::new(config.max_concurrent_per_ip),
+            raw_conn: ConcurrentConnLimiter::new(config.max_raw_connections_per_ip),
             handshake_timeout: HandshakeTimeout::from_config(&config),
             login_validator: LoginValidator::new(config.clone()),
             failed_logins: FailedLoginTracker::new(config),
         })
     }
 
-    /// Verifica una nueva conexión entrante (capas 1, 2 y 5).
-    /// Retorna `None` si OK, `Some(razón)` si se rechaza.
+    /// Libera un slot de conexión cruda (CAPA anti-Slowloris del multiplexado).
+    pub fn on_raw_disconnect(&self, ip: IpAddr) {
+        self.raw_conn.release(ip);
+    }
+
+    /// Verifica una nueva conexión de cliente Ares nativo (capas 1, 2 y 5),
+    /// tras la clasificación. Retorna `None` si OK, `Some(razón)` si se rechaza.
+    ///
+    /// El cap anti-Slowloris de conexiones CRUDAS por IP es aparte y se aplica
+    /// antes, en `handle_muxed_connection` (`raw_conn`), para cubrir también las
+    /// conexiones que todavía no mandaron ni un byte.
     pub fn check_new_connection(&self, ip: IpAddr) -> Option<RejectReason> {
         // Capa 5: ban por logins fallidos
         if self.failed_logins.is_banned(ip) {
@@ -508,14 +526,14 @@ impl SecurityManager {
         if let Some(r) = self.conn_flood.check(ip) {
             return Some(r);
         }
-        // Capa 2: concurrent limit
+        // Capa 2: límite de conexiones simultáneas por IP (clientes nativos).
         if !self.concurrent.try_acquire(ip) {
             return Some(RejectReason::TooManyConcurrent);
         }
         None
     }
 
-    /// Registra una conexión cerrada.
+    /// Registra una conexión cerrada (libera el slot de la CAPA 2).
     pub fn on_disconnect(&self, ip: IpAddr) {
         self.concurrent.release(ip);
     }
@@ -544,6 +562,7 @@ mod tests {
             connection_flood_ban_threshold: 3,
             connection_flood_ban_secs: 60,
             max_concurrent_per_ip: 2,
+            max_raw_connections_per_ip: 30,
             handshake_timeout_secs: 15,
             idle_timeout_secs: 120,
             min_name_length: 1,
@@ -605,6 +624,7 @@ mod tests {
             connection_flood_ban_threshold: 2,
             connection_flood_ban_secs: 60,
             max_concurrent_per_ip: 100,
+            max_raw_connections_per_ip: 30,
             handshake_timeout_secs: 15,
             idle_timeout_secs: 120,
             min_name_length: 1,
@@ -671,7 +691,7 @@ mod tests {
 
     #[test]
     fn concurrent_under_limit() {
-        let l = ConcurrentConnLimiter::new(test_config());
+        let l = ConcurrentConnLimiter::new(2);
         let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
         assert!(l.try_acquire(ip));
         assert!(l.try_acquire(ip));
@@ -681,7 +701,7 @@ mod tests {
 
     #[test]
     fn concurrent_release() {
-        let l = ConcurrentConnLimiter::new(test_config());
+        let l = ConcurrentConnLimiter::new(2);
         let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
         l.try_acquire(ip);
         l.try_acquire(ip);
@@ -830,27 +850,16 @@ mod tests {
 
     #[test]
     fn manager_check_new_connection_layers() {
+        // CAPA 2 (concurrent, límite=2) se aplica en check_new_connection
+        // (tras clasificar, para clientes Ares nativos).
         let m = SecurityManager::new(test_config());
         let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
-        // Capa 1: primeras 3 OK
         assert!(m.check_new_connection(ip).is_none());
         assert!(m.check_new_connection(ip).is_none());
-        // Capa 2 (concurrent limit=2) rechaza la 3ra
         assert_eq!(
             m.check_new_connection(ip),
             Some(RejectReason::TooManyConcurrent)
         );
-    }
-
-    #[test]
-    fn manager_concurrent_limit() {
-        let m = SecurityManager::new(test_config());
-        let ip1 = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
-        // Capa 2 limit = 2 concurrent
-        m.check_new_connection(ip1);
-        m.check_new_connection(ip1);
-        let r = m.check_new_connection(ip1);
-        assert_eq!(r, Some(RejectReason::TooManyConcurrent));
     }
 
     #[test]
@@ -859,13 +868,35 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
         m.check_new_connection(ip);
         m.check_new_connection(ip);
-        // límite alcanzado
         assert!(matches!(
             m.check_new_connection(ip),
             Some(RejectReason::TooManyConcurrent)
         ));
         m.on_disconnect(ip);
-        // ahora hay espacio
         assert!(m.check_new_connection(ip).is_none());
+    }
+
+    #[test]
+    fn raw_conn_cap_is_separate() {
+        // El cap de conexiones crudas (anti-Slowloris) es un limiter aparte,
+        // con su propio tope (30 en test_config), mucho mayor que el de
+        // concurrentes nativos (2).
+        let m = SecurityManager::new(test_config());
+        let ip = IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2));
+        for _ in 0..30 {
+            assert!(m.raw_conn.try_acquire(ip));
+        }
+        assert!(!m.raw_conn.try_acquire(ip)); // 31 → rechazada
+        m.on_raw_disconnect(ip);
+        assert!(m.raw_conn.try_acquire(ip)); // libera y hay espacio
+    }
+
+    #[test]
+    fn raw_conn_zero_means_unlimited() {
+        let l = ConcurrentConnLimiter::new(0);
+        let ip = IpAddr::V4(Ipv4Addr::new(3, 3, 3, 3));
+        for _ in 0..1000 {
+            assert!(l.try_acquire(ip));
+        }
     }
 }

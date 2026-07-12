@@ -1000,6 +1000,42 @@ disparó `onJoin`, `onPublic`, `onCommand` (incluido `#help`) y `onPart`, y
 `#help` incluyó la línea registrada por el script vía `Help_addLine`.
 `cargo build/test/clippy --workspace` en verde.
 
+### Hueco Slowloris en el multiplexado + fixes anti-DDoS — IMPLEMENTADO (2026-07-11)
+
+El script de prueba anti-DDoS (`tools/ddos_test.py`) destapó un hueco real:
+`handle_muxed_connection` (main.rs) hacía `stream.peek()` para clasificar
+(Web/Link/TCP) **sin timeout** y **antes** de cualquier capa de seguridad. Una
+conexión que se abría y NO mandaba ni un byte se quedaba colgada en el peek
+para siempre, sin pasar por CAPA 1/2/3/5 — se podían acumular sin límite
+(Slowloris). El test abrió 20 conexiones mudas y las 20 seguían vivas.
+
+Dos fixes (el usuario pidió ambos):
+
+1. **Timeout en la clasificación**: el `peek` se envuelve en
+   `tokio::time::timeout(handshake_timeout_secs)`. Una conexión que no manda el
+   primer byte a tiempo se cierra. Aplica a TODAS las conexiones (incluido
+   loopback). Verificado E2E: 12 conexiones mudas cerradas tras el timeout
+   (antes quedaban colgadas indefinidamente).
+
+2. **Cap de conexiones CRUDAS por IP antes del peek**: nuevo
+   `max_raw_connections_per_ip` (default **30**, `0` = sin límite) — un limiter
+   SEPARADO y más alto que el de 5 concurrentes nativos, para **no romper la
+   web detrás de un proxy** (todos los usuarios web comparten la IP del proxy;
+   un cap de 5 los limitaría a 5). Cuenta cualquier conexión (muda o no). Se
+   exime a `trusted_proxies` (incluye loopback). El límite de 5 concurrentes de
+   clientes Ares nativos (CAPA 2) se mantiene igual, post-clasificación.
+
+Detalles: `ConcurrentConnLimiter` ahora toma un `limit: u32` (antes leía el
+config), con `0` = ilimitado; `SecurityManager` tiene dos instancias
+(`concurrent` = nativos, `raw_conn` = crudas). El panel de Seguridad expone el
+campo nuevo. Verificado: login normal (WS) sigue funcionando; el test de
+Slowloris del script pasa (0/20 vivas tras el timeout); `build/test/clippy`
+en verde (163 tests en server-core).
+
+Nota de testing: el cap crudo (fix #2) exime loopback, así que desde localhost
+solo se observa el fix #1 (timeout). Para ver el cap por IP hay que atacar
+desde una IP remota; su lógica está cubierta por tests unitarios.
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/
