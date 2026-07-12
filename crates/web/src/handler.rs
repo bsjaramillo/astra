@@ -167,8 +167,13 @@ pub async fn handle_connection(
                     Ok(t) => t,
                     Err(_) => continue,
                 };
-                if let Err(e) = dispatch_ws_message(&ctx, &user, &text, &scripting).await {
-                    warn!("ws error dispatch de id={}: {}", user_id, e);
+                match dispatch_ws_message(&ctx, &user, &text, &scripting).await {
+                    Ok(true) => {
+                        info!("ws desconectando id={} por flood de texto", user_id);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!("ws error dispatch de id={}: {}", user_id, e),
                 }
             }
             WsOpcode::Ping => {}
@@ -568,25 +573,74 @@ pub(crate) fn avatar_b64_of(user: &AresUser) -> String {
 }
 
 /// Despacha un mensaje entrante del cliente WS.
+/// Chequea el flood de texto de sb0t (idéntico al path TCP nativo). Si el
+/// usuario está flooding, le manda un ERROR por el canal WS y devuelve `true`
+/// (el caller lo desconecta). Niveles > Regular exentos.
+fn ws_is_text_flooding(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    kind: server_core::flood_control::FloodKind,
+    text: &str,
+) -> bool {
+    let level = *user.level.read();
+    let now = server_core::time::unix_time();
+    if user.flood.is_flooding(kind, text, level, now) {
+        ctx.stats.on_flood();
+        if let Some(tx) = &user.ws_text_sender {
+            let _ = tx.send(
+                "ERROR:You are flooding the room and have been disconnected.".to_string(),
+            );
+        }
+        info!(
+            "ws flood de texto de '{}' (id={}) → desconectando",
+            user.name.read(),
+            user.id
+        );
+        return true;
+    }
+    false
+}
+
+/// Procesa un mensaje WS del cliente. Devuelve `Ok(true)` si el cliente debe
+/// desconectarse (p.ej. por flood de texto).
 async fn dispatch_ws_message(
     ctx: &Arc<AppContext>,
     user: &Arc<AresUser>,
     text: &str,
     scripting: &astra_scripting::ScriptHandle,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    use server_core::flood_control::FloodKind;
     let (ident, args) = match protocol::parse_incoming(text) {
         Some(p) => p,
-        None => return Ok(()),
+        None => return Ok(false),
     };
 
     match ident {
-        "PUBLIC" => handle_ws_public(ctx, user, args, scripting),
-        "EMOTE" => handle_ws_emote(ctx, user, args, scripting),
+        "PUBLIC" => {
+            // Control de flood (rate-limit + duplicados). Comandos (/ o #)
+            // exentos. Nivel > Regular exento (lo maneja is_flooding).
+            let is_cmd = args.trim_start().starts_with(['/', '#']);
+            if !is_cmd && ws_is_text_flooding(ctx, user, FloodKind::Public, args) {
+                return Ok(true);
+            }
+            handle_ws_public(ctx, user, args, scripting);
+        }
+        "EMOTE" => {
+            if ws_is_text_flooding(ctx, user, FloodKind::Emote, args) {
+                return Ok(true);
+            }
+            handle_ws_emote(ctx, user, args, scripting);
+        }
         "PING" => {
             debug!("ws PING de id={}", user.id);
         }
         "COMMAND" => handle_ws_command(ctx, user, args, scripting),
-        "PM" => handle_ws_pm(ctx, user, args, scripting),
+        "PM" => {
+            if ws_is_text_flooding(ctx, user, FloodKind::Pm, "") {
+                return Ok(true);
+            }
+            handle_ws_pm(ctx, user, args, scripting);
+        }
         "PERMSG" => handle_ws_permsg(ctx, user, args, scripting),
         "AVATAR" => handle_ws_avatar(ctx, user, args, scripting),
         "CUSTOM_DATA_HEAD" => handle_ws_custom_data_head(ctx, user, args, false),
@@ -597,7 +651,7 @@ async fn dispatch_ws_message(
             debug!("ws mensaje {} no procesado de id={}", ident, user.id);
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Ejecuta un comando recibido por el ident `COMMAND` o por texto público
