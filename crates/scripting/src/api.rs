@@ -183,6 +183,21 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("setTopic"), 1, NativeFunction::from_fn_ptr(set_topic_fn))
         .expect("setTopic should be registered");
 
+    // ============ Objeto user / Room / Stats (compat sb0t) ============
+
+    context
+        .register_global_builtin_callable(js_string!("__user_get"), 2, NativeFunction::from_fn_ptr(user_get_fn))
+        .expect("__user_get should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__user_do"), 3, NativeFunction::from_fn_ptr(user_do_fn))
+        .expect("__user_do should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__room_get"), 1, NativeFunction::from_fn_ptr(room_get_fn))
+        .expect("__room_get should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__stats_get"), 1, NativeFunction::from_fn_ptr(stats_get_fn))
+        .expect("__stats_get should be registered");
+
     // ============ Hashing ============
 
     context
@@ -450,9 +465,47 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
 /// Prelude JS de compatibilidad con la API de scripts de sb0t. Se evalúa en
 /// cada context antes del código del script.
 const SB0T_COMPAT_PRELUDE: &str = r#"
+// ---- Objeto user (JSUser): propiedades vivas + métodos ----
+var __USER_PROPS = ["name","orgName","id","level","vroom","externalIp","localIp",
+  "dns","guid","version","age","gender","sex","country","region","fileCount","port",
+  "muzzled","cloaked","registered","encrypted","owner","webClient","customClient",
+  "browsable","fastPing","canHTML","personalMessage","customName","joinTime"];
+function __mkUser(name){
+  if (name == null) return null;
+  var u = { __name: "" + name };
+  __USER_PROPS.forEach(function(p){
+    Object.defineProperty(u, p, {
+      enumerable: true,
+      get: function(){ return __user_get(u.__name, p); }
+    });
+  });
+  u.ban = function(){ return __user_do(u.__name, "ban", ""); };
+  u.kick = function(){ return __user_do(u.__name, "kick", ""); };
+  u.disconnect = function(){ return __user_do(u.__name, "disconnect", ""); };
+  u.sendText = function(t){ return __user_do(u.__name, "sendText", t == null ? "" : "" + t); };
+  u.sendPM   = function(t){ return __user_do(u.__name, "sendPM",   t == null ? "" : "" + t); };
+  u.sendHTML = function(t){ return __user_do(u.__name, "sendHTML", t == null ? "" : "" + t); };
+  u.sendEmote = function(t){ return __user_do(u.__name, "sendEmote", t == null ? "" : "" + t); };
+  u.exists = function(){ return userExists(u.__name); };
+  return u;
+}
+function user(name){ return __mkUser(name); }
+
 // ---- Objetos estáticos (mapean funciones planas de Astra) ----
-var Room = { setTopic: Room_setTopic, broadcast: Room_broadcast, topic: getTopic };
-var Users = { count: Users_count, getUserByName: Users_getUserByName, exists: userExists, names: userNames };
+var Room = {
+  setTopic: Room_setTopic, broadcast: Room_broadcast, topic: getTopic,
+  name: function(){ return __room_get("name"); },
+  botName: function(){ return __room_get("botName"); },
+  port: function(){ return __room_get("port"); },
+  version: function(){ return __room_get("version"); },
+  externalIp: function(){ return __room_get("externalIp"); },
+  startTime: function(){ return __room_get("startTime"); }
+};
+var Users = {
+  count: Users_count, getUserByName: function(n){ return __mkUser(n); },
+  exists: userExists, names: userNames,
+  local: function(){ var r = userNames(); return (r || []).map(__mkUser); }
+};
 var Channels = { create: Channels_create, "delete": Channels_delete, get: Channels_get,
                  list: Channels_list, broadcast: Channels_broadcast, setTopic: Channels_setTopic, kick: Channels_kick };
 var Base64 = { encode: Base64_encode, decode: Base64_decode };
@@ -460,7 +513,20 @@ var Zip = { compress: Zip_compress, uncompress: Zip_decompress, decompress: Zip_
 var Hashlink = { create: Hashlink_create, parse: Hashlink_parse, encode: Hashlink_create, decode: Hashlink_parse };
 var Entities = { list: Entities_list };
 var Spelling = { check: Spelling_check, suggest: Spelling_suggest };
-var Stats = { addStat: Stats_addStat, getStat: Stats_getStat };
+var Stats = {
+  addStat: Stats_addStat, getStat: Stats_getStat,
+  userCount: function(){ return __stats_get("userCount"); },
+  peakUserCount: function(){ return __stats_get("peakUserCount"); },
+  joinCount: function(){ return __stats_get("joinCount"); },
+  partCount: function(){ return __stats_get("partCount"); },
+  dataReceived: function(){ return __stats_get("dataReceived"); },
+  dataSent: function(){ return __stats_get("dataSent"); },
+  floodCount: function(){ return __stats_get("floodCount"); },
+  invalidLoginCount: function(){ return __stats_get("invalidLoginCount"); },
+  rejectionCount: function(){ return __stats_get("rejectionCount"); },
+  messageCount: function(){ return __stats_get("messageCount"); },
+  pmCount: function(){ return __stats_get("pmCount"); }
+};
 var Registry = { createKey: Registry_createKey, deleteKey: Registry_deleteKey };
 var Crypto = { hashSHA1: Crypto_hashSHA1, hashMD5: Crypto_hashMD5, sha1: Crypto_hashSHA1, md5: Crypto_hashMD5 };
 var Link = { createLink: Link_createLink, disconnect: Link_disconnect, findHub: Link_findHub,
@@ -478,6 +544,54 @@ function scriptName(){ return (typeof __SCRIPT_DIR__ === "string") ? __SCRIPT_DI
 function tickCount(){ return Date.now(); }
 function byteLength(s){ s = (s == null ? "" : "" + s); var n = 0; for (var i = 0; i < s.length; i++){ var c = s.charCodeAt(i); n += c < 0x80 ? 1 : c < 0x800 ? 2 : 3; } return n; }
 function stripColors(s){ return ("" + (s == null ? "" : s)).replace(/\x03[0-9]{0,2}(,[0-9]{1,2})?/g, ""); }
+function escapeUtf(s){ return encodeURIComponent(s == null ? "" : "" + s); }
+function clrName(name){ return stripColors(name); }
+
+// ---- List: colección tipada estilo sb0t (implementación pura JS) ----
+function List(){ this.__a = []; }
+Object.defineProperty(List.prototype, "count",  { get: function(){ return this.__a.length; } });
+Object.defineProperty(List.prototype, "length", { get: function(){ return this.__a.length; } });
+List.prototype.clear = function(){ this.__a = []; };
+List.prototype.reverse = function(){ this.__a.reverse(); return this; };
+List.prototype.sort = function(f){ this.__a.sort(f); return this; };
+List.prototype.add = function(x){ this.__a.push(x); return this; };
+List.prototype.addRange = function(arr){ for (var i = 0; i < arr.length; i++) this.__a.push(arr[i]); return this; };
+List.prototype.insert = function(i, x){ this.__a.splice(i, 0, x); return this; };
+List.prototype.insertRange = function(i, arr){ this.__a.splice.apply(this.__a, [i, 0].concat(arr)); return this; };
+List.prototype.remove = function(x){ var i = this.__a.indexOf(x); if (i >= 0) this.__a.splice(i, 1); return i >= 0; };
+List.prototype.removeAt = function(i){ this.__a.splice(i, 1); return this; };
+List.prototype.removeRange = function(i, n){ this.__a.splice(i, n); return this; };
+List.prototype.removeAll = function(f){ this.__a = this.__a.filter(function(x){ return !f(x); }); return this; };
+List.prototype.getRange = function(i, n){ return this.__a.slice(i, i + n); };
+List.prototype.get = function(i){ return this.__a[i]; };
+List.prototype.indexOf = function(x){ return this.__a.indexOf(x); };
+List.prototype.lastIndexOf = function(x){ return this.__a.lastIndexOf(x); };
+List.prototype.find = function(f){ for (var i = 0; i < this.__a.length; i++) if (f(this.__a[i])) return this.__a[i]; return null; };
+List.prototype.findAll = function(f){ return this.__a.filter(f); };
+List.prototype.findIndex = function(f){ for (var i = 0; i < this.__a.length; i++) if (f(this.__a[i])) return i; return -1; };
+List.prototype.findLastIndex = function(f){ for (var i = this.__a.length - 1; i >= 0; i--) if (f(this.__a[i])) return i; return -1; };
+List.prototype.join = function(s){ return this.__a.join(s == null ? "," : s); };
+
+// ---- Timer: repetitivo con oncomplete, sobre setTimer/clearTimer nativos ----
+// setTimer() de Astra ya es repetitivo (el manager lo re-arma) y dispara el
+// handler global onTimer(id, name). Registramos el callback por 'name' y lo
+// enrutamos con un onTimer del prelude. Un script que defina su propio
+// onTimer lo sobreescribe (sólo relevante si además usa el objeto Timer).
+var __timerSeq = 0;
+var __timerCbs = {};
+function onTimer(id, name){ var f = __timerCbs[name]; if (typeof f === "function") { try { f(); } catch (e) {} } }
+function Timer(){ this.interval = 1000; this.oncomplete = null; this.__id = null; this.__key = "__timer_" + (++__timerSeq); }
+Timer.prototype.start = function(){
+  var self = this;
+  __timerCbs[this.__key] = function(){ if (typeof self.oncomplete === "function") self.oncomplete(); };
+  this.__id = setTimer(Math.max(1, Math.round(this.interval / 1000)), this.__key);
+  return this;
+};
+Timer.prototype.stop = function(){
+  if (this.__id != null) { clearTimer(this.__id); this.__id = null; }
+  delete __timerCbs[this.__key];
+  return this;
+};
 
 // ---- Query: objeto de datos (sb0t: new Query("... {0} ...", p0, p1)) ----
 function Query(sql){ this.__sql = (sql == null ? "" : "" + sql); this.__params = Array.prototype.slice.call(arguments, 1); }
@@ -567,9 +681,11 @@ fn user_names_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Resul
             .map(|u| u.name.read().clone())
             .collect();
         let json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
-        ctx.eval(boa_engine::Source::from_bytes(json.as_bytes()))
+        // Devolver el array JS de verdad (antes retornaba undefined).
+        let arr = ctx
+            .eval(boa_engine::Source::from_bytes(json.as_bytes()))
             .unwrap_or(JsValue::undefined());
-        Ok(JsValue::undefined())
+        Ok(arr)
     } else {
         Ok(JsValue::undefined())
     }
@@ -644,6 +760,149 @@ fn kick_user_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
     } else {
         Ok(JsValue::from(false))
     }
+}
+
+/// `__user_get(name, prop)` — devuelve una propiedad del usuario `name` para
+/// el objeto `user`/JSUser del prelude. Null si el user no existe o la
+/// propiedad no está soportada.
+fn user_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let prop = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::null());
+    };
+    let Some(u) = app.user_pool.get_by_name(&name) else {
+        return Ok(JsValue::null());
+    };
+    let v = match prop.as_str() {
+        "name" => JsValue::from(js_string!(u.name.read().clone())),
+        "orgName" => JsValue::from(js_string!(u.org_name.read().clone())),
+        "id" => JsValue::from(u.id as f64),
+        "level" => JsValue::from(*u.level.read() as u8 as f64),
+        "vroom" => JsValue::from(*u.vroom.read() as f64),
+        "externalIp" => JsValue::from(js_string!(u.external_ip.to_string())),
+        "localIp" => JsValue::from(js_string!(u.local_ip.to_string())),
+        "dns" => JsValue::from(js_string!(u.dns.read().clone())),
+        "guid" => JsValue::from(js_string!(u
+            .guid
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>())),
+        "version" => JsValue::from(js_string!(u.version.clone())),
+        "age" => JsValue::from(u.age as f64),
+        "gender" | "sex" => JsValue::from(u.sex as f64),
+        "country" => JsValue::from(u.country as f64),
+        "region" => JsValue::from(js_string!(u.region.clone())),
+        "fileCount" => JsValue::from(u.file_count as f64),
+        "port" => JsValue::from(u.data_port as f64),
+        "muzzled" => JsValue::from(u.is_muzzled()),
+        "cloaked" => JsValue::from(u.cloaked.load(Relaxed)),
+        "registered" => JsValue::from(u.registered),
+        "encrypted" => JsValue::from(u.encrypted),
+        "owner" => JsValue::from(*u.level.read() as u8 >= server_core::ILevel::Owner as u8),
+        "webClient" => JsValue::from(u.web_client),
+        "customClient" => JsValue::from(u.custom_client),
+        "browsable" => JsValue::from(u.browsable),
+        "fastPing" => JsValue::from(u.fast_ping),
+        "canHTML" => JsValue::from(u.supports_html),
+        "personalMessage" => JsValue::from(js_string!(u.personal_message.lock().clone())),
+        "customName" => JsValue::from(js_string!(u.custom_name.read().clone().unwrap_or_default())),
+        "joinTime" => JsValue::from(u.join_time as f64),
+        _ => JsValue::null(),
+    };
+    Ok(v)
+}
+
+/// `__user_do(name, action, arg)` — ejecuta una acción sobre el usuario
+/// `name` (métodos del objeto `user`). Devuelve bool de éxito.
+fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let action = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let arg = args.get(2).and_then(jsvalue_to_string).unwrap_or_default();
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(false));
+    };
+    let Some(u) = app.user_pool.get_by_name(&name) else {
+        return Ok(JsValue::from(false));
+    };
+    let bot = app.settings.bot_name.clone();
+    let ok = match action.as_str() {
+        "kick" | "disconnect" => {
+            let mut w = proto_ares::PacketWriter::with_msg_crypto(
+                proto_ares::TcpMsg::ServerError,
+                u.ares_crypto,
+            );
+            w.write_string_nt("You have been kicked from the room.").ok();
+            let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
+            let uid = u.id;
+            app.user_pool.remove(uid);
+            true
+        }
+        "ban" => {
+            let ident = app.bans.ban(
+                &u.name.read(),
+                &u.version,
+                &u.guid,
+                u.external_ip,
+                u.local_ip,
+                u.data_port,
+            );
+            if ident != 0 {
+                let mut w = proto_ares::PacketWriter::with_msg_crypto(
+                    proto_ares::TcpMsg::ServerError,
+                    u.ares_crypto,
+                );
+                w.write_string_nt("You have been banned from the room.").ok();
+                let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
+                app.user_pool.remove(u.id);
+                true
+            } else {
+                false
+            }
+        }
+        "sendText" | "sendPM" | "sendHTML" => u.send_pvt(&bot, &arg),
+        "sendEmote" => u.send_pvt(&bot, &arg),
+        _ => false,
+    };
+    Ok(JsValue::from(ok))
+}
+
+/// `__room_get(prop)` — propiedades de la sala (objeto `Room`).
+fn room_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let prop = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::null());
+    };
+    let v = match prop.as_str() {
+        "name" => JsValue::from(js_string!(app.settings.room_name.clone())),
+        "botName" => JsValue::from(js_string!(app.settings.bot_name.clone())),
+        "topic" => JsValue::from(js_string!(app.current_room_topic())),
+        "port" => JsValue::from(app.settings.port as f64),
+        "version" => JsValue::from(js_string!(env!("CARGO_PKG_VERSION"))),
+        "externalIp" => JsValue::from(js_string!("")),
+        "startTime" => JsValue::from(app.uptime_secs() as f64),
+        _ => JsValue::null(),
+    };
+    Ok(v)
+}
+
+/// `__stats_get(name)` — contadores del objeto `Stats`. 0 para los que Astra
+/// aún no rastrea.
+fn stats_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(0.0));
+    };
+    let v: f64 = match name.as_str() {
+        "userCount" => app.user_pool.len() as f64,
+        "peakUserCount" => app.stats.peak_users() as f64,
+        "joinCount" => app.stats.total_users() as f64,
+        "dataReceived" => app.stats.bytes_in() as f64,
+        "dataSent" => app.stats.bytes_out() as f64,
+        _ => 0.0,
+    };
+    Ok(JsValue::from(v))
 }
 
 fn get_topic_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
@@ -2408,6 +2667,61 @@ mod tests {
     // ========== Tests de las nuevas APIs ==========
 
     #[test]
+    fn sb0t_compat_phase2_apis() {
+        let mut ctx = make_context(make_app());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            // Objeto user: existe, tiene props (null sin user en pool) y métodos.
+            var u = user("Nobody");
+            if (u == null) throw "user() returned null";
+            if (u.name !== null) throw "expected null name, got " + u.name;
+            if (typeof u.ban !== "function") throw "ban is not a function";
+            if (typeof u.kick !== "function") throw "kick is not a function";
+            if (typeof u.sendText !== "function") throw "sendText is not a function";
+            if (Users.getUserByName("x") == null) throw "Users.getUserByName null";
+
+            // Room getters
+            if (typeof Room.name() !== "string") throw "Room.name not string";
+            if (typeof Room.port() !== "number") throw "Room.port not number";
+            if (typeof Room.version() !== "string") throw "Room.version not string";
+            if (typeof Room.startTime() !== "number") throw "Room.startTime not number";
+
+            // Stats
+            if (Stats.userCount() !== 0) throw "Stats.userCount != 0";
+            if (typeof Stats.peakUserCount() !== "number") throw "Stats.peak not number";
+
+            // List
+            var L = new List();
+            L.add(1).add(2).addRange([3, 4]);
+            if (L.count !== 4) throw "List.count != 4: " + L.count;
+            if (L.length !== 4) throw "List.length != 4";
+            if (L.indexOf(3) !== 2) throw "List.indexOf(3) != 2";
+            if (L.find(function(x){ return x > 2; }) !== 3) throw "List.find bad";
+            if (L.findIndex(function(x){ return x === 4; }) !== 3) throw "List.findIndex bad";
+            L.removeAt(0);
+            if (L.count !== 3 || L.get(0) !== 2) throw "List.removeAt bad";
+            if (L.join("-") !== "2-3-4") throw "List.join bad: " + L.join("-");
+            L.clear();
+            if (L.count !== 0) throw "List.clear bad";
+
+            // Globals
+            if (escapeUtf("a b") !== "a%20b") throw "escapeUtf bad: " + escapeUtf("a b");
+            if (typeof clrName("test") !== "string") throw "clrName not string";
+
+            // Timer: construible, start/stop no lanzan
+            var t = new Timer();
+            t.interval = 5000;
+            t.oncomplete = function(){};
+            t.start();
+            t.stop();
+        "#,
+        );
+        assert!(result.is_ok(), "phase2 apis should work: {:?}", result);
+        unregister_context(&ctx);
+    }
+
+    #[test]
     fn sha1_fn_works() {
         let mut ctx = make_context(make_app());
         // SHA-1("hello") = aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
@@ -2516,6 +2830,37 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         u.sender = Some(tx);
         (Arc::new(u), rx)
+    }
+
+    #[test]
+    fn user_object_resolves_real_user() {
+        let app = make_app();
+        let (user, mut rx) = make_user(7, "Alice", "10.1.2.3");
+        app.user_pool.add(user);
+
+        let mut ctx = make_context(app.clone());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            var u = user("Alice");
+            if (u == null) throw "user() null";
+            if (u.name !== "Alice") throw "name != Alice: " + u.name;
+            if (u.id !== 7) throw "id != 7: " + u.id;
+            if (u.externalIp !== "10.1.2.3") throw "ip bad: " + u.externalIp;
+            if (typeof u.level !== "number") throw "level not number";
+            // Users.local() debe devolver el array con Alice
+            var names = Users.names();
+            if (names.indexOf("Alice") < 0) throw "names missing Alice";
+            var locals = Users.local();
+            if (locals.length !== 1 || locals[0].name !== "Alice") throw "local() bad";
+            // sendText llega como PM al usuario
+            if (u.sendText("hola") !== true) throw "sendText not true";
+        "#,
+        );
+        assert!(result.is_ok(), "user object should resolve: {:?}", result);
+        let pkt = rx.try_recv().expect("Alice should receive a packet from sendText");
+        assert_eq!(pkt[0], 25, "expected Pmt opcode (25), got {}", pkt[0]);
+        unregister_context(&ctx);
     }
 
     #[test]
