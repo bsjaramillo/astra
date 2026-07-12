@@ -1070,6 +1070,46 @@ cargó el sub-script, y `File_write`/`File_read`/`File_exists` escribieron/leyer
 (retrocompat). Test unitario de `extract_script_folder` (zip estilo GitHub con 4
 archivos + subdir → aplanado correctamente). `build/test/clippy` en verde.
 
+### Compatibilidad con la API de scripts de sb0t — FASE 1 (2026-07-12)
+
+Reportado: un script real de sb0t (`hangman`) falla con `ReferenceError: Query
+is not defined`. Auditoría del módulo: la API de scripting de Astra se
+construyó independiente y **no es compatible a nivel de código con sb0t**.
+Astra expone funciones PLANAS (`Query_new`, `Room_setTopic`,
+`Users_getUserByName`, `Crypto_hashSHA1`…), mientras que los scripts reales de
+sb0t usan OBJETOS/CONSTRUCTORES (`new Query()`, `Room.setTopic()`,
+`Users.getUserByName()`, `Sql.open()`…). Además el `Query_new` de Astra es
+read-only contra la DB del server, no el `Query`+`Sql` de sb0t (DB propia del
+script). Decisión del usuario: **compat total con sb0t, por fases**.
+
+**Fase 1** (arranca por lo que hangman necesita):
+- **Prelude de compatibilidad** (`SB0T_COMPAT_PRELUDE` en `api.rs`, evaluado en
+  cada context tras registrar los nativos): define los objetos estáticos
+  (`Room`, `Users`, `Channels`, `Base64`, `Zip`, `Hashlink`, `Entities`,
+  `Spelling`, `Stats`, `Registry`, `Crypto`, `Link`, `File`) mapeando las
+  funciones planas existentes; los globals sb0t (`sendText`→`sendPublic`,
+  `scriptName`, `tickCount`, `byteLength`, `stripColors`); y los constructores
+  `Query` (objeto de datos puro) y `Sql`.
+- **`Sql` nativo** (lo único genuinamente nuevo): DB SQLite **propia del
+  script** en `<carpeta_del_script>/sql/<archivo>`, con `open`/`query`/`value`/
+  `canRead`/`close`/`lastError` (paridad `JSSqlInstance`). Soporta CREATE/
+  INSERT/UPDATE/SELECT; los `{0}`,`{1}` de sb0t se traducen a `?1`,`?2` y se
+  bindean posicionalmente; los resultados se materializan y se recorren con
+  `canRead`/`value` (como el Reader de sb0t). Backend: `rusqlite` (thread-local
+  `SQL_STORE` keyeado por handle numérico).
+
+Verificado E2E: un script con `new Sql()` + `new Query("... {0} {1}", a, b)`
+creó una DB en su carpeta, insertó con parámetros y leyó las filas ordenadas;
+`Room.setTopic`/`Users.getUserByName`/`sendText`/`Crypto.hashSHA1` quedaron
+definidos. `build/test/clippy` en verde.
+
+**Pendiente (fases siguientes)**: métodos de objeto que Astra no implementa
+(getters de `Room` name/version/port/externalIp/startTime; colecciones de
+`Users` local/linked/banned/records; `Registry` get/set/getKeys/exists;
+contadores de `Stats`); constructores `HttpRequest`, `XmlParser`, `List`,
+`ProxyCheck`, `Scribble`; el objeto `user` (con `user.name`/`user.ban()`…) y
+los prototipos de objeto (`JSUser`, `JSChannel`, etc.).
+
 ### Diferido (fuera de alcance)
 
 - **File search/sharing**: `ClientBrowse` se relaya al link, pero `ClientSearch`/

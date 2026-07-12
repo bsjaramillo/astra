@@ -420,8 +420,77 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("clearTimer"), 1, NativeFunction::from_fn_ptr(clear_timer_fn))
         .expect("clearTimer should be registered");
 
+    // ============ Sql (DB propia del script, paridad sb0t) ============
+    for (name, arity, f) in [
+        ("__Sql_new", 0usize, sql_new_fn as fn(&JsValue, &[JsValue], &mut Context) -> Result<JsValue, boa_engine::JsError>),
+        ("__Sql_open", 2, sql_open_fn),
+        ("__Sql_query", 3, sql_query_fn),
+        ("__Sql_canRead", 1, sql_can_read_fn),
+        ("__Sql_value", 2, sql_value_fn),
+        ("__Sql_close", 1, sql_close_fn),
+        ("__Sql_lastError", 1, sql_last_error_fn),
+    ] {
+        context
+            .register_global_builtin_callable(js_string!(name), arity, NativeFunction::from_fn_ptr(f))
+            .unwrap_or_else(|_| panic!("{} should be registered", name));
+    }
+
+    // ============ Capa de compatibilidad sb0t ============
+    // Define los objetos/constructores/globals que usan los scripts REALES de
+    // sb0t (`Room.setTopic()`, `new Query()`, `new Sql()`, `Users.getUserByName()`,
+    // etc.) mapeándolos a las funciones planas que Astra ya expone. Fase 1: se
+    // cubren las que existen; las que faltan se irán agregando por fases.
+    if let Err(e) = context.eval(boa_engine::Source::from_bytes(SB0T_COMPAT_PRELUDE.as_bytes())) {
+        tracing::error!("error cargando el prelude de compatibilidad sb0t: {}", e);
+    }
+
     context
 }
+
+/// Prelude JS de compatibilidad con la API de scripts de sb0t. Se evalúa en
+/// cada context antes del código del script.
+const SB0T_COMPAT_PRELUDE: &str = r#"
+// ---- Objetos estáticos (mapean funciones planas de Astra) ----
+var Room = { setTopic: Room_setTopic, broadcast: Room_broadcast, topic: getTopic };
+var Users = { count: Users_count, getUserByName: Users_getUserByName, exists: userExists, names: userNames };
+var Channels = { create: Channels_create, "delete": Channels_delete, get: Channels_get,
+                 list: Channels_list, broadcast: Channels_broadcast, setTopic: Channels_setTopic, kick: Channels_kick };
+var Base64 = { encode: Base64_encode, decode: Base64_decode };
+var Zip = { compress: Zip_compress, uncompress: Zip_decompress, decompress: Zip_decompress };
+var Hashlink = { create: Hashlink_create, parse: Hashlink_parse, encode: Hashlink_create, decode: Hashlink_parse };
+var Entities = { list: Entities_list };
+var Spelling = { check: Spelling_check, suggest: Spelling_suggest };
+var Stats = { addStat: Stats_addStat, getStat: Stats_getStat };
+var Registry = { createKey: Registry_createKey, deleteKey: Registry_deleteKey };
+var Crypto = { hashSHA1: Crypto_hashSHA1, hashMD5: Crypto_hashMD5, sha1: Crypto_hashSHA1, md5: Crypto_hashMD5 };
+var Link = { createLink: Link_createLink, disconnect: Link_disconnect, findHub: Link_findHub,
+             findLeaf: Link_findLeaf, findUser: Link_findUser, getUserList: Link_getUserList,
+             kickHub: Link_kickHub, list: Link_list, leaves: Link_list };
+var File = {
+  exists: File_exists, load: File_read, read: File_read, save: File_write, write: File_write,
+  append: File_append, appendLine: function(n, t){ return File_append(n, (t == null ? "" : t) + "\r\n"); },
+  kill: File_delete, "delete": File_delete
+};
+
+// ---- Globals sb0t ----
+var sendText = sendPublic;
+function scriptName(){ return (typeof __SCRIPT_DIR__ === "string") ? __SCRIPT_DIR__.replace(/[\\/]+$/,"").split(/[\\/]/).pop() : ""; }
+function tickCount(){ return Date.now(); }
+function byteLength(s){ s = (s == null ? "" : "" + s); var n = 0; for (var i = 0; i < s.length; i++){ var c = s.charCodeAt(i); n += c < 0x80 ? 1 : c < 0x800 ? 2 : 3; } return n; }
+function stripColors(s){ return ("" + (s == null ? "" : s)).replace(/\x03[0-9]{0,2}(,[0-9]{1,2})?/g, ""); }
+
+// ---- Query: objeto de datos (sb0t: new Query("... {0} ...", p0, p1)) ----
+function Query(sql){ this.__sql = (sql == null ? "" : "" + sql); this.__params = Array.prototype.slice.call(arguments, 1); }
+
+// ---- Sql: DB SQLite propia del script (backend nativo) ----
+function Sql(){ this.__h = __Sql_new(); }
+Sql.prototype.open  = function(file){ return __Sql_open(this.__h, "" + file); };
+Sql.prototype.query = function(q){ return __Sql_query(this.__h, q ? q.__sql : "", q ? q.__params : []); };
+Sql.prototype.value = function(col){ return __Sql_value(this.__h, "" + col); };
+Sql.prototype.close = function(){ return __Sql_close(this.__h); };
+Object.defineProperty(Sql.prototype, "canRead",   { get: function(){ return __Sql_canRead(this.__h); } });
+Object.defineProperty(Sql.prototype, "lastError", { get: function(){ return __Sql_lastError(this.__h); } });
+"#;
 
 // ============================================================================
 // Implementaciones de las native functions
@@ -1625,6 +1694,247 @@ fn query_new_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
             Ok(JsValue::from(-1))
         }
     }
+}
+
+// ============================================================================
+// Sql — DB SQLite propia del script (paridad sb0t: new Sql() + new Query())
+// ============================================================================
+//
+// El objeto JS `Sql` (definido en el prelude de compatibilidad) delega en estas
+// funciones nativas, keyeadas por un handle numérico. Cada `Sql` abre un archivo
+// SQLite en `<carpeta_del_script>/sql/<archivo>`. Los resultados de un SELECT se
+// materializan y se recorren con `canRead`/`value` (como el Reader de sb0t).
+
+struct SqlState {
+    conn: Option<rusqlite::Connection>,
+    cols: Vec<String>,
+    rows: Vec<Vec<rusqlite::types::Value>>,
+    cursor: i64,
+    last_error: String,
+}
+
+thread_local! {
+    static SQL_STORE: RefCell<std::collections::HashMap<u64, SqlState>> =
+        RefCell::new(std::collections::HashMap::new());
+    static SQL_COUNTER: RefCell<u64> = const { RefCell::new(0) };
+}
+
+fn sql_handle(args: &[JsValue]) -> u64 {
+    args.get(0).and_then(|v| v.as_number()).unwrap_or(0.0) as u64
+}
+
+fn sql_set_error(h: u64, msg: &str) {
+    SQL_STORE.with(|s| {
+        if let Some(st) = s.borrow_mut().get_mut(&h) {
+            st.last_error = msg.to_string();
+        }
+    });
+}
+
+fn sql_new_fn(_this: &JsValue, _args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let id = SQL_COUNTER.with(|c| {
+        let mut c = c.borrow_mut();
+        *c += 1;
+        *c
+    });
+    SQL_STORE.with(|s| {
+        s.borrow_mut().insert(
+            id,
+            SqlState { conn: None, cols: vec![], rows: vec![], cursor: -1, last_error: String::new() },
+        );
+    });
+    Ok(JsValue::from(id as f64))
+}
+
+fn sql_open_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let h = sql_handle(args);
+    let file = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    // No permitir separadores ni traversal: la DB vive en <script>/sql/.
+    if file.is_empty() || file.contains('/') || file.contains('\\') || file.contains("..") {
+        sql_set_error(h, "invalid file name");
+        return Ok(JsValue::from(false));
+    }
+    let Some(dir) = current_script_dir(ctx) else {
+        sql_set_error(h, "no script dir");
+        return Ok(JsValue::from(false));
+    };
+    let sqldir = dir.join("sql");
+    if let Err(e) = std::fs::create_dir_all(&sqldir) {
+        sql_set_error(h, &format!("mkdir sql: {}", e));
+        return Ok(JsValue::from(false));
+    }
+    let path = sqldir.join(&file);
+    match rusqlite::Connection::open(&path) {
+        Ok(conn) => {
+            SQL_STORE.with(|s| {
+                if let Some(st) = s.borrow_mut().get_mut(&h) {
+                    st.conn = Some(conn);
+                    st.last_error.clear();
+                }
+            });
+            Ok(JsValue::from(true))
+        }
+        Err(e) => {
+            sql_set_error(h, &e.to_string());
+            Ok(JsValue::from(false))
+        }
+    }
+}
+
+/// Ejecuta una query (SELECT o DDL/DML) con parámetros posicionales.
+fn sql_run(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: &[rusqlite::types::Value],
+) -> Result<(Vec<String>, Vec<Vec<rusqlite::types::Value>>), String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let ncols = stmt.column_count();
+    let cols: Vec<String> = (0..ncols)
+        .map(|i| stmt.column_name(i).unwrap_or("").to_string())
+        .collect();
+    let mut out_rows = Vec::new();
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(params.iter()))
+        .map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let mut r = Vec::with_capacity(ncols);
+        for i in 0..ncols {
+            r.push(row.get::<_, rusqlite::types::Value>(i).unwrap_or(rusqlite::types::Value::Null));
+        }
+        out_rows.push(r);
+    }
+    Ok((cols, out_rows))
+}
+
+fn sql_query_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let h = sql_handle(args);
+    let sql_raw = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let params = sql_extract_params(args.get(2), ctx);
+    // Sustituir los placeholders `{0}`,`{1}`... de sb0t por `?1`,`?2`...
+    let mut sql = sql_raw;
+    for i in 0..params.len() {
+        sql = sql.replace(&format!("{{{}}}", i), &format!("?{}", i + 1));
+    }
+    SQL_STORE.with(|s| {
+        let mut store = s.borrow_mut();
+        let Some(st) = store.get_mut(&h) else {
+            return Ok(JsValue::from(false));
+        };
+        let conn = match st.conn.take() {
+            Some(c) => c,
+            None => {
+                st.last_error = "connection closed".to_string();
+                return Ok(JsValue::from(false));
+            }
+        };
+        let result = sql_run(&conn, &sql, &params);
+        st.conn = Some(conn);
+        match result {
+            Ok((cols, rows)) => {
+                st.cols = cols;
+                st.rows = rows;
+                st.cursor = -1;
+                st.last_error.clear();
+                Ok(JsValue::from(true))
+            }
+            Err(e) => {
+                st.cols.clear();
+                st.rows.clear();
+                st.cursor = -1;
+                st.last_error = e;
+                Ok(JsValue::from(false))
+            }
+        }
+    })
+}
+
+fn sql_can_read_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let h = sql_handle(args);
+    let can = SQL_STORE.with(|s| {
+        let mut store = s.borrow_mut();
+        match store.get_mut(&h) {
+            Some(st) => {
+                st.cursor += 1;
+                (st.cursor as usize) < st.rows.len()
+            }
+            None => false,
+        }
+    });
+    Ok(JsValue::from(can))
+}
+
+fn sql_value_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    use rusqlite::types::Value;
+    let h = sql_handle(args);
+    let col = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    SQL_STORE.with(|s| {
+        let store = s.borrow();
+        let Some(st) = store.get(&h) else {
+            return Ok(JsValue::null());
+        };
+        if st.cursor < 0 || (st.cursor as usize) >= st.rows.len() {
+            return Ok(JsValue::null());
+        }
+        let Some(idx) = st.cols.iter().position(|c| c == &col) else {
+            return Ok(JsValue::null());
+        };
+        let v = &st.rows[st.cursor as usize][idx];
+        let js = match v {
+            Value::Null => JsValue::null(),
+            Value::Integer(i) => JsValue::from(js_string!(i.to_string())),
+            Value::Real(f) => JsValue::from(js_string!(f.to_string())),
+            Value::Text(t) => JsValue::from(js_string!(t.clone())),
+            Value::Blob(b) => JsValue::from(js_string!(base64_encode_bytes_to_string(b))),
+        };
+        Ok(js)
+    })
+}
+
+fn sql_close_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let h = sql_handle(args);
+    SQL_STORE.with(|s| {
+        if let Some(st) = s.borrow_mut().get_mut(&h) {
+            st.conn = None; // cierra la conexión
+            st.rows.clear();
+            st.cols.clear();
+            st.cursor = -1;
+        }
+    });
+    Ok(JsValue::from(true))
+}
+
+fn sql_last_error_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let h = sql_handle(args);
+    let e = SQL_STORE.with(|s| s.borrow().get(&h).map(|st| st.last_error.clone()).unwrap_or_default());
+    Ok(JsValue::from(js_string!(e)))
+}
+
+/// Convierte un array JS de parámetros a valores SQLite.
+fn sql_extract_params(v: Option<&JsValue>, ctx: &mut Context) -> Vec<rusqlite::types::Value> {
+    use rusqlite::types::Value;
+    let mut out = Vec::new();
+    let Some(v) = v else { return out };
+    let Some(obj) = v.as_object() else { return out };
+    let len = obj
+        .get(js_string!("length"), ctx)
+        .ok()
+        .and_then(|l| l.as_number())
+        .unwrap_or(0.0) as u32;
+    for i in 0..len {
+        let elem = obj.get(i, ctx).unwrap_or(JsValue::null());
+        if elem.is_null() || elem.is_undefined() {
+            out.push(Value::Null);
+        } else if let Some(n) = elem.as_number() {
+            if n.fract() == 0.0 && n.abs() < 9.0e15 {
+                out.push(Value::Integer(n as i64));
+            } else {
+                out.push(Value::Real(n));
+            }
+        } else {
+            out.push(Value::Text(jsvalue_to_string(&elem).unwrap_or_default()));
+        }
+    }
+    out
 }
 
 /// Convierte un `rusqlite::types::Value` a string JSON.
