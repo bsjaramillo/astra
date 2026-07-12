@@ -140,7 +140,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "astra"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "astra-captcha"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "image",
  "rand 0.8.7",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "astra-commands"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "anyhow",
  "astra-scripting",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "astra-link"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "aes",
  "anyhow",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "astra-scripting"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "astra-udp"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "anyhow",
  "bytes",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "astra-web"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "anyhow",
  "astra-commands",
@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "proto-ares"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "aes",
  "byteorder",
@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.0.1-beta.15"
+version = "0.0.1-beta.16"
 dependencies = [
  "anyhow",
  "astra-captcha",
