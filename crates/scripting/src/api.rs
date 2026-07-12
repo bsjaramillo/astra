@@ -236,6 +236,9 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
     context
         .register_global_builtin_callable(js_string!("File_delete"), 1, NativeFunction::from_fn_ptr(file_delete_fn))
         .expect("File_delete should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__read_file_b64"), 1, NativeFunction::from_fn_ptr(read_file_b64_fn))
+        .expect("__read_file_b64 should be registered");
 
     // ============ Compresión ============
 
@@ -362,6 +365,24 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
     context
         .register_global_builtin_callable(js_string!("Registry_deleteKey"), 1, NativeFunction::from_fn_ptr(registry_delete_key_fn))
         .expect("Registry_deleteKey should be registered");
+    context
+        .register_global_builtin_callable(js_string!("Registry_getValue"), 1, NativeFunction::from_fn_ptr(registry_get_value_fn))
+        .expect("Registry_getValue should be registered");
+    context
+        .register_global_builtin_callable(js_string!("Registry_setValue"), 2, NativeFunction::from_fn_ptr(registry_set_value_fn))
+        .expect("Registry_setValue should be registered");
+    context
+        .register_global_builtin_callable(js_string!("Registry_exists"), 1, NativeFunction::from_fn_ptr(registry_exists_fn))
+        .expect("Registry_exists should be registered");
+    context
+        .register_global_builtin_callable(js_string!("Registry_getKeys"), 0, NativeFunction::from_fn_ptr(registry_get_keys_fn))
+        .expect("Registry_getKeys should be registered");
+    context
+        .register_global_builtin_callable(js_string!("Registry_deleteValue"), 1, NativeFunction::from_fn_ptr(registry_delete_value_fn))
+        .expect("Registry_deleteValue should be registered");
+    context
+        .register_global_builtin_callable(js_string!("Registry_clear"), 0, NativeFunction::from_fn_ptr(registry_clear_fn))
+        .expect("Registry_clear should be registered");
     context
         .register_global_builtin_callable(js_string!("Room_broadcast"), 1, NativeFunction::from_fn_ptr(room_broadcast_fn))
         .expect("Room_broadcast should be registered");
@@ -527,7 +548,11 @@ var Stats = {
   messageCount: function(){ return __stats_get("messageCount"); },
   pmCount: function(){ return __stats_get("pmCount"); }
 };
-var Registry = { createKey: Registry_createKey, deleteKey: Registry_deleteKey };
+var Registry = {
+  createKey: Registry_createKey, deleteKey: Registry_deleteKey,
+  exists: Registry_exists, getValue: Registry_getValue, getKeys: Registry_getKeys,
+  setValue: Registry_setValue, deleteValue: Registry_deleteValue, clear: Registry_clear
+};
 var Crypto = { hashSHA1: Crypto_hashSHA1, hashMD5: Crypto_hashMD5, sha1: Crypto_hashSHA1, md5: Crypto_hashMD5 };
 var Link = { createLink: Link_createLink, disconnect: Link_disconnect, findHub: Link_findHub,
              findLeaf: Link_findLeaf, findUser: Link_findUser, getUserList: Link_getUserList,
@@ -591,6 +616,99 @@ Timer.prototype.stop = function(){
   if (this.__id != null) { clearTimer(this.__id); this.__id = null; }
   delete __timerCbs[this.__key];
   return this;
+};
+
+// ---- Avatar: imagen de avatar sobre los natives Avatar_* ----
+function Avatar(src){ this.oncomplete = null; this.__id = -1; if (src != null) this.__id = Avatar_new("" + src); }
+Object.defineProperty(Avatar.prototype, "src", {
+  get: function(){ return this.__id < 0 ? null : Avatar_getBytes(this.__id); },
+  set: function(v){ this.__id = Avatar_new(v == null ? "" : "" + v); }
+});
+Object.defineProperty(Avatar.prototype, "size", { get: function(){ return this.__id < 0 ? -1 : Avatar_getSize(this.__id); } });
+Avatar.prototype.save = function(path){ return this.__id < 0 ? false : Avatar_save(this.__id, "" + path); };
+Avatar.prototype.load = function(path){ var b = __read_file_b64("" + path); if (b == null) return false; this.__id = Avatar_new(b); return this.__id >= 0; };
+Avatar.prototype.setForUser = function(name){ return this.__id < 0 ? false : Avatar_setForUser("" + name, this.__id); };
+Avatar.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null){ self.__id = Avatar_new(Base64_encode(bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
+
+// ---- Scribble: imagen scribble sobre los natives ScribbleImage_* ----
+function Scribble(src){ this.oncomplete = null; this.__id = -1; if (src != null) this.__id = ScribbleImage_new("" + src); }
+Object.defineProperty(Scribble.prototype, "src", {
+  get: function(){ return this.__id < 0 ? null : this.__id; },
+  set: function(v){ this.__id = ScribbleImage_new(v == null ? "" : "" + v); }
+});
+Object.defineProperty(Scribble.prototype, "size", { get: function(){ return this.__id < 0 ? -1 : ScribbleImage_getSize(this.__id); } });
+Scribble.prototype.save = function(path){ return this.__id < 0 ? false : ScribbleImage_save(this.__id, "" + path); };
+Scribble.prototype.load = function(path){ var b = __read_file_b64("" + path); if (b == null) return false; this.__id = ScribbleImage_new(b); return this.__id >= 0; };
+Scribble.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null){ self.__id = ScribbleImage_new(Base64_encode(bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
+
+// ---- XmlParser: DOM XML minimalista, implementación pura JS ----
+function XmlNode(name){ this.nodeName = name || ""; this.nodeValue = ""; this.attributes = {}; this.childNodes = []; this.parentNode = null; }
+XmlNode.prototype.appendChild = function(n){ n.parentNode = this; this.childNodes.push(n); return n; };
+XmlNode.prototype.removeChild = function(n){ var i = this.childNodes.indexOf(n); if (i >= 0){ this.childNodes.splice(i, 1); n.parentNode = null; return true; } return false; };
+XmlNode.prototype.getNodesByName = function(name){
+  var out = [];
+  (function walk(node){ for (var i = 0; i < node.childNodes.length; i++){ var c = node.childNodes[i]; if (c.nodeName === name) out.push(c); walk(c); } })(this);
+  return out;
+};
+function XmlParser(){ this.available = false; this.root = null; this.xml = ""; }
+XmlParser.prototype.create = function(rootName){ this.root = new XmlNode(rootName || "root"); this.available = true; return this.root; };
+XmlParser.prototype.getNodesByName = function(name){ return this.root ? this.root.getNodesByName(name) : []; };
+Object.defineProperty(XmlParser.prototype, "nodeName", { get: function(){ return this.root ? this.root.nodeName : ""; } });
+Object.defineProperty(XmlParser.prototype, "nodeValue", { get: function(){ return this.root ? this.root.nodeValue : ""; } });
+Object.defineProperty(XmlParser.prototype, "childNodes", { get: function(){ return this.root ? this.root.childNodes : []; } });
+Object.defineProperty(XmlParser.prototype, "attributes", { get: function(){ return this.root ? this.root.attributes : {}; } });
+Object.defineProperty(XmlParser.prototype, "parentNode", { get: function(){ return null; } });
+XmlParser.prototype.load = function(xml){
+  this.xml = xml == null ? "" : "" + xml;
+  this.available = false; this.root = null;
+  var s = this.xml, i = 0, n = s.length;
+  var stack = [], root = null;
+  function skipDecl(){ // saltar <?xml...?> y <!-- --> y <!DOCTYPE ...>
+    while (i < n){
+      if (s.slice(i, i + 2) === "<?"){ var e = s.indexOf("?>", i); if (e < 0) { i = n; return; } i = e + 2; }
+      else if (s.slice(i, i + 4) === "<!--"){ var e2 = s.indexOf("-->", i); if (e2 < 0){ i = n; return; } i = e2 + 3; }
+      else if (s.slice(i, i + 2) === "<!"){ var e3 = s.indexOf(">", i); if (e3 < 0){ i = n; return; } i = e3 + 1; }
+      else break;
+      while (i < n && /\s/.test(s[i])) i++;
+    }
+  }
+  function unescape(t){ return t.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,"&"); }
+  try {
+    while (i < n){
+      while (i < n && /\s/.test(s[i])) i++;
+      if (i >= n) break;
+      if (s.slice(i, i + 2) === "<?" || s.slice(i, i + 4) === "<!--" || s.slice(i, i + 2) === "<!"){ skipDecl(); continue; }
+      if (s[i] === "<"){
+        if (s[i + 1] === "/"){ // cierre
+          var ce = s.indexOf(">", i); i = ce + 1;
+          if (stack.length) stack.pop();
+          continue;
+        }
+        var te = s.indexOf(">", i);
+        if (te < 0) break;
+        var selfClose = s[te - 1] === "/";
+        var inner = s.substring(i + 1, selfClose ? te - 1 : te).trim();
+        var sp = inner.search(/\s/);
+        var tag = sp < 0 ? inner : inner.substring(0, sp);
+        var node = new XmlNode(tag);
+        if (sp >= 0){
+          var attrStr = inner.substring(sp);
+          var re = /([\w:.-]+)\s*=\s*"([^"]*)"/g, m;
+          while ((m = re.exec(attrStr)) !== null){ node.attributes[m[1]] = unescape(m[2]); }
+        }
+        if (stack.length) stack[stack.length - 1].appendChild(node); else root = node;
+        if (!selfClose) stack.push(node);
+        i = te + 1;
+      } else {
+        var lt = s.indexOf("<", i);
+        var text = (lt < 0 ? s.substring(i) : s.substring(i, lt));
+        if (stack.length && text.trim().length) stack[stack.length - 1].nodeValue += unescape(text.trim());
+        i = lt < 0 ? n : lt;
+      }
+    }
+    this.root = root; this.available = root != null;
+  } catch (e){ this.available = false; this.root = null; }
+  return this.available;
 };
 
 // ---- Query: objeto de datos (sb0t: new Query("... {0} ...", p0, p1)) ----
@@ -990,6 +1108,16 @@ fn file_read_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     match resolve_script_path(ctx, &arg, false).and_then(|p| std::fs::read_to_string(p).ok()) {
         Some(s) => Ok(JsValue::from(js_string!(s))),
+        None => Ok(JsValue::null()),
+    }
+}
+
+/// `__read_file_b64(name)` → lee el archivo como bytes crudos y devuelve su
+/// base64 (para cargar imágenes binarias en Avatar/Scribble). Null si falla.
+fn read_file_b64_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    match resolve_script_path(ctx, &arg, false).and_then(|p| std::fs::read(p).ok()) {
+        Some(bytes) => Ok(JsValue::from(js_string!(base64_encode_bytes_to_string(&bytes)))),
         None => Ok(JsValue::null()),
     }
 }
@@ -1683,6 +1811,103 @@ fn registry_delete_key_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context)
     let path = format!("HKLM\\Software\\Astra\\{}", name);
     let removed = REGISTRY_STORE.with(|r| r.borrow_mut().remove(&path));
     Ok(JsValue::from(removed))
+}
+
+// ============ Registry persistente (KV por script, compat sb0t) ============
+//
+// sb0t expone `Registry` como un almacén clave→valor persistente por script.
+// Astra lo respalda en `<script_dir>/registry.json`. Si no hay script dir
+// (p.ej. tests), cae a un mapa en memoria thread-local.
+
+thread_local! {
+    static REGISTRY_MEM: RefCell<serde_json::Map<String, serde_json::Value>>
+        = RefCell::new(serde_json::Map::new());
+}
+
+fn registry_file(ctx: &mut Context) -> Option<std::path::PathBuf> {
+    current_script_dir(ctx).map(|d| d.join("registry.json"))
+}
+
+fn registry_load(ctx: &mut Context) -> serde_json::Map<String, serde_json::Value> {
+    if let Some(path) = registry_file(ctx) {
+        if let Ok(txt) = std::fs::read_to_string(&path) {
+            if let Ok(serde_json::Value::Object(m)) = serde_json::from_str(&txt) {
+                return m;
+            }
+        }
+        serde_json::Map::new()
+    } else {
+        REGISTRY_MEM.with(|m| m.borrow().clone())
+    }
+}
+
+fn registry_store(ctx: &mut Context, map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    if let Some(path) = registry_file(ctx) {
+        match serde_json::to_string(map) {
+            Ok(txt) => std::fs::write(&path, txt).is_ok(),
+            Err(_) => false,
+        }
+    } else {
+        REGISTRY_MEM.with(|m| *m.borrow_mut() = map.clone());
+        true
+    }
+}
+
+/// `Registry.getValue(name)` — valor asociado, o null si no existe.
+fn registry_get_value_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let map = registry_load(ctx);
+    match map.get(&name).and_then(|v| v.as_str()) {
+        Some(s) => Ok(JsValue::from(js_string!(s.to_string()))),
+        None => Ok(JsValue::null()),
+    }
+}
+
+/// `Registry.setValue(name, value)` — persiste el par. Devuelve bool.
+fn registry_set_value_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    if name.is_empty() {
+        return Ok(JsValue::from(false));
+    }
+    let value = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let mut map = registry_load(ctx);
+    map.insert(name, serde_json::Value::String(value));
+    Ok(JsValue::from(registry_store(ctx, &map)))
+}
+
+/// `Registry.exists(name)` — true si la clave existe.
+fn registry_exists_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let map = registry_load(ctx);
+    Ok(JsValue::from(map.contains_key(&name)))
+}
+
+/// `Registry.getKeys()` — array con los nombres de clave.
+fn registry_get_keys_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let map = registry_load(ctx);
+    let keys: Vec<String> = map.keys().cloned().collect();
+    let json = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
+    let arr = ctx
+        .eval(boa_engine::Source::from_bytes(json.as_bytes()))
+        .unwrap_or(JsValue::undefined());
+    Ok(arr)
+}
+
+/// `Registry.deleteValue(name)` — borra la clave. Devuelve bool (existía).
+fn registry_delete_value_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let mut map = registry_load(ctx);
+    let existed = map.remove(&name).is_some();
+    if existed {
+        registry_store(ctx, &map);
+    }
+    Ok(JsValue::from(existed))
+}
+
+/// `Registry.clear()` — vacía todo el registro del script.
+fn registry_clear_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let empty = serde_json::Map::new();
+    Ok(JsValue::from(registry_store(ctx, &empty)))
 }
 
 /// `Room_broadcast(text)` — alias de `sendPublic("Bot", text)`.
@@ -2718,6 +2943,58 @@ mod tests {
         "#,
         );
         assert!(result.is_ok(), "phase2 apis should work: {:?}", result);
+        unregister_context(&ctx);
+    }
+
+    #[test]
+    fn sb0t_compat_phase3_apis() {
+        let mut ctx = make_context(make_app());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            // Registry: KV persistente (en memoria sin script dir)
+            if (Registry.exists("k") !== false) throw "exists should be false";
+            if (Registry.setValue("k", "v1") !== true) throw "setValue failed";
+            if (Registry.getValue("k") !== "v1") throw "getValue != v1: " + Registry.getValue("k");
+            if (Registry.exists("k") !== true) throw "exists should be true";
+            Registry.setValue("k2", "v2");
+            var keys = Registry.getKeys();
+            if (keys.indexOf("k") < 0 || keys.indexOf("k2") < 0) throw "getKeys missing";
+            if (Registry.deleteValue("k") !== true) throw "deleteValue failed";
+            if (Registry.exists("k") !== false) throw "k should be gone";
+            Registry.clear();
+            if (Registry.getKeys().length !== 0) throw "clear failed";
+            if (Registry.getValue("nope") !== null) throw "missing key should be null";
+
+            // XmlParser: parseo + navegación
+            var p = new XmlParser();
+            var ok = p.load('<root a="1"><item id="x">hello</item><item id="y">world</item></root>');
+            if (ok !== true || p.available !== true) throw "xml load failed";
+            if (p.nodeName !== "root") throw "root name: " + p.nodeName;
+            if (p.attributes.a !== "1") throw "root attr a: " + p.attributes.a;
+            var items = p.getNodesByName("item");
+            if (items.length !== 2) throw "expected 2 items, got " + items.length;
+            if (items[0].attributes.id !== "x") throw "item0 id: " + items[0].attributes.id;
+            if (items[0].nodeValue !== "hello") throw "item0 value: " + items[0].nodeValue;
+            if (items[1].nodeValue !== "world") throw "item1 value: " + items[1].nodeValue;
+
+            // XmlParser: construcción
+            var p2 = new XmlParser();
+            var r = p2.create("config");
+            var c = new XmlNode("entry"); c.nodeValue = "z";
+            r.appendChild(c);
+            if (p2.getNodesByName("entry").length !== 1) throw "appendChild failed";
+            r.removeChild(c);
+            if (p2.getNodesByName("entry").length !== 0) throw "removeChild failed";
+
+            // Avatar / Scribble construibles desde base64 (JVBER = 4 bytes)
+            var av = new Avatar(Base64_encode("abcd"));
+            if (av.size !== 4) throw "avatar size: " + av.size;
+            var sc = new Scribble(Base64_encode("abcdef"));
+            if (sc.size !== 6) throw "scribble size: " + sc.size;
+        "#,
+        );
+        assert!(result.is_ok(), "phase3 apis should work: {:?}", result);
         unregister_context(&ctx);
     }
 
