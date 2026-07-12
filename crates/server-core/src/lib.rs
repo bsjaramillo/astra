@@ -111,6 +111,8 @@ pub mod proxy_trust;
 /// Auto-nivel por reconocimiento de IP+GUID (`/addautologin`).
 pub mod ip_autologin;
 
+pub mod flood_control;
+
 /// Re-exports comunes.
 pub use app::{
     admin_action, AppContext, KillScriptFn, LinkEvent, LinkRequest, LinkUserSnapshot,

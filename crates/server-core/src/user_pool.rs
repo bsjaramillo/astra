@@ -164,6 +164,8 @@ pub struct AresUser {
     /// presente, el broadcast usa este canal en lugar de `sender` (que
     /// sería binario y el cliente web no lo entendería).
     pub ws_text_sender: Option<mpsc::UnboundedSender<String>>,
+    /// Estado de control de flood de texto (rate-limit + duplicados).
+    pub flood: crate::flood_control::FloodRecord,
 }
 
 impl AresUser {
@@ -241,6 +243,7 @@ impl AresUser {
             asn_cache: parking_lot::RwLock::new(None),
             sender: None,
             ws_text_sender: None,
+            flood: crate::flood_control::FloodRecord::new(),
         }
     }
 

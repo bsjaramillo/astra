@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use proto_ares::{PacketReader, PacketWriter, TcpMsg};
+use server_core::flood_control::FloodKind;
 use server_core::login::parse_login;
 use server_core::outbound;
 use server_core::{AppContext, LinkEvent, LinkUserSnapshot};
@@ -92,7 +93,7 @@ pub async fn handle_tcp_client(
     let (write_failed_tx, mut write_failed_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Spawn writer task
-    let writer_handle = tokio::spawn(writer_task(write_half, rx, write_failed_tx));
+    let mut writer_handle = tokio::spawn(writer_task(write_half, rx, write_failed_tx));
 
     // ============================================================
     // CAPA 3: Handshake timeout
@@ -210,8 +211,13 @@ pub async fn handle_tcp_client(
             scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name });
         }
 
-        if let Err(e) = dispatch_message(&ctx, &scripting, &user_arc, &pkt).await {
-            warn!("error procesando msg {:?} de id={}: {}", pkt.msg, user_id, e);
+        match dispatch_message(&ctx, &scripting, &user_arc, &pkt).await {
+            Ok(true) => {
+                info!("desconectando id={} por flood de texto", user_id);
+                break;
+            }
+            Ok(false) => {}
+            Err(e) => warn!("error procesando msg {:?} de id={}: {}", pkt.msg, user_id, e),
         }
     }
 
@@ -237,9 +243,18 @@ pub async fn handle_tcp_client(
     });
     scripting.dispatch(astra_scripting::ScriptEvent::Logout { name: user_name });
 
-    // Cerrar el canal para que el writer termine
+    // Cerrar el socket. `drop(tx)` no basta: el `sender` del user (un clone
+    // del mismo canal, en el pool/Arc) sigue vivo, así que el writer no ve
+    // cerrado su `rx` y `await` colgaría indefinidamente — dejando el socket
+    // ABIERTO aunque ya difundimos el PART/onPart (bug: "el usuario sigue
+    // conectado tras aparecer 'has parted'"). Le damos un margen para vaciar
+    // lo pendiente (p.ej. el ServerError de flood) y forzamos el cierre
+    // abortando el writer (dropea el write_half → el cliente recibe el FIN).
     drop(tx);
-    let _ = writer_handle.await;
+    tokio::select! {
+        _ = &mut writer_handle => {}
+        _ = tokio::time::sleep(Duration::from_millis(300)) => writer_handle.abort(),
+    }
 
     info!("usuario id={} '{}' desconectado", user_id, user.name.read());
     scripting.dispatch(astra_scripting::ScriptEvent::Disconnect {
@@ -609,17 +624,58 @@ async fn send_initial_state(
 }
 
 /// Despacha un paquete al handler correspondiente.
+/// Lee un string null-terminated (descifrado) del payload de un paquete.
+fn read_crypto_text(
+    user: &Arc<server_core::user_pool::AresUser>,
+    data: &[u8],
+) -> Option<String> {
+    let mut r = PacketReader::new_crypto(data, user.ares_crypto);
+    r.read_string_nt().ok()
+}
+
+/// Chequea el flood de texto de sb0t (rate-limit + duplicados). Si el usuario
+/// está flooding, le manda un ServerError y devuelve `true` (el caller debe
+/// desconectarlo). Niveles > Regular están exentos.
+fn is_text_flooding(
+    ctx: &AppContext,
+    user: &Arc<server_core::user_pool::AresUser>,
+    kind: server_core::flood_control::FloodKind,
+    text: &str,
+) -> bool {
+    let level = *user.level.read();
+    let now = server_core::time::unix_time();
+    if user.flood.is_flooding(kind, text, level, now) {
+        ctx.stats.on_flood();
+        let mut w = proto_ares::PacketWriter::with_msg_crypto(
+            proto_ares::TcpMsg::ServerError,
+            user.ares_crypto,
+        );
+        w.write_string_nt("You are flooding the room and have been disconnected.")
+            .ok();
+        let _ = user.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
+        info!(
+            "flood de texto de '{}' (id={}) → desconectando",
+            user.name.read(),
+            user.id
+        );
+        return true;
+    }
+    false
+}
+
+/// Procesa un paquete del cliente. Devuelve `Ok(true)` si el cliente debe
+/// desconectarse (p.ej. por flood de texto).
 async fn dispatch_message(
     ctx: &Arc<AppContext>,
     scripting: &ScriptHandle,
     user: &Arc<server_core::user_pool::AresUser>,
     pkt: &RawPacket,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let msg = match pkt.msg {
         Some(m) => m,
         None => {
             warn!("opcode desconocido {} de id={}", pkt.data[0], user.id);
-            return Ok(());
+            return Ok(false);
         }
     };
 
@@ -647,7 +703,7 @@ async fn dispatch_message(
         TcpMsg::Avatar => {
             // Gate de sala: si los avatares están deshabilitados, se ignora.
             if !ctx.room_flags.get("avatars") {
-                return Ok(());
+                return Ok(false);
             }
             publish_raw_link(ctx, LINK_MSG_AVATAR, &pkt.data[1..]);
             // Avatar: el payload completo (sin opcode) son los bytes PNG.
@@ -674,12 +730,29 @@ async fn dispatch_message(
             });
         }
         TcpMsg::Public => {
+            // Control de flood de texto (rate-limit + duplicados) antes de
+            // procesar. Los comandos slash se eximen (no son chat). Nivel >
+            // Regular está exento (lo maneja is_flooding).
+            let text = read_crypto_text(user, &pkt.data[1..]);
+            let is_cmd = text.as_deref().map(|t| t.trim_start().starts_with('/')).unwrap_or(false);
+            if !is_cmd
+                && is_text_flooding(ctx, user, FloodKind::Public, text.as_deref().unwrap_or(""))
+            {
+                return Ok(true);
+            }
             handle_public(ctx, user, &pkt.data[1..], &scripting).await;
         }
         TcpMsg::Emote => {
+            let text = read_crypto_text(user, &pkt.data[1..]);
+            if is_text_flooding(ctx, user, FloodKind::Emote, text.as_deref().unwrap_or("")) {
+                return Ok(true);
+            }
             handle_emote(ctx, user, &pkt.data[1..], scripting).await;
         }
         TcpMsg::Pmt => {
+            if is_text_flooding(ctx, user, FloodKind::Pm, "") {
+                return Ok(true);
+            }
             handle_pvt(ctx, user, &pkt.data[1..], scripting).await;
         }
         TcpMsg::PersonalMessage => {
@@ -732,7 +805,7 @@ async fn dispatch_message(
             // Gate de sala: si los scribbles están deshabilitados, se descarta.
             if !ctx.room_flags.get("scribbles") {
                 debug!("scribble de '{}' bloqueado (flag de sala)", user.name.read());
-                return Ok(());
+                return Ok(false);
             }
             // Gate real: el script puede cancelar el scribble retornando false
             // desde onScribbleCheck. Si cancela, no se reenvía al link ni a la sala.
@@ -745,7 +818,7 @@ async fn dispatch_message(
         }
         TcpMsg::ClientScribbleRoomChunk => {
             if !ctx.room_flags.get("scribbles") {
-                return Ok(());
+                return Ok(false);
             }
             // Chunks siempre se reenvían (asumiendo que First pasó el gate).
             // Para gate por-chunk, se necesitaría trackear el state de cada scribble.
@@ -758,7 +831,7 @@ async fn dispatch_message(
             debug!("mensaje {:?} de id={} (no procesado en esta fase)", msg, user.id);
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Desenvuelve el wrapper `MSG_CHAT_ADVANCED_FEATURES_PROTOCOL` (op 250) y
