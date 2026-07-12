@@ -147,6 +147,9 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("sendEmote"), 2, NativeFunction::from_fn_ptr(send_emote_fn))
         .expect("sendEmote should be registered");
     context
+        .register_global_builtin_callable(js_string!("__send_to_user"), 4, NativeFunction::from_fn_ptr(send_to_user_fn))
+        .expect("__send_to_user should be registered");
+    context
         .register_global_builtin_callable(js_string!("sendPM"), 3, NativeFunction::from_fn_ptr(send_pm_fn))
         .expect("sendPM should be registered");
 
@@ -623,7 +626,30 @@ function onEmote(user, text){ if (typeof onEmoteReceived === "function") return 
 function onPrivate(from, to, text){ if (typeof onPM === "function") return onPM(from, to); }
 
 // ---- Globals sb0t ----
-var sendText = sendPublic;
+// sb0t: sendText/sendEmote/sendPM(user, sender, text) → a ESE usuario.
+// Astra nativo: sendPublic/sendEmote(from, text) broadcast, sendPM(from, to, text).
+// Los wrappers detectan la forma sb0t (primer arg = objeto user) y si no,
+// caen al comportamiento nativo de Astra.
+// OJO: usar EXPRESIONES de función (asignaciones), no declaraciones — las
+// declaraciones se hoisten y `__sendXRaw = sendX` capturaría el wrapper en vez
+// del native (recursión infinita). Las asignaciones respetan el orden: primero
+// se captura el native, después se reasigna el global.
+var __sendPublicRaw = sendPublic;
+var __sendEmoteRaw = sendEmote;
+var __sendPMRaw = sendPM;
+var __isUserObj = function(a){ return a != null && typeof a === "object" && a.__name !== undefined; };
+sendText = function(a, b, c){
+  if (__isUserObj(a)) return __send_to_user(a.__name, "public", b == null ? "" : "" + b, c == null ? "" : "" + c);
+  return __sendPublicRaw(a == null ? "" : "" + a, b == null ? "" : "" + b);
+};
+sendEmote = function(a, b, c){
+  if (__isUserObj(a)) return __send_to_user(a.__name, "emote", b == null ? "" : "" + b, c == null ? "" : "" + c);
+  return __sendEmoteRaw(a == null ? "" : "" + a, b == null ? "" : "" + b);
+};
+sendPM = function(a, b, c){
+  if (__isUserObj(a)) return __send_to_user(a.__name, "pm", b == null ? "" : "" + b, c == null ? "" : "" + c);
+  return __sendPMRaw(a == null ? "" : "" + a, b == null ? "" : "" + b, c == null ? "" : "" + c);
+};
 function scriptName(){ return (typeof __SCRIPT_DIR__ === "string") ? __SCRIPT_DIR__.replace(/[\\/]+$/,"").split(/[\\/]/).pop() : ""; }
 function tickCount(){ return Date.now(); }
 function byteLength(s){ s = (s == null ? "" : "" + s); var n = 0; for (var i = 0; i < s.length; i++){ var c = s.charCodeAt(i); n += c < 0x80 ? 1 : c < 0x800 ? 2 : 3; } return n; }
@@ -865,15 +891,88 @@ Leaf.prototype.scribble = function(){ return false; };
 // Implementaciones de las native functions
 // ============================================================================
 
-fn print_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
-    let mut msg = String::new();
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            msg.push(' ');
+/// Formatea un valor escalar como texto (para los mensajes de `print`).
+/// bool → "true"/"false"; number → entero si aplica; string tal cual;
+/// null/undefined/object → "".
+fn format_scalar(v: &JsValue) -> String {
+    if v.is_null() || v.is_undefined() {
+        String::new()
+    } else if let Some(b) = v.as_boolean() {
+        b.to_string()
+    } else if let Some(s) = v.as_string() {
+        s.to_std_string_escaped()
+    } else if let Some(n) = v.as_number() {
+        if n.fract() == 0.0 && n.abs() < 1e15 {
+            (n as i64).to_string()
+        } else {
+            n.to_string()
         }
-        msg.push_str(&format_js_value(arg));
+    } else {
+        String::new()
     }
-    tracing::info!("[script] print: {}", msg);
+}
+
+/// Extrae el nombre (`__name`) de un objeto `user` pasado como argumento.
+fn user_name_from_arg(v: &JsValue, ctx: &mut Context) -> Option<String> {
+    let obj = v.as_object()?.clone();
+    let name = obj.get(js_string!("__name"), ctx).ok()?;
+    if name.is_undefined() {
+        return None;
+    }
+    jsvalue_to_string(&name)
+}
+
+/// `print(...)` — paridad con sb0t (`JSGlobal.Print`):
+/// - `print(texto)` → mensaje del bot a **toda la sala**.
+/// - `print(vroom, texto)` → a los usuarios de ese vroom.
+/// - `print(user, texto)` → mensaje del bot a **ese usuario**.
+///
+/// (Antes escribía a los logs del server, que NO es lo que hace sb0t. Para
+/// logging desde scripts está `log()`.)
+fn print_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let a = args.first().cloned();
+    let b = args.get(1).cloned();
+    let b_undefined = b.as_ref().map(|v| v.is_undefined()).unwrap_or(true);
+
+    // print(texto) → a toda la sala.
+    if b_undefined {
+        let text = a.as_ref().map(format_scalar).unwrap_or_default();
+        if !text.is_empty() {
+            if let Some(app) = lookup_app(ctx) {
+                let bot = app.settings.bot_name.clone();
+                broadcast_to_users(&app, |c| {
+                    server_core::outbound::build_public_c(&bot, &text, c)
+                });
+            }
+        }
+        return Ok(JsValue::undefined());
+    }
+
+    let text = b.as_ref().map(format_scalar).unwrap_or_default();
+
+    // print(vroom, texto) → a un vroom (primer arg numérico).
+    if let Some(vr) = a.as_ref().and_then(|v| v.as_number()) {
+        if let Some(app) = lookup_app(ctx) {
+            let bot = app.settings.bot_name.clone();
+            let vr = vr as u16;
+            for u in app.user_pool.users() {
+                if u.logged_in && *u.vroom.read() == vr {
+                    let _ = u.send_public(&bot, &text);
+                }
+            }
+        }
+        return Ok(JsValue::undefined());
+    }
+
+    // print(user, texto) → a ese usuario (primer arg = objeto user).
+    if let Some(name) = a.as_ref().and_then(|v| user_name_from_arg(v, ctx)) {
+        if let Some(app) = lookup_app(ctx) {
+            let bot = app.settings.bot_name.clone();
+            if let Some(target) = app.user_pool.get_by_name(&name) {
+                let _ = target.send_public(&bot, &text);
+            }
+        }
+    }
     Ok(JsValue::undefined())
 }
 
@@ -919,6 +1018,33 @@ fn send_pm_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
     } else {
         Ok(JsValue::from(false))
     }
+}
+
+/// `__send_to_user(name, kind, sender, text)` — envía a UN usuario, para las
+/// formas sb0t de `sendText`/`sendEmote`/`sendPM` que reciben un JSUser como
+/// primer argumento. `kind` = "public" | "emote" | "pm".
+fn send_to_user_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let name = args.first().and_then(jsvalue_to_string).unwrap_or_default();
+    let kind = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let sender = args.get(2).and_then(jsvalue_to_string).unwrap_or_default();
+    let text = args.get(3).and_then(jsvalue_to_string).unwrap_or_default();
+    if sender.is_empty() || text.is_empty() {
+        return Ok(JsValue::from(false));
+    }
+    if let Some(app) = lookup_app(ctx) {
+        if let Some(target) = app.user_pool.get_by_name(&name) {
+            let ok = match kind.as_str() {
+                "emote" => {
+                    let pkt = server_core::outbound::build_emote_c(&sender, &text, target.ares_crypto);
+                    target.send(pkt)
+                }
+                "pm" => target.send_pvt(&sender, &text),
+                _ => target.send_public(&sender, &text),
+            };
+            return Ok(JsValue::from(ok));
+        }
+    }
+    Ok(JsValue::from(false))
 }
 
 fn user_count_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
@@ -3635,6 +3761,43 @@ mod tests {
         "#,
         );
         assert!(result.is_ok(), "records history should work: {:?}", result);
+        unregister_context(&ctx);
+    }
+
+    #[test]
+    fn print_and_send_sb0t_semantics() {
+        let app = make_app();
+        let (alice, mut rx_a) = make_user(1, "Alice", "10.0.0.1");
+        let (bob, mut rx_b) = make_user(2, "Bob", "10.0.0.2");
+        app.user_pool.add(alice);
+        app.user_pool.add(bob);
+        let mut ctx = make_context(app.clone());
+
+        // print(user, texto) → SOLO a ese usuario (mensaje público del bot)
+        eval_script(&mut ctx, r#"print(user("Alice"), "hola-alice");"#).unwrap();
+        let pa = rx_a.try_recv().expect("Alice recibe print(user, ...)");
+        assert_eq!(pa[0], 10, "esperado Public (10)");
+        assert!(rx_b.try_recv().is_err(), "Bob NO debe recibir print(user, ...)");
+
+        // print(texto) → a TODOS
+        eval_script(&mut ctx, r#"print("hola-todos");"#).unwrap();
+        assert_eq!(rx_a.try_recv().expect("Alice broadcast")[0], 10);
+        assert_eq!(rx_b.try_recv().expect("Bob broadcast")[0], 10);
+
+        // sendText(user, sender, texto) → a ese usuario
+        eval_script(&mut ctx, r#"sendText(user("Bob"), "Bot", "hi-bob");"#).unwrap();
+        assert_eq!(rx_b.try_recv().expect("Bob recibe sendText")[0], 10);
+        assert!(rx_a.try_recv().is_err(), "Alice NO recibe sendText dirigido a Bob");
+
+        // sendPM(user, sender, texto) → PM a ese usuario
+        eval_script(&mut ctx, r#"sendPM(user("Alice"), "Bot", "pm-alice");"#).unwrap();
+        assert_eq!(rx_a.try_recv().expect("Alice recibe sendPM")[0], 25, "esperado Pmt (25)");
+
+        // Fallback nativo: sendPublic(from, texto) → broadcast
+        eval_script(&mut ctx, r#"sendPublic("Bot", "broadcast-nativo");"#).unwrap();
+        assert_eq!(rx_a.try_recv().expect("Alice broadcast nativo")[0], 10);
+        assert_eq!(rx_b.try_recv().expect("Bob broadcast nativo")[0], 10);
+
         unregister_context(&ctx);
     }
 
