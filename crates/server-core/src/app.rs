@@ -614,6 +614,131 @@ impl AppContext {
         hist.iter().skip(start).cloned().collect()
     }
 
+    /// Replay del historial de chat al usuario que entra, si el flag de sala
+    /// `history` está activo. Paridad sb0t `commands/History.Show`
+    /// (`ServerEvents.cs:186`): últimos 20 públicos/emotes reproducidos como
+    /// mensajes del nick original con prefijo `[-HH:MM:SS]` (antigüedad del
+    /// mensaje) y una línea de cierre.
+    pub fn replay_history(&self, user: &crate::user_pool::AresUser) {
+        if !self.room_flags.get("history") {
+            return;
+        }
+        let msgs = self.recent_messages(20);
+        if msgs.is_empty() {
+            return;
+        }
+        let now = crate::time::unix_time() / 1000;
+        for m in &msgs {
+            let offset = now.saturating_sub(m.time_secs);
+            let (h, rem) = (offset / 3600, offset % 3600);
+            let (mi, s) = (rem / 60, rem % 60);
+            let text = format!("[-{:02}:{:02}:{:02}] {}", h, mi, s, m.text);
+            if m.is_emote {
+                user.send_emote(&m.name, &text);
+            } else {
+                user.send_public(&m.name, &text);
+            }
+        }
+        // Template `Notification#7` de sb0t (overrideable vía catálogo).
+        let closing = self.templates.resolve("-=-=-=-=- end of chat history -=-=-=-=-");
+        user.print(&self.settings.bot_name, &closing);
+    }
+
+    /// Si el flag `lastseen` está activo, anuncia a la sala con qué nick y
+    /// cuándo se vio por última vez la IP del usuario que entra (paridad
+    /// sb0t `ServerEvents.cs:198`, Notification#6: "+n was last seen as +o
+    /// at +t from +ip"). No-op si no hay historial previo.
+    pub fn announce_last_seen(&self, user: &crate::user_pool::AresUser) {
+        if !self.room_flags.get("lastseen") {
+            return;
+        }
+        let ip = user.external_ip.to_string();
+        let Ok(results) = self.db.search_user_history(&ip, 1) else {
+            return;
+        };
+        let Some((old_name, _, _, last_seen)) = results.first() else {
+            return;
+        };
+        let when = chrono::DateTime::from_timestamp(*last_seen, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let name = user.name.read().clone();
+        let text = self.templates.render(
+            "lastseen.join",
+            &[("+n", &name), ("+o", old_name), ("+t", &when), ("+ip", &ip)],
+        );
+        self.broadcast_print(&text);
+    }
+
+    /// Broadcast de una línea de sistema (texto del server) a todos los
+    /// usuarios logueados. Equivalente a `Server.Print` de sb0t.
+    pub fn broadcast_print(&self, text: &str) {
+        for u in self.user_pool.users() {
+            if u.logged_in {
+                u.print(&self.settings.bot_name, text);
+            }
+        }
+    }
+
+    /// Marca al usuario como idle (acción manual: comando `idle`/`idles` o
+    /// emote que empieza con `idles`). Respeta el cooldown de 5 min. Si el
+    /// flag de sala `idle` está activo, anuncia `+n idles at +t` (paridad
+    /// sb0t `ServerEvents.Idled`). Retorna `true` si se marcó.
+    pub fn mark_user_idle(&self, user: &crate::user_pool::AresUser) -> bool {
+        if !self.idle.try_idle(user.id) {
+            return false;
+        }
+        if self.room_flags.get("idle") {
+            let name = user.name.read().clone();
+            let text = self
+                .templates
+                .render("idle.enter", &[("+n", &name), ("+t", &clock_hhmm())]);
+            self.broadcast_print(&text);
+        }
+        true
+    }
+
+    /// Si el usuario estaba idle, lo saca (habló en público o emoteó) y
+    /// anuncia el tiempo ausente (paridad sb0t `ServerEvents.Unidled`,
+    /// templates Idle#1-4 según la magnitud). Retorna `Some(segundos)`.
+    pub fn unidle_user(&self, user: &crate::user_pool::AresUser) -> Option<u64> {
+        let secs = self.idle.unidle(user.id)?;
+        if self.room_flags.get("idle") {
+            let d = secs / 86_400;
+            let h = (secs % 86_400) / 3600;
+            let m = (secs % 3600) / 60;
+            let s = secs % 60;
+            let name = user.name.read().clone();
+            let t = clock_hhmm();
+            let (d_s, h_s, m_s, s_s) = (d.to_string(), h.to_string(), m.to_string(), s.to_string());
+            let text = if d > 0 {
+                self.templates.render(
+                    "idle.return.d",
+                    &[("+n", &name), ("+t", &t), ("+d", &d_s), ("+h", &h_s), ("+m", &m_s), ("+s", &s_s)],
+                )
+            } else if h > 0 {
+                self.templates.render(
+                    "idle.return.h",
+                    &[("+n", &name), ("+t", &t), ("+h", &h_s), ("+m", &m_s), ("+s", &s_s)],
+                )
+            } else if m > 0 {
+                self.templates.render(
+                    "idle.return.m",
+                    &[("+n", &name), ("+t", &t), ("+m", &m_s), ("+s", &s_s)],
+                )
+            } else {
+                self.templates
+                    .render("idle.return.s", &[("+n", &name), ("+t", &t), ("+s", &s_s)])
+            };
+            self.broadcast_print(&text);
+        }
+        Some(secs)
+    }
+
     /// Registra una acción de ban en el log (para `/banstats`).
     pub fn record_ban(&self, banner: &str, target: &str, ip: &str) {
         let mut log = self.ban_log.lock();
@@ -713,4 +838,10 @@ impl AppContext {
     pub fn link_receiver_count(&self) -> usize {
         self.link_events.receiver_count()
     }
+}
+
+/// Hora local `HH:MM` (paridad `Helpers.Time()` de sb0t, usada en los
+/// anuncios de idle).
+fn clock_hhmm() -> String {
+    chrono::Local::now().format("%H:%M").to_string()
 }

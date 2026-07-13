@@ -57,6 +57,26 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     ("grant.confirm", "'+n' is now level +l."),
     ("revoke.target", "Your level has been reset to regular."),
     ("revoke.confirm", "'+n' is now a regular user."),
+    // Idle (paridad Category.Idle de sb0t; +t = hora HH:MM local)
+    ("idle.enter", "+n idles at +t"),
+    ("idle.return.s", "+n returned at +t - away time [+s seconds]"),
+    ("idle.return.m", "+n returned at +t - away time [+m minutes +s seconds]"),
+    ("idle.return.h", "+n returned at +t - away time [+h hours +m minutes +s seconds]"),
+    ("idle.return.d", "+n returned at +t - away time [+d days +h hours +m minutes +s seconds]"),
+    // Info (paridad Category.Info#1 de sb0t: listado de usuarios de /info)
+    ("info.user", "+n [vroom: +v] [id: +i]"),
+    // Last seen al entrar (paridad Notification#6 de sb0t)
+    ("lastseen.join", "+n was last seen as +o at +t from +ip"),
+    // Anuncios públicos de acciones admin (Category.AdminAction de sb0t;
+    // +a = admin o nombre de la sala si stealth/cloak)
+    ("adminaction.ban", "+n was banned by +a"),
+    ("adminaction.unban", "+n was unbanned by +a"),
+    ("adminaction.kick", "+n was kicked by +a"),
+    ("adminaction.muzzle", "+n was muzzled by +a"),
+    ("adminaction.unmuzzle", "+n was unmuzzled by +a"),
+    ("adminaction.ban10", "+n was banned for 10 minutes by +a"),
+    ("adminaction.ban60", "+n was banned for 60 minutes by +a"),
+    ("adminaction.cbans", "+a has cleared the ban list"),
 
     // -- Mensajes generales del sistema (errores, usos, avisos y
     //    confirmaciones sin valores interpolados). Se auto-resuelven en

@@ -41,6 +41,13 @@ impl MotdManager {
         }
     }
 
+    /// Recarga el MOTD desde la persistencia (paridad `/loadmotd` de sb0t:
+    /// útil si el valor se editó por fuera del proceso, p.ej. panel admin).
+    pub fn reload(&self) {
+        let text = self.db.get_kv(KV_KEY).ok().flatten().unwrap_or_default();
+        *self.text.write() = text;
+    }
+
     /// Devuelve el texto completo del MOTD (multilínea, sin sustituir).
     pub fn text(&self) -> String {
         self.text.read().clone()

@@ -1428,10 +1428,10 @@ mod tests {
             .load_source(
                 "test",
                 None,
-                r#"function onHelp(command) { /* extender help */ }"#,
+                r#"function onHelp(userobj) { /* extender help */ }"#,
             )
             .unwrap();
-        mgr.dispatch(&ScriptEvent::Help { command: "".into() });
+        mgr.dispatch(&ScriptEvent::Help { from: "Alice".into() });
     }
 
     #[test]

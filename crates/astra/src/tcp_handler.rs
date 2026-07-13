@@ -153,6 +153,11 @@ pub async fn handle_tcp_client(
     send_greet(&ctx, &user);
     // MOTD (message of the day), tras el greet.
     send_motd(&ctx, &user);
+    // Replay del historial de chat si el flag `history` está activo
+    // (paridad sb0t ServerEvents.cs:186 → History.Show al entrar).
+    ctx.replay_history(&user);
+    // Anuncio "was last seen as..." si el flag `lastseen` está activo.
+    ctx.announce_last_seen(&user);
 
     // Feeds de admin: ipsend (IP del que entra) y logsend (log de join).
     {
@@ -204,12 +209,9 @@ pub async fn handle_tcp_client(
         };
 
         ctx.stats.add_bytes_in(pkt.data.len() as u64);
-        // Touch idle: registrar actividad del user
-        let was_idle = ctx.idle.touch(user_arc.id).is_some();
-        if was_idle {
-            let name = user_arc.name.read().clone();
-            scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name });
-        }
+        // NOTA: el unidle es manual como en sb0t — solo hablar en público o
+        // emotear saca del idle (handle_public/handle_emote), no cualquier
+        // paquete (un ping no debe des-idlear).
 
         match dispatch_message(&ctx, &scripting, &user_arc, &pkt).await {
             Ok(true) => {
@@ -957,10 +959,12 @@ fn route_command_text(
         }
         // Notificar a los scripts de TODO comando (onCommand), lo haya manejado
         // un builtin o no. Paridad sb0t: los scripts ven todos los comandos y
-        // pueden reaccionar (ej. sumar salida a /help). Antes solo llegaban los
-        // comandos desconocidos.
-        let name = user.name.read().clone();
-        astra_commands::dispatch(ctx, scripting, &name, cmd, args);
+        // pueden reaccionar (ej. sumar salida a /help). Excepción: con captcha
+        // pendiente sb0t corta antes de llegar a los scripts.
+        if !user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed) {
+            let name = user.name.read().clone();
+            astra_commands::dispatch(ctx, scripting, &name, cmd, args);
+        }
     }
 }
 
@@ -998,8 +1002,11 @@ async fn handle_public(
     }
 
     // Si tiene captcha pendiente, no puede hablar en público.
-    // (Sí puede ejecutar /help y otros built-ins, así que permitimos esos.)
-    if user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed) && !text.trim_start().starts_with('/') {
+    // (Los comandos pasan al dispatcher, que aplica su propio gate: solo
+    // help/login con captcha pendiente — paridad core/Events.cs:470-481.)
+    if user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed)
+        && !text.trim_start().starts_with(['/', '#'])
+    {
         let _ = user.send_pvt(
             &ctx.settings.bot_name,
             "Please solve the captcha before chatting. Check your PMs.",
@@ -1009,21 +1016,23 @@ async fn handle_public(
 
     let name = user.name.read().clone();
 
-    // Si el mensaje empieza con '/', es un comando slash
+    // Si el mensaje empieza con '/' o '#', es un comando (paridad sb0t
+    // TCPProcessor.cs:343: ambos prefijos, y el texto no se difunde).
     if let Some((cmd, args)) = astra_commands::parse_command(&text) {
         let (handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
-        if handled {
-            debug!("comando built-in de '{}': /{} {}", name, cmd, args);
-            // Disparar los side-effects de scripting que el comando generó
-            // (incluye onVroomJoin, onNick, onRegistered, etc., que ahora
-            // emite el propio handler en `commands`).
-            for ev in events {
-                scripting.dispatch(ev);
-            }
-            return;
+        debug!("comando de '{}' (builtin={}): /{} {}", name, handled, cmd, args);
+        // Disparar los side-effects de scripting que el comando generó
+        // (incluye onVroomJoin, onNick, onRegistered, etc., que ahora
+        // emite el propio handler en `commands`).
+        for ev in events {
+            scripting.dispatch(ev);
         }
-        astra_commands::dispatch(ctx, scripting, &name, cmd, args);
-        debug!("comando slash de '{}': /{} {}", name, cmd, args);
+        // Los scripts ven TODOS los comandos vía onCommand, los haya manejado
+        // un builtin o no (paridad core/Events.cs → js.Command siempre corre),
+        // salvo con captcha pendiente (sb0t corta antes de llegar a scripts).
+        if !user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed) {
+            astra_commands::dispatch(ctx, scripting, &name, cmd, args);
+        }
         return;
     }
 
@@ -1047,9 +1056,14 @@ async fn handle_public(
 
     // Filtro Announce: dispara para cualquier usuario, NO bloquea el
     // mensaje (paridad `FilterType.Announce` de sb0t) — se difunden
-    // líneas enlatadas además del mensaje normal.
-    if let Some((_, lines, remainder)) = ctx.word_filter.check_announce(&text) {
-        broadcast_announce_lines(ctx, &name, user.external_ip, &lines, &remainder);
+    // líneas enlatadas además del mensaje normal. Con `adminannounce` on,
+    // no dispara para usuarios regulares (sb0t WordFilter.cs:195).
+    let announce_blocked = ctx.room_flags.get("adminannounce")
+        && *user.level.read() == server_core::ILevel::Regular;
+    if !announce_blocked {
+        if let Some((_, lines, remainder)) = ctx.word_filter.check_announce(&text) {
+            broadcast_announce_lines(ctx, &name, user.external_ip, &lines, &remainder);
+        }
     }
 
     // Echo heckle (/echo): reenvía el texto configurado solo a este usuario.
@@ -1070,6 +1084,12 @@ async fn handle_public(
     if !scripting.check_text_before(&name, &text) {
         debug!("onTextBefore canceló mensaje de '{}'", name);
         return;
+    }
+
+    // Hablar en público saca del idle y anuncia el tiempo ausente
+    // (paridad sb0t TCPProcessor: unidle dentro del path de TextSending).
+    if ctx.unidle_user(user).is_some() {
+        scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
     }
 
     broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, &text, c));
@@ -1140,6 +1160,15 @@ async fn handle_emote(
     if !scripting.check_emote_before(&name, &text) {
         debug!("onEmoteBefore canceló emote de '{}'", name);
         return;
+    }
+    // Paridad sb0t TCPProcessor (emote path): primero el unidle si estaba
+    // idle, luego un emote que empiece con "idles" marca al usuario como
+    // ausente (`#me idles almorzando`), y el emote se difunde igual.
+    if ctx.unidle_user(user).is_some() {
+        scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
+    }
+    if text.starts_with("idles") && ctx.mark_user_idle(user) {
+        scripting.dispatch(astra_scripting::ScriptEvent::Idled { name: name.clone() });
     }
     broadcast_to_room(ctx, user, |c| outbound::build_emote_c(&name, &text, c));
     ctx.record_message(&name, &text, true);
@@ -1348,7 +1377,14 @@ fn send_greet(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
         region: &user.region,
     };
     let text = server_core::greets::render_greet(&template, &gctx);
-    let _ = user.send_pvt(&ctx.settings.bot_name, &text);
+    // Paridad sb0t: `pmgreetmsg` = greet por PM al que entra; `greetmsg` =
+    // greet público a la sala (Server.Print). Pueden estar ambos activos.
+    if ctx.room_flags.get("pmgreetmsg") {
+        let _ = user.send_pvt(&ctx.settings.bot_name, &text);
+    }
+    if ctx.room_flags.get("greetmsg") {
+        ctx.broadcast_print(&text);
+    }
 }
 
 /// Envía el MOTD (message of the day) al usuario que entra, línea por línea

@@ -247,8 +247,10 @@ pub enum ScriptEvent {
     ScribbleCheck { name: String, is_pm: bool },
 
     // --- Help ---
-    /// Help command (return string to display)
-    Help { command: String },
+    /// `/help` ejecutado: `from` es el nick del solicitante. El handler JS
+    /// recibe el objeto user (paridad sb0t `onHelp(userobj)`), y el script
+    /// típicamente le imprime sus líneas de ayuda.
+    Help { from: String },
 
     // --- Link ---
     /// Hub o leaf conectado
@@ -400,7 +402,6 @@ impl ScriptEvent {
             | Disconnect { .. }
             | ProxyDetected { .. }
             | Nick { .. }
-            | Help { .. }
             | BansAutoCleared
             | Linked { .. }
             | Unlinked { .. }
@@ -515,7 +516,7 @@ impl ScriptEvent {
             ScribbleCheck { name, is_pm } => vec![name.clone(), is_pm.to_string()],
 
             // Help
-            Help { command } => vec![command.clone()],
+            Help { from } => vec![from.clone()],
 
             // Link
             Linked { name } => vec![name.clone()],
@@ -637,7 +638,7 @@ mod tests {
             ScriptEvent::FloodBefore { name: "".into() }.handler_name(),
             ScriptEvent::FileReceived { name: "".into(), filename: "".into() }.handler_name(),
             ScriptEvent::ScribbleCheck { name: "".into(), is_pm: false }.handler_name(),
-            ScriptEvent::Help { command: "".into() }.handler_name(),
+            ScriptEvent::Help { from: "".into() }.handler_name(),
             ScriptEvent::Linked { name: "".into() }.handler_name(),
             ScriptEvent::Unlinked { name: "".into() }.handler_name(),
             ScriptEvent::LinkError { name: "".into(), error: "".into() }.handler_name(),

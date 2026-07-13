@@ -139,6 +139,11 @@ pub async fn handle_connection(
     send_greet_ws(&ctx, &user, &ws_text_tx);
     // MOTD (message of the day), tras el greet.
     send_motd_ws(&ctx, &user, &ws_text_tx);
+    // Replay del historial de chat si el flag `history` está activo
+    // (paridad sb0t ServerEvents.cs:186 — aplica también a clientes web).
+    ctx.replay_history(&user);
+    // Anuncio "was last seen as..." si el flag `lastseen` está activo.
+    ctx.announce_last_seen(&user);
 
     // Loop principal
     let idle_timeout = Duration::from_secs(ctx.settings.security.idle_timeout_secs);
@@ -190,6 +195,7 @@ pub async fn handle_connection(
     ctx.record_departure(&user);
     ctx.user_pool.remove(user_id);
     ctx.stats.on_user_part();
+    ctx.idle.forget(user_id);
 
     // Eventos de scripting de la salida (paridad con el path TCP nativo).
     scripting.dispatch(ScriptEvent::Part { name: part_name.clone() });
@@ -677,7 +683,11 @@ fn handle_ws_command(
     }
     // Notificar a los scripts de TODO comando (onCommand), lo maneje un builtin
     // o no — igual que el path TCP nativo. Un comando desconocido no imprime
-    // "unknown": puede estar manejado por un script vía onCommand.
+    // "unknown": puede estar manejado por un script vía onCommand. Excepción:
+    // con captcha pendiente sb0t corta antes de llegar a los scripts.
+    if user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let from = user.name.read().clone();
     scripting.dispatch(astra_scripting::ScriptEvent::Command {
         from,
@@ -708,16 +718,25 @@ fn handle_ws_public(
         }
     }
     // Filtro Announce: dispara para cualquier usuario, NO bloquea el
-    // mensaje (paridad `FilterType.Announce` de sb0t).
-    if let Some((_, lines, remainder)) = ctx.word_filter.check_announce(text) {
-        let sender_name = user.name.read().clone();
-        broadcast_announce_lines_ws(ctx, &sender_name, user.external_ip, &lines, &remainder);
+    // mensaje (paridad `FilterType.Announce` de sb0t). Con `adminannounce`
+    // on, no dispara para usuarios regulares (sb0t WordFilter.cs:195).
+    let announce_blocked = ctx.room_flags.get("adminannounce")
+        && *user.level.read() == server_core::ILevel::Regular;
+    if !announce_blocked {
+        if let Some((_, lines, remainder)) = ctx.word_filter.check_announce(text) {
+            let sender_name = user.name.read().clone();
+            broadcast_announce_lines_ws(ctx, &sender_name, user.external_ip, &lines, &remainder);
+        }
     }
     let name = user.name.read().clone();
     // Hook cancelable onTextBefore (paridad TCP): un script puede bloquear el
     // mensaje devolviendo false.
     if !scripting.check_text_before(&name, text) {
         return;
+    }
+    // Hablar en público saca del idle (paridad sb0t WebProcessor).
+    if ctx.unidle_user(user).is_some() {
+        scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
     }
     // Evento de scripting (onPublic), paridad con el path TCP nativo.
     ctx.stats.on_message();
@@ -1117,7 +1136,13 @@ fn send_greet_ws(
         region: &user.region,
     };
     let text = server_core::greets::render_greet(&template, &gctx);
-    let _ = ws_text_tx.send(crate::protocol::build_pm(&ctx.settings.bot_name, &text));
+    // Paridad sb0t: `pmgreetmsg` = greet por PM; `greetmsg` = greet público.
+    if ctx.room_flags.get("pmgreetmsg") {
+        let _ = ws_text_tx.send(crate::protocol::build_pm(&ctx.settings.bot_name, &text));
+    }
+    if ctx.room_flags.get("greetmsg") {
+        ctx.broadcast_print(&text);
+    }
 }
 
 /// Envía el MOTD al usuario WS que entra, línea por línea como PM del bot.
@@ -1223,6 +1248,14 @@ fn handle_ws_emote(
     // Hook cancelable onEmoteBefore (paridad TCP).
     if !scripting.check_emote_before(&name, text) {
         return;
+    }
+    // Paridad sb0t WebProcessor: unidle si estaba idle; un emote que empieza
+    // con "idles" marca ausente (`#me idles almorzando`), y se difunde igual.
+    if ctx.unidle_user(user).is_some() {
+        scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
+    }
+    if text.starts_with("idles") && ctx.mark_user_idle(user) {
+        scripting.dispatch(astra_scripting::ScriptEvent::Idled { name: name.clone() });
     }
     // Evento de scripting (onEmote), paridad con el path TCP nativo.
     scripting.dispatch(astra_scripting::ScriptEvent::Emote {

@@ -49,6 +49,10 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/register <password> - register your account",
     "/unregister - delete your account",
     "/login <password> - log into your account",
+    "/logout - log out of your account",
+    "/setlevel <nick> <0-3> - set user level (sb0t scale, owner)",
+    "/idle - mark yourself as away (also: /me idles <text>)",
+    "/idles - same as /idle",
     "/grant <nick> <level> - set user level",
     "/revoke <nick> - reset user to regular",
     "/cmdlevel <command> [level|reset] - view or set a command's required level (owner)",
@@ -66,13 +70,13 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/addurl <address> <text> - add a rotating room URL",
     "/remurl <index> - remove a room URL",
     "/listurl - list room URLs",
-    "/history - show recent public messages",
+    "/history [on|off] - replay recent chat to joining users",
     "/whowas <nick|ip> - search seen-user history",
-    "/lastseen <nick|ip> - when a user was last seen",
-    "/roominfo - show room statistics",
+    "/lastseen <on|off|nick|ip> - last-seen announce on join, or query",
+    "/roominfo [on|off] - room statistics (toggle = periodic broadcast)",
     "/status [text] - show or set room status",
     "/id <nick> - show a user's session id",
-    "/info <nick> - show detailed user info",
+    "/info - list all users with vroom and id",
     "/customnames - list online users' custom names",
     "/rangeban <ip-prefix> - ban an IP prefix",
     "/rangeunban <ip-prefix|index> - remove a range ban",
@@ -141,16 +145,17 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/errors [on|off] - receive script error notifications",
 ];
 
-/// Parsea un mensaje que empieza con `/` y retorna `(comando, args)`.
+/// Parsea un mensaje que empieza con `/` o `#` y retorna `(comando, args)`.
+/// sb0t acepta ambos prefijos en texto público (`TCPProcessor.cs:343`).
 ///
 /// Ejemplos:
 /// - `/hola` → `("hola", "")`
-/// - `/hola mundo` → `("hola", "mundo")`
+/// - `#hola mundo` → `("hola", "mundo")`
 /// - `/kick alice spam` → `("kick", "alice spam")`
 /// - `no es comando` → retorna None
 pub fn parse_command(text: &str) -> Option<(&str, &str)> {
     let text = text.trim();
-    if !text.starts_with('/') {
+    if !text.starts_with('/') && !text.starts_with('#') {
         return None;
     }
     let text = &text[1..];
@@ -196,6 +201,16 @@ pub fn dispatch_builtin(
 ) -> (bool, Vec<astra_scripting::ScriptEvent>) {
     let cmd = command.to_ascii_lowercase();
 
+    // Gate de captcha (paridad core/Events.cs:470-481): con captcha pendiente
+    // solo se responde `help` y se permite `login`; el resto se ignora en
+    // silencio (sb0t ni siquiera llega a los scripts).
+    if user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed)
+        && cmd != "help"
+        && cmd != "login"
+    {
+        return (true, vec![]);
+    }
+
     // Gate global `/disableadmins`: si está activo, solo el Owner puede usar
     // comandos admin (todo salvo los de usuario común y el propio toggle).
     if ctx.admins_disabled.load(std::sync::atomic::Ordering::Relaxed)
@@ -220,7 +235,10 @@ pub fn dispatch_builtin(
     match cmd.as_str() {
         "help" => {
             handle_help(ctx, user, args);
-            (true, vec![astra_scripting::ScriptEvent::Help { command: args.to_string() }])
+            // onHelp(userobj): el script recibe a quien pidió ayuda y le
+            // imprime sus líneas (paridad core/Events.cs → js.Help(client)).
+            let from = user.name.read().clone();
+            (true, vec![astra_scripting::ScriptEvent::Help { from }])
         }
         "nick" => {
             let events = handle_nick(ctx, user, args);
@@ -366,8 +384,26 @@ pub fn dispatch_builtin(
             let events = handle_register(ctx, user, args);
             (true, events)
         }
-        "unregister" | "rempassword" => {
+        "unregister" => {
             let events = handle_unregister(ctx, user, args);
+            (true, events)
+        }
+        // `/rempassword <índice>` (Host, paridad Eval.RemovePassword): borra
+        // una cuenta de la lista de /listpasswords. Distinto de /unregister
+        // (auto-baja del propio usuario).
+        "rempassword" => {
+            handle_rempassword(ctx, user, args);
+            (true, vec![])
+        }
+        // `/logout`/`/logoff` (paridad AccountManager.Logout): cierra la
+        // sesión de la cuenta — vuelve a nivel regular sin borrar la cuenta.
+        "logout" | "logoff" => {
+            let events = handle_logout(ctx, user);
+            (true, events)
+        }
+        // `/setlevel <nick> <0-3>` (Owner, paridad core/Events.cs:519).
+        "setlevel" => {
+            let events = handle_setlevel(ctx, user, args);
             (true, events)
         }
         "whisper" => {
@@ -543,8 +579,15 @@ pub fn dispatch_builtin(
             handle_announce(ctx, user, args);
             (true, vec![])
         }
-        "adminmsg" | "adminannounce" => {
+        "adminmsg" => {
             handle_opmsg(ctx, user, args);
+            (true, vec![])
+        }
+        // `/adminannounce on|off` (Host, paridad Eval.AdminAnnounce): toggle
+        // que hace que los word-filters tipo Announce NO disparen para
+        // usuarios regulares. Distinto de /adminmsg (mensaje a admins).
+        "adminannounce" => {
+            handle_room_flag(ctx, user, &cmd, args);
             (true, vec![])
         }
         "pmroom" => {
@@ -594,8 +637,14 @@ pub fn dispatch_builtin(
         }
         // Flags de sala (toggles on|off). `disableavatar` mapea a `avatars`.
         "caps" | "anon" | "general" | "audios" | "buzzes" | "scribbles" | "colors"
-        | "sharefiles" | "roomsearch" | "avatars" | "stealth" => {
+        | "sharefiles" | "avatars" | "stealth" => {
             handle_room_flag(ctx, user, &cmd, args);
+            (true, vec![])
+        }
+        // En sb0t `roomsearch <texto>` BUSCA en la lista de canales Ares
+        // (Eval.cs:1300, imprime top-5 con hashlinks) — no es un toggle.
+        "roomsearch" => {
+            handle_unavailable(ctx, user, "roomsearch");
             (true, vec![])
         }
         "disableavatar" => {
@@ -618,11 +667,13 @@ pub fn dispatch_builtin(
             handle_text_effect(ctx, user, args, TextEffect::Lower, false);
             (true, vec![])
         }
-        "kewltext" => {
+        // `addkewltext`/`remkewltext` son los nombres del dispatch de sb0t
+        // (ServerEvents.cs:921); kewltext/unkewltext quedan como alias.
+        "addkewltext" | "kewltext" => {
             handle_text_effect(ctx, user, args, TextEffect::Kewl, true);
             (true, vec![])
         }
-        "unkewltext" => {
+        "remkewltext" | "unkewltext" => {
             handle_text_effect(ctx, user, args, TextEffect::Kewl, false);
             (true, vec![])
         }
@@ -638,10 +689,14 @@ pub fn dispatch_builtin(
             handle_clearscreen(ctx, user, args);
             (true, vec![])
         }
-        "clock" | "idle" => {
-            // Toggles de sala persistidos (el efecto de clock lo aplica una task).
+        "clock" => {
+            // Toggle de sala persistido (el efecto de clock lo aplica una task).
             handle_room_flag(ctx, user, &cmd, args);
             (true, vec![])
+        }
+        "idle" | "idles" => {
+            let events = handle_idle(ctx, user, &cmd, args);
+            (true, events)
         }
         "locate" => {
             handle_locate(ctx, user, args);
@@ -711,12 +766,20 @@ pub fn dispatch_builtin(
             (true, vec![])
         }
         // ---- Aliases con los nombres originales de sb0t ----
+        // `/greetmsg on|off` (Host, paridad Eval.GreetMsg): toggle del greet
+        // PÚBLICO al entrar. El kill-switch general de greets es `/greets`.
         "greetmsg" => {
-            handle_greets(ctx, user, args);
+            handle_room_flag(ctx, user, &cmd, args);
             (true, vec![])
         }
-        "addgreetmsg" | "pmgreetmsg" => {
+        "addgreetmsg" => {
             handle_addgreet(ctx, user, args);
+            (true, vec![])
+        }
+        // `/pmgreetmsg on|off` (Host, paridad Eval.PMGreetMsg): toggle del
+        // greet por PM al entrar. Distinto de /addgreetmsg (añade un greet).
+        "pmgreetmsg" => {
+            handle_room_flag(ctx, user, &cmd, args);
             (true, vec![])
         }
         "remgreetmsg" => {
@@ -792,8 +855,14 @@ pub fn dispatch_builtin(
             handle_topic(ctx, user, "-");
             (true, vec![])
         }
-        "viewmotd" | "loadmotd" => {
+        "viewmotd" => {
             handle_motd(ctx, user, "");
+            (true, vec![])
+        }
+        // `/loadmotd` (Host, paridad Eval.LoadMotd): recarga el MOTD desde
+        // la persistencia (por si se editó por fuera del proceso).
+        "loadmotd" => {
+            handle_loadmotd(ctx, user);
             (true, vec![])
         }
         "link" => {
@@ -845,12 +914,17 @@ enum TextEffect {
 }
 
 /// ¿Es un comando de usuario común (no gateado por `/disableadmins`)?
+/// Paridad sb0t: bajo DisableAdmins solo pasan los comandos del core de
+/// cuentas (`core/Events.cs`: help/register/login/logout/nick/setlevel-no,
+/// idle/idles) — el resto, incluso lecturas como whois, se bloquea. Los
+/// extras de Astra (users/topic/motd/uptime) se mantienen accesibles.
 fn is_user_command(cmd: &str) -> bool {
     matches!(
         cmd,
-        "help" | "users" | "whois" | "id" | "info" | "uptime" | "stats"
-            | "version" | "topic" | "motd" | "roominfo" | "status"
-            | "register" | "unregister" | "login" | "customname" | "nick" | "vroom"
+        "help" | "register" | "unregister" | "login" | "logout" | "logoff"
+            | "nick" | "idle" | "idles"
+            // Extras de Astra sin equivalente sb0t (lecturas inocuas).
+            | "users" | "topic" | "motd" | "uptime"
     )
 }
 
@@ -1088,6 +1162,21 @@ fn handle_motd(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     send_system_line(ctx, user, "MOTD updated.");
 }
 
+
+/// Anuncia una acción de moderación a toda la sala (paridad `Server.Print`
+/// de sb0t con `Category.AdminAction`). Con el flag `stealth` activo o el
+/// admin cloaked, se firma con el nombre de la sala en vez del admin.
+fn announce_admin_action(ctx: &AppContext, issuer: &Arc<AresUser>, key: &str, target: &str) {
+    let signer = if ctx.room_flags.get("stealth")
+        || issuer.cloaked.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        ctx.settings.room_name.clone()
+    } else {
+        issuer.name.read().clone()
+    };
+    ctx.broadcast_print(&ctx.templates.render(key, &[("+n", target), ("+a", &signer)]));
+}
+
 fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     if !can_edit_topic(user) {
         send_system_line(ctx, user, &ctx.templates.get("error.access_moderator"));
@@ -1147,6 +1236,9 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
         u.sub_bansend.load(std::sync::atomic::Ordering::Relaxed)
     });
 
+    // Anuncio público (AdminAction#0 de sb0t).
+    announce_admin_action(ctx, user, "adminaction.ban", &target.name.read().clone());
+
     // Expulsión inmediata del pool para reflejar el ban en runtime.
     force_part_user(ctx, &target);
     true
@@ -1191,6 +1283,8 @@ fn handle_ban_timed(ctx: &AppContext, user: &Arc<AresUser>, args: &str, secs: i6
         &target,
         &format!("You have been banned from this room for {} minutes.", mins),
     );
+    let key = if secs <= 600 { "adminaction.ban10" } else { "adminaction.ban60" };
+    announce_admin_action(ctx, user, key, &target.name.read().clone());
     ctx.record_ban(
         &user.name.read(),
         &target.name.read(),
@@ -1248,6 +1342,7 @@ fn handle_unban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
 
     if removed {
         send_system_line(ctx, user, &ctx.templates.get("unban.success"));
+        announce_admin_action(ctx, user, "adminaction.unban", target);
     } else {
         send_system_line(ctx, user, &ctx.templates.get("unban.none"));
     }
@@ -1334,6 +1429,7 @@ fn handle_kick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     send_system_line(ctx, &target, &ctx.templates.get("kick.target"));
     force_part_user(ctx, &target);
     send_system_line(ctx, user, &ctx.templates.render("kick.confirm", &[("+n", target_name)]));
+    announce_admin_action(ctx, user, "adminaction.kick", target_name);
 }
 
 fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: bool) {
@@ -1376,9 +1472,11 @@ fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: boo
     if muzzle {
         send_system_line(ctx, &target, &ctx.templates.get("muzzle.target"));
         send_system_line(ctx, user, &ctx.templates.render("muzzle.confirm", &[("+n", target_name)]));
+        announce_admin_action(ctx, user, "adminaction.muzzle", target_name);
     } else {
         send_system_line(ctx, &target, &ctx.templates.get("unmuzzle.target"));
         send_system_line(ctx, user, &ctx.templates.render("unmuzzle.confirm", &[("+n", target_name)]));
+        announce_admin_action(ctx, user, "adminaction.unmuzzle", target_name);
     }
 }
 
@@ -2392,20 +2490,67 @@ fn handle_listurl(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
 // Historial e información de sala/usuario
 // ============================================================================
 
-fn handle_history(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
-    if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
-        return;
+/// `/idle` y `/idles` (paridad sb0t):
+/// - Sin args: marcarse ausente (core/Events.cs:537). Cooldown de 5 min
+///   (`CheckIfCanIdle`); si no puede, se ignora en silencio como sb0t.
+/// - `/idle on|off` (Host): toggle de los ANUNCIOS de idle/unidle — flag de
+///   sala `idle`, sb0t `Settings.IdleMonitoring` (`Eval.cs:1411`).
+fn handle_idle(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    cmd: &str,
+    args: &str,
+) -> Vec<astra_scripting::ScriptEvent> {
+    let a = args.trim().to_ascii_lowercase();
+    match a.as_str() {
+        "" => {
+            if ctx.mark_user_idle(user) {
+                vec![astra_scripting::ScriptEvent::Idled {
+                    name: user.name.read().clone(),
+                }]
+            } else {
+                vec![]
+            }
+        }
+        "on" | "off" if cmd == "idle" => {
+            if !has_level(user, ILevel::Owner) {
+                send_system_line(ctx, user, "Access denied. Host required.");
+                return vec![];
+            }
+            let v = a == "on";
+            ctx.room_flags.set("idle", v);
+            send_system_line(
+                ctx,
+                user,
+                &format!("Room flag 'idle' {}.", if v { "enabled" } else { "disabled" }),
+            );
+            vec![]
+        }
+        // `idles <algo>` / args inválidos: sb0t no hace nada (el emote
+        // `#me idles ...` es el camino con argumentos).
+        _ => vec![],
     }
-    let msgs = ctx.recent_messages(20);
-    if msgs.is_empty() {
-        send_system_line(ctx, user, "No message history yet.");
-        return;
-    }
-    send_system_line(ctx, user, &format!("Recent messages ({}):", msgs.len()));
-    for m in &msgs {
-        let sep = if m.is_emote { " " } else { ": " };
-        send_system_line(ctx, user, &format!("{}{}{}", m.name, sep, m.text));
+}
+
+/// `/history on|off` — toggle del replay de historial al entrar (paridad
+/// sb0t `Eval.History`, Host: `Settings.History`). El replay en sí lo hace
+/// `AppContext::replay_history` en el join. El nivel lo gatea el
+/// `CommandLevelManager` en la entrada del dispatcher.
+fn handle_history(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    match args.trim().to_ascii_lowercase().as_str() {
+        "on" => {
+            ctx.room_flags.set("history", true);
+            send_system_line(ctx, user, "Room flag 'history' enabled.");
+        }
+        "off" => {
+            ctx.room_flags.set("history", false);
+            send_system_line(ctx, user, "Room flag 'history' disabled.");
+        }
+        "" => {
+            let state = if ctx.room_flags.get("history") { "on" } else { "off" };
+            send_system_line(ctx, user, &format!("Room flag 'history' is {}.", state));
+        }
+        _ => send_system_line(ctx, user, "Usage: /history [on|off]"),
     }
 }
 
@@ -2437,14 +2582,26 @@ fn handle_whowas(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 }
 
+/// `/lastseen on|off` (Host, paridad sb0t `Eval.LastSeen`): toggle del
+/// anuncio "was last seen as..." al entrar un usuario. Con un nick/IP como
+/// arg, consulta el historial (extra de Astra, sb0t no tiene la consulta).
 fn handle_lastseen(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
-    if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
-        return;
-    }
     let query = args.trim();
+    match query.to_ascii_lowercase().as_str() {
+        "on" => {
+            ctx.room_flags.set("lastseen", true);
+            send_system_line(ctx, user, "Room flag 'lastseen' enabled.");
+            return;
+        }
+        "off" => {
+            ctx.room_flags.set("lastseen", false);
+            send_system_line(ctx, user, "Room flag 'lastseen' disabled.");
+            return;
+        }
+        _ => {}
+    }
     if query.is_empty() {
-        send_system_line(ctx, user, "Usage: /lastseen <nick|ip>");
+        send_system_line(ctx, user, "Usage: /lastseen <on|off|nick|ip>");
         return;
     }
     // Si está online, reportar "online now".
@@ -2463,7 +2620,31 @@ fn handle_lastseen(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 }
 
-fn handle_roominfo(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+/// `/roominfo on|off` (Host, paridad sb0t `Eval.RoomInfo`): toggle del
+/// broadcast periódico (20 min) del bloque de info de sala. Sin args,
+/// muestra el bloque al solicitante (extra de Astra).
+fn handle_roominfo(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    match args.trim().to_ascii_lowercase().as_str() {
+        "on" => {
+            ctx.room_flags.set("roominfo", true);
+            send_system_line(ctx, user, "Room flag 'roominfo' enabled.");
+            return;
+        }
+        "off" => {
+            ctx.room_flags.set("roominfo", false);
+            send_system_line(ctx, user, "Room flag 'roominfo' disabled.");
+            return;
+        }
+        _ => {}
+    }
+    for line in roominfo_lines(ctx) {
+        send_system_line(ctx, user, &line);
+    }
+}
+
+/// Bloque de info de sala (usado por `/roominfo` y por el broadcast
+/// periódico de la task en `main.rs` cuando el flag `roominfo` está on).
+pub fn roominfo_lines(ctx: &AppContext) -> Vec<String> {
     let users = ctx.user_pool.users();
     let total = users.iter().filter(|u| u.logged_in).count();
     let ops = users
@@ -2475,18 +2656,22 @@ fn handle_roominfo(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         .filter(|u| u.logged_in && (*u.level.read() as u8) >= ILevel::Owner as u8)
         .count();
 
-    send_system_line(ctx, user, &format!("Room: {}", ctx.settings.room_name));
-    send_system_line(ctx, user, &format!("Users: {} ({} ops, {} owners)", total, ops, owners));
+    let mut lines = vec![
+        format!("Room: {}", ctx.settings.room_name),
+        format!("Users: {} ({} ops, {} owners)", total, ops, owners),
+    ];
     let secs = ctx.uptime_secs();
-    send_system_line(
-        ctx,
-        user,
-        &format!("Uptime: {}d {}h {}m", secs / 86400, (secs / 3600) % 24, (secs / 60) % 60),
-    );
+    lines.push(format!(
+        "Uptime: {}d {}h {}m",
+        secs / 86400,
+        (secs / 3600) % 24,
+        (secs / 60) % 60
+    ));
     let status = ctx.room_status();
     if !status.is_empty() {
-        send_system_line(ctx, user, &format!("Status: {}", status));
+        lines.push(format!("Status: {}", status));
     }
+    lines
 }
 
 fn handle_status(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
@@ -2525,35 +2710,26 @@ fn handle_id(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
 }
 
-fn handle_info(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
-    // Alias detallado de whois; si no hay args, muestra info propia.
-    let target = if args.trim().is_empty() {
-        user.clone()
-    } else {
-        match ctx.user_pool.get_by_name(args.trim()) {
-            Some(t) => t,
-            None => {
-                send_system_line(ctx, user, "User not found.");
-                return;
-            }
+/// `/info` — listado de TODOS los usuarios conectados con nombre, vroom e
+/// id (paridad sb0t `Eval.Info`): encabezado con el nombre de la sala y una
+/// línea por usuario, excluyendo cloaked e incluyendo clientes web. (Cuando
+/// exista link, se repetirá el listado por cada leaf.)
+fn handle_info(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    send_system_line(ctx, user, &ctx.settings.room_name);
+    send_system_line(ctx, user, "");
+    for u in ctx.user_pool.users() {
+        if !u.logged_in || u.cloaked.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
         }
-    };
-    let level = *target.level.read() as u8;
-    send_system_line(
-        ctx,
-        user,
-        &format!(
-            "INFO {}: id={} ip={} level={} files={} vroom={} ver='{}' region='{}'",
-            target.name.read(),
-            target.id,
-            target.external_ip,
-            level,
-            target.file_count,
-            *target.vroom.read(),
-            target.version,
-            target.region,
-        ),
-    );
+        let name = u.name.read().clone();
+        let vroom = u.vroom.read().to_string();
+        let id = u.id.to_string();
+        let line = ctx.templates.render(
+            "info.user",
+            &[("+n", &name), ("+v", &vroom), ("+i", &id)],
+        );
+        send_system_line(ctx, user, &line);
+    }
 }
 
 fn handle_customnames(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
@@ -2689,6 +2865,9 @@ fn handle_clearbans(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
     let n = ctx.bans.clear_all();
     send_system_line(ctx, user, &format!("Cleared {} ban(s).", n));
+    if n > 0 {
+        announce_admin_action(ctx, user, "adminaction.cbans", "");
+    }
 }
 
 fn handle_banstats(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
@@ -3268,6 +3447,128 @@ fn handle_listpasswords(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     send_system_line(ctx, user, &format!("Accounts ({}):", accounts.len()));
     for (name, level) in &accounts {
         send_system_line(ctx, user, &format!("{} (level {})", name, level));
+    }
+}
+
+/// `/loadmotd` (Host, paridad sb0t `Eval.LoadMotd`): recarga el MOTD desde
+/// la persistencia y lo anuncia (Notification#8: "MOTD reloaded by +n").
+fn handle_loadmotd(ctx: &AppContext, user: &Arc<AresUser>) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    ctx.motd.reload();
+    let name = user.name.read().clone();
+    let announcer = if ctx.room_flags.get("stealth") {
+        ctx.settings.room_name.clone()
+    } else {
+        name
+    };
+    ctx.broadcast_print(&format!("MOTD reloaded by {}", announcer));
+}
+
+/// `/rempassword <índice|nick>` (Host, paridad sb0t `Eval.RemovePassword`):
+/// elimina una cuenta de la lista de `/listpasswords`. sb0t usa el índice de
+/// la lista; se acepta también el nick por comodidad.
+fn handle_rempassword(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_system_line(ctx, user, "Usage: /rempassword <index|nick>");
+        return;
+    }
+    let accounts = ctx.db.list_accounts().unwrap_or_default();
+    let name = if let Ok(idx) = arg.parse::<usize>() {
+        match accounts.get(idx) {
+            Some((n, _)) => n.clone(),
+            None => {
+                send_system_line(ctx, user, "No account at that index.");
+                return;
+            }
+        }
+    } else {
+        arg.to_string()
+    };
+    let Ok(Some(record)) = ctx.accounts.find_by_name(&name) else {
+        send_system_line(ctx, user, "No account with that name.");
+        return;
+    };
+    let _ = ctx.db.delete_account(&record.guid);
+    send_system_line(ctx, user, &format!("Password removed for '{}'.", name));
+}
+
+/// `/logout` / `/logoff` (paridad sb0t `AccountManager.Logout`): cierra la
+/// sesión de la cuenta — el nivel vuelve a regular, la cuenta NO se borra.
+fn handle_logout(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+) -> Vec<astra_scripting::ScriptEvent> {
+    let name = user.name.read().clone();
+    if *user.level.read() == ILevel::Regular {
+        // Sin sesión elevada: no hay nada que cerrar (sb0t exige Registered).
+        return vec![];
+    }
+    let notice = ctx.templates.get("revoke.target");
+    // apply_level ya difunde el cambio de nivel a la sala y lo persiste…
+    // pero logout NO debe tocar el nivel guardado de la cuenta: solo la
+    // sesión. Guardamos y restauramos el nivel persistido.
+    let saved = ctx.accounts.find_by_guid(&user.guid).ok().flatten().map(|a| a.level);
+    apply_level(ctx, user, user, ILevel::Regular, &notice);
+    if let Some(level) = saved {
+        let _ = ctx.accounts.set_level(&user.guid, level);
+    }
+    vec![astra_scripting::ScriptEvent::Logout { name }]
+}
+
+/// `/setlevel <nick> <0-3>` (Owner, paridad sb0t `core/Events.cs:519`):
+/// escala sb0t — 0=regular, 1=moderator, 2=admin, 3=host(owner).
+fn handle_setlevel(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    args: &str,
+) -> Vec<astra_scripting::ScriptEvent> {
+    if !has_level(user, ILevel::Owner) {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return vec![];
+    }
+    let args = args.trim();
+    let mut parts = args.rsplitn(2, char::is_whitespace);
+    let level_str = parts.next().unwrap_or("");
+    let target_name = parts.next().unwrap_or("").trim();
+    let new_level = match level_str {
+        "0" => ILevel::Regular,
+        "1" => ILevel::Moderator,
+        "2" => ILevel::Admin,
+        "3" => ILevel::Owner,
+        _ => {
+            send_system_line(ctx, user, "Usage: /setlevel <nick> <0-3>");
+            return vec![];
+        }
+    };
+    if target_name.is_empty() {
+        send_system_line(ctx, user, "Usage: /setlevel <nick> <0-3>");
+        return vec![];
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
+        return vec![];
+    };
+    let level_disp = format!("{} ({})", new_level as u8, level_name(new_level));
+    let msg = ctx.templates.render("grant.target", &[("+l", &level_disp)]);
+    if apply_level(ctx, user, &target, new_level, &msg) {
+        send_system_line(
+            ctx,
+            user,
+            &ctx.templates.render("grant.confirm", &[("+n", target_name), ("+l", &level_disp)]),
+        );
+        vec![astra_scripting::ScriptEvent::AdminLevelChanged {
+            name: target.name.read().clone(),
+        }]
+    } else {
+        vec![]
     }
 }
 
@@ -3889,6 +4190,7 @@ fn handle_unavailable(ctx: &AppContext, user: &Arc<AresUser>, cmd: &str) {
     }
     let why = match cmd {
         "define" | "urban" => "requires an external dictionary service",
+        "roomsearch" => "searches the Ares channel list, which is not available in this build",
         "ipsend" | "logsend" | "bansend" => "requires a connected link hub",
         "trace" | "vspy" => "requires packet-tracing support",
         "loadtemplate" => {
@@ -4185,6 +4487,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_hash_prefix() {
+        // Paridad sb0t: '#' es prefijo de comando igual que '/'.
+        let (cmd, args) = parse_command("#help").unwrap();
+        assert_eq!(cmd, "help");
+        assert_eq!(args, "");
+        let (cmd, args) = parse_command("#kick alice spam").unwrap();
+        assert_eq!(cmd, "kick");
+        assert_eq!(args, "alice spam");
+        assert!(parse_command("#").is_none());
+    }
+
+    #[test]
+    fn captcha_gate_blocks_commands_except_help_and_login() {
+        let ctx = make_test_ctx();
+        let (alice, mut rx) = make_test_user(1, "Alice");
+        alice.needs_captcha.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Comando cualquiera: se ignora en silencio (handled, sin eventos).
+        let (handled, events) = dispatch_builtin(&ctx, &alice, "whois", "Bob");
+        assert!(handled);
+        assert!(events.is_empty());
+        assert!(rx.try_recv().is_err(), "no debe responder nada");
+
+        // /help sí responde, incluso con captcha pendiente (Events.cs:471).
+        let (handled, events) = dispatch_builtin(&ctx, &alice, "help", "");
+        assert!(handled);
+        assert!(matches!(
+            events.as_slice(),
+            [astra_scripting::ScriptEvent::Help { from }] if from == "Alice"
+        ));
+        assert!(rx.try_recv().is_ok(), "help debe imprimir líneas");
+    }
+
+    #[test]
     fn parse_empty_command() {
         // Solo "/" sin nada más → no es un comando válido
         assert!(parse_command("/").is_none());
@@ -4341,7 +4677,7 @@ mod tests {
 
         let msg = alice_rx.try_recv().expect("deny");
         let (_from, text) = decode_pvt(msg);
-        assert_eq!(text, "Access denied. Moderator+ required.");
+        assert_eq!(text, "Access denied. Admin+ required.");
         assert!(!ctx.bans.is_banned(&bob.guid, bob.external_ip));
     }
 
@@ -4350,7 +4686,7 @@ mod tests {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         let (bob, mut bob_rx) = make_test_user(2, "Bob");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
@@ -4361,6 +4697,8 @@ mod tests {
 
         let ack_text = next_pvt_text(&mut alice_rx);
         assert!(ack_text.starts_with("Banned 'Bob' (ident "));
+        // Anuncio público de la acción (AdminAction#0 de sb0t).
+        assert_eq!(next_pvt_text(&mut alice_rx), "Bob was banned by Alice");
 
         let notice = next_pvt_text(&mut bob_rx);
         assert_eq!(notice, "You have been banned from this room.");
@@ -4371,13 +4709,14 @@ mod tests {
 
         let unban_text = next_pvt_text(&mut alice_rx);
         assert_eq!(unban_text, "Unban successful.");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Bob was unbanned by Alice");
     }
 
     #[test]
     fn builtin_unban_without_match_reports_not_found() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
         let (handled, _) = dispatch_builtin(&ctx, &alice, "unban", "ghost");
@@ -4393,12 +4732,13 @@ mod tests {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         let (bob, _bob_rx) = make_test_user(2, "Bob");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
         let _ = dispatch_builtin(&ctx, &alice, "ban", "Bob");
         let _ = next_pvt_text(&mut alice_rx); // ban ack
+        let _ = next_pvt_text(&mut alice_rx); // anuncio "Bob was banned by Alice"
 
         let (handled, _) = dispatch_builtin(&ctx, &alice, "banlist", "");
         assert!(handled);
@@ -4478,6 +4818,9 @@ mod tests {
         assert!(bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut bob_rx), "You have been muzzled.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Muzzled 'Bob'.");
+        // Anuncio público a toda la sala (AdminAction#3 de sb0t).
+        assert_eq!(next_pvt_text(&mut alice_rx), "Bob was muzzled by Alice");
+        assert_eq!(next_pvt_text(&mut bob_rx), "Bob was muzzled by Alice");
 
         // Muzzle repetido no cambia nada
         let _ = dispatch_builtin(&ctx, &alice, "muzzle", "Bob");
@@ -4487,6 +4830,7 @@ mod tests {
         assert!(!bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut bob_rx), "You have been unmuzzled.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Unmuzzled 'Bob'.");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Bob was unmuzzled by Alice");
     }
 
     #[test]
@@ -4735,6 +5079,8 @@ mod tests {
     fn builtin_whois_reports_user_info() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        // whois es Moderator+ en sb0t.
+        *alice.level.write() = ILevel::Moderator;
         let (bob, _bob_rx) = make_test_user(2, "Bob");
         *bob.level.write() = ILevel::Voice;
         ctx.user_pool.add(alice.clone());
@@ -4869,28 +5215,253 @@ mod tests {
     }
 
     #[test]
-    fn builtin_history_shows_recent_messages() {
+    fn builtin_history_is_a_host_toggle() {
+        // Paridad sb0t Eval.History: `/history on|off` togglea el flag de
+        // sala; el replay ocurre al entrar (AppContext::replay_history).
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Owner;
+        ctx.user_pool.add(alice.clone());
+
+        assert!(!ctx.room_flags.get("history"));
+        let _ = dispatch_builtin(&ctx, &alice, "history", "on");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'history' enabled.");
+        assert!(ctx.room_flags.get("history"));
+        let _ = dispatch_builtin(&ctx, &alice, "history", "off");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'history' disabled.");
+        assert!(!ctx.room_flags.get("history"));
+    }
+
+    #[test]
+    fn builtin_history_requires_host() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+        let _ = dispatch_builtin(&ctx, &alice, "history", "on");
+        let reply = next_pvt_text(&mut alice_rx);
+        assert!(reply.contains("denied") || reply.contains("required"), "reply: {reply}");
+        assert!(!ctx.room_flags.get("history"));
+    }
+
+    #[test]
+    fn builtin_setlevel_uses_sb0t_scale() {
+        let ctx = make_test_ctx();
+        let (owner, mut owner_rx) = make_test_user(1, "Owner");
+        *owner.level.write() = ILevel::Owner;
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(owner.clone());
+        ctx.user_pool.add(bob.clone());
+
+        // 1 = moderator, 2 = admin, 3 = owner, 0 = regular (escala sb0t).
+        let (_, events) = dispatch_builtin(&ctx, &owner, "setlevel", "Bob 2");
+        assert!(matches!(
+            events.as_slice(),
+            [astra_scripting::ScriptEvent::AdminLevelChanged { name }] if name == "Bob"
+        ));
+        assert_eq!(*bob.level.read(), ILevel::Admin);
+        let _ = owner_rx.try_recv();
+
+        let (_, _) = dispatch_builtin(&ctx, &owner, "setlevel", "Bob 0");
+        assert_eq!(*bob.level.read(), ILevel::Regular);
+
+        // No-Owner: denegado.
+        *bob.level.write() = ILevel::Admin;
+        let (_, events) = dispatch_builtin(&ctx, &bob, "setlevel", "Owner 0");
+        assert!(events.is_empty());
+        assert_eq!(*owner.level.read(), ILevel::Owner);
+    }
+
+    #[test]
+    fn builtin_logout_resets_session_level() {
+        let ctx = make_test_ctx();
+        let (alice, _rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        ctx.user_pool.add(alice.clone());
+
+        let (handled, events) = dispatch_builtin(&ctx, &alice, "logout", "");
+        assert!(handled);
+        assert!(matches!(
+            events.as_slice(),
+            [astra_scripting::ScriptEvent::Logout { name }] if name == "Alice"
+        ));
+        assert_eq!(*alice.level.read(), ILevel::Regular);
+
+        // Sin sesión elevada: logoff no hace nada.
+        let (_, events) = dispatch_builtin(&ctx, &alice, "logoff", "");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn builtin_kewltext_sb0t_aliases_work() {
+        let ctx = make_test_ctx();
+        let (alice, _rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "addkewltext", "Bob");
+        assert!(handled);
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "remkewltext", "Bob");
+        assert!(handled);
+    }
+
+    #[test]
+    fn builtin_adminannounce_is_separate_toggle() {
+        let ctx = make_test_ctx();
+        let (owner, mut rx) = make_test_user(1, "Owner");
+        *owner.level.write() = ILevel::Owner;
+        ctx.user_pool.add(owner.clone());
+
+        assert!(!ctx.room_flags.get("adminannounce"));
+        let _ = dispatch_builtin(&ctx, &owner, "adminannounce", "on");
+        assert_eq!(next_pvt_text(&mut rx), "Room flag 'adminannounce' enabled.");
+        assert!(ctx.room_flags.get("adminannounce"));
+    }
+
+    #[test]
+    fn builtin_greetmsg_and_pmgreetmsg_are_separate_flags() {
+        let ctx = make_test_ctx();
+        let (owner, mut rx) = make_test_user(1, "Owner");
+        *owner.level.write() = ILevel::Owner;
+        ctx.user_pool.add(owner.clone());
+
+        // pmgreetmsg default on (comportamiento histórico); greetmsg off.
+        assert!(ctx.room_flags.get("pmgreetmsg"));
+        assert!(!ctx.room_flags.get("greetmsg"));
+        let _ = dispatch_builtin(&ctx, &owner, "pmgreetmsg", "off");
+        assert_eq!(next_pvt_text(&mut rx), "Room flag 'pmgreetmsg' disabled.");
+        let _ = dispatch_builtin(&ctx, &owner, "greetmsg", "on");
+        assert_eq!(next_pvt_text(&mut rx), "Room flag 'greetmsg' enabled.");
+        // addgreetmsg sigue siendo "agregar greet", no un toggle.
+        let _ = dispatch_builtin(&ctx, &owner, "addgreetmsg", "hola +n");
+        assert_eq!(ctx.greets.len(), 1);
+    }
+
+    #[test]
+    fn builtin_rempassword_removes_account_of_other_user() {
+        let ctx = make_test_ctx();
+        let (owner, mut rx) = make_test_user(1, "Owner");
+        *owner.level.write() = ILevel::Owner;
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(owner.clone());
+        ctx.user_pool.add(bob.clone());
+
+        // Bob se registra.
+        let _ = dispatch_builtin(&ctx, &bob, "register", "secreto1");
+        assert_eq!(ctx.db.list_accounts().unwrap().len(), 1);
+
+        // El Host lo borra por nick.
+        let _ = dispatch_builtin(&ctx, &owner, "rempassword", "Bob");
+        assert_eq!(next_pvt_text(&mut rx), "Password removed for 'Bob'.");
+        assert!(ctx.db.list_accounts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn builtin_idle_marks_user_and_announces_when_flag_on() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+        ctx.room_flags.set("idle", true);
+
+        // Marcarse ausente: dispara onIdled y anuncia a la sala.
+        let (handled, events) = dispatch_builtin(&ctx, &alice, "idles", "");
+        assert!(handled);
+        assert!(matches!(
+            events.as_slice(),
+            [astra_scripting::ScriptEvent::Idled { name }] if name == "Alice"
+        ));
+        assert!(ctx.idle.is_idle(alice.id));
+        let announce = next_pvt_text(&mut bob_rx);
+        assert!(announce.starts_with("Alice idles at "), "announce: {announce}");
+
+        // Ya idle: reintento silencioso, sin evento.
+        let (_, events) = dispatch_builtin(&ctx, &alice, "idle", "");
+        assert!(events.is_empty());
+
+        // Unidle al hablar: anuncia el tiempo ausente.
+        assert!(ctx.unidle_user(&alice).is_some());
+        let ret = next_pvt_text(&mut bob_rx);
+        assert!(ret.starts_with("Alice returned at "), "ret: {ret}");
+        assert!(ret.contains("away time ["), "ret: {ret}");
+        // Cooldown de 5 min: no puede volver a idlear ya mismo.
+        let (_, events) = dispatch_builtin(&ctx, &alice, "idles", "");
+        assert!(events.is_empty());
+        let _ = alice_rx.try_recv();
+    }
+
+    #[test]
+    fn builtin_idle_toggle_is_host_only() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
 
-        ctx.record_message("Bob", "hola a todos", false);
-        ctx.record_message("Carol", "waves", true);
+        let _ = dispatch_builtin(&ctx, &alice, "idle", "on");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Host required.");
+        assert!(!ctx.room_flags.get("idle"));
 
-        let _ = dispatch_builtin(&ctx, &alice, "history", "");
-        assert_eq!(next_pvt_text(&mut alice_rx), "Recent messages (2):");
-        assert_eq!(next_pvt_text(&mut alice_rx), "Bob: hola a todos");
-        assert_eq!(next_pvt_text(&mut alice_rx), "Carol waves");
+        *alice.level.write() = ILevel::Owner;
+        let _ = dispatch_builtin(&ctx, &alice, "idle", "on");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'idle' enabled.");
+        assert!(ctx.room_flags.get("idle"));
     }
 
     #[test]
-    fn builtin_history_requires_moderator() {
+    fn builtin_info_lists_all_users_with_ids() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        let (bob, _bob_rx) = make_test_user(2, "Bob");
+        let (carol, _carol_rx) = make_test_user(3, "Carol");
+        carol.cloaked.store(true, std::sync::atomic::Ordering::Relaxed);
         ctx.user_pool.add(alice.clone());
-        let _ = dispatch_builtin(&ctx, &alice, "history", "");
-        assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Moderator+ required.");
+        ctx.user_pool.add(bob.clone());
+        ctx.user_pool.add(carol.clone());
+
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "info", "");
+        assert!(handled);
+        // Encabezado = nombre de la sala, luego línea en blanco.
+        let header = next_pvt_text(&mut alice_rx);
+        assert_eq!(header, ctx.settings.room_name);
+        let _blank = next_pvt_text(&mut alice_rx);
+        // Una línea por usuario visible (Carol está cloaked → excluida).
+        let mut lines = vec![next_pvt_text(&mut alice_rx), next_pvt_text(&mut alice_rx)];
+        lines.sort();
+        assert_eq!(lines[0], "Alice [vroom: 0] [id: 1]");
+        assert_eq!(lines[1], "Bob [vroom: 0] [id: 2]");
+        assert!(alice_rx.try_recv().is_err(), "no debe listar cloaked");
+    }
+
+    #[test]
+    fn replay_history_sends_messages_with_age_prefix() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.record_message("Bob", "hola a todos", false);
+        ctx.record_message("Carol", "waves", true);
+
+        // Flag apagado: no se manda nada.
+        ctx.replay_history(&alice);
+        assert!(alice_rx.try_recv().is_err());
+
+        ctx.room_flags.set("history", true);
+        ctx.replay_history(&alice);
+        // Público de Bob con prefijo de antigüedad.
+        let pkt = alice_rx.try_recv().expect("public de Bob");
+        assert_eq!(pkt[0], TcpMsg::Public as u8);
+        let mut r = PacketReader::new(&pkt[1..]);
+        assert_eq!(r.read_string_nt().unwrap(), "Bob");
+        let text = r.read_string_nt().unwrap();
+        assert!(text.starts_with("[-00:00:0"), "text: {text}");
+        assert!(text.ends_with("] hola a todos"), "text: {text}");
+        // Emote de Carol.
+        let pkt = alice_rx.try_recv().expect("emote de Carol");
+        assert_eq!(pkt[0], TcpMsg::Emote as u8);
+        // Línea de cierre (PM del bot).
+        let closing = next_pvt_text(&mut alice_rx);
+        assert_eq!(closing, "-=-=-=-=- end of chat history -=-=-=-=-");
     }
 
     #[test]
@@ -4898,7 +5469,7 @@ mod tests {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         let (bob, _bob_rx) = make_test_user(2, "Bob");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
@@ -4942,7 +5513,7 @@ mod tests {
     fn builtin_roominfo_and_status() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
-        *alice.level.write() = ILevel::Admin;
+        *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
 
         let _ = dispatch_builtin(&ctx, &alice, "roominfo", "");
@@ -4962,7 +5533,7 @@ mod tests {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         let (bob, _bob_rx) = make_test_user(2, "Bob");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Owner;
         *bob.custom_name.write() = Some("BobbyTables".to_string());
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
@@ -5066,7 +5637,7 @@ mod tests {
     fn builtin_trace_without_geoip_is_honest() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
         let _ = dispatch_builtin(&ctx, &alice, "trace", "8.8.8.8");
@@ -5077,7 +5648,7 @@ mod tests {
     fn builtin_vspy_toggle() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
         let _ = dispatch_builtin(&ctx, &alice, "vspy", "");
@@ -5092,7 +5663,7 @@ mod tests {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         let (bob, _bob_rx) = make_test_user(2, "Bob");
-        *alice.level.write() = ILevel::Admin;
+        *alice.level.write() = ILevel::Owner;
         bob.quarantined.store(true, std::sync::atomic::Ordering::Relaxed);
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
@@ -5169,7 +5740,7 @@ mod tests {
     fn builtin_unavailable_commands_respond() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
-        *alice.level.write() = ILevel::Admin;
+        *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
 
         let (handled, _) = dispatch_builtin(&ctx, &alice, "loadtemplate", "");
@@ -5297,7 +5868,7 @@ mod tests {
     fn builtin_cloak_toggles() {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
 
         let _ = dispatch_builtin(&ctx, &alice, "cloak", "on");
@@ -5409,7 +5980,7 @@ mod tests {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         let (bob, _bob_rx) = make_test_user(2, "Bob");
-        *alice.level.write() = ILevel::Moderator;
+        *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
@@ -5490,13 +6061,14 @@ mod tests {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         let (bob, _bob_rx) = make_test_user(2, "Bob");
-        *alice.level.write() = ILevel::Admin;
+        *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
         // Ban de Bob → registra acción
         let _ = dispatch_builtin(&ctx, &alice, "ban", "Bob");
         let _ = next_pvt_text(&mut alice_rx); // "Banned 'Bob'..."
+        let _ = next_pvt_text(&mut alice_rx); // anuncio público
         assert_eq!(ctx.bans.len(), 1);
 
         let _ = dispatch_builtin(&ctx, &alice, "banstats", "");
@@ -5505,6 +6077,7 @@ mod tests {
 
         let _ = dispatch_builtin(&ctx, &alice, "clearbans", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Cleared 1 ban(s).");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Alice has cleared the ban list");
         assert_eq!(ctx.bans.len(), 0);
     }
 
@@ -5530,7 +6103,7 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &alice, "addurl", "u t");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
 
-        *alice.level.write() = ILevel::Admin;
+        *alice.level.write() = ILevel::Owner;
         let _ = dispatch_builtin(&ctx, &alice, "url", "off");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room URLs disabled.");
         assert!(!ctx.urls.is_enabled());

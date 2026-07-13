@@ -40,6 +40,23 @@ pub const FLAG_DEFAULTS: &[(&str, bool)] = &[
     ("stealth", false),
     ("clock", false),
     ("idle", false),
+    // `history`: replay de los últimos mensajes al entrar a la sala
+    // (paridad sb0t `Settings.History` + `commands/History.Show`).
+    ("history", false),
+    // `greetmsg`: greet PÚBLICO al entrar (sb0t `Settings.GreetMsg`).
+    ("greetmsg", false),
+    // `pmgreetmsg`: greet por PM al entrar (sb0t `Settings.PMGreetMsg`).
+    // Default on: preserva el comportamiento histórico de Astra (greet=PM).
+    ("pmgreetmsg", true),
+    // `adminannounce`: los word-filters tipo Announce no disparan para
+    // usuarios regulares (sb0t `Settings.AdminAnnounce`, WordFilter.cs:195).
+    ("adminannounce", false),
+    // `roominfo`: broadcast periódico (20 min) del bloque de info de sala
+    // (sb0t `Settings.RoomInfo` + `commands/RoomInfo.Tick`).
+    ("roominfo", false),
+    // `lastseen`: al entrar un usuario, anuncia con qué nick y cuándo se lo
+    // vio por última vez (sb0t `Settings.LastSeen`, ServerEvents.cs:198).
+    ("lastseen", false),
 ];
 
 /// Manager de flags de sala: cache en memoria + persistencia SQLite.

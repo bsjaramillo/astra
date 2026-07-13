@@ -489,6 +489,22 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // RoomInfo periódico (cada 20 min): si el flag `roominfo` está on,
+    // difunde el bloque de info de sala (paridad sb0t RoomInfo.Tick).
+    let roominfo_ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1200));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if roominfo_ctx.room_flags.get("roominfo") {
+                for line in astra_commands::roominfo_lines(&roominfo_ctx) {
+                    roominfo_ctx.broadcast_print(&line);
+                }
+            }
+        }
+    });
+
     // FastPing periódico (cada 2s) a todos los clientes Ares TCP logueados.
     // Paridad `ServerCore.cs` de sb0t: el server les manda esto a los
     // clientes para (a) mantener viva la conexión contra NAT/firewalls
@@ -593,29 +609,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Idle detector (cada 60s) — verifica users idle y dispara onIdled
-    let idle_ctx = ctx.clone();
-    let idle_scripting = scripting.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            // Chequear cada user en el pool
-            let mut to_idle = Vec::new();
-            for u in idle_ctx.user_pool.users() {
-                if !u.logged_in {
-                    continue;
-                }
-                // check_idle retorna Some(()) si pasó de active a idle
-                if idle_ctx.idle.check_idle(u.id).is_some() {
-                    to_idle.push(u.name.read().clone());
-                }
-            }
-            for name in to_idle {
-                idle_scripting.dispatch(astra_scripting::ScriptEvent::Idled { name });
-            }
-        }
-    });
+    // NOTA: no hay auto-idle por inactividad — en sb0t el idle es siempre
+    // una acción manual del usuario (comando `idle`/`idles` o emote que
+    // empieza con "idles"); ver server-core/src/idle.rs.
 
     // Accept loop
     loop {
