@@ -361,6 +361,8 @@ pub struct AppContext {
     pub asn_bans: Arc<AsnBanManager>,
     /// Flags de sala (toggles caps/scribbles/audios/...).
     pub room_flags: Arc<RoomFlags>,
+    /// Gate de cambio de vroom (onVroomJoinCheck), registrado por `main`.
+    pub vroom_check: parking_lot::RwLock<Option<Box<dyn Fn(&str, u16) -> bool + Send + Sync>>>,
     /// Transferencias CUSTOM_DATA públicas en curso (imágenes/audio ib0t).
     pub custom_data: Arc<CustomDataStore>,
     /// Transferencias CUSTOM_DATA privadas (PM) en curso.
@@ -512,6 +514,7 @@ impl AppContext {
             range_bans,
             asn_bans,
             room_flags,
+            vroom_check: parking_lot::RwLock::new(None),
             custom_data,
             pm_custom_data,
             join_filters,
@@ -850,6 +853,22 @@ impl AppContext {
             } else {
                 let _ = u.send(part.clone());
             }
+        }
+    }
+
+    /// Registra el gate de cambio de vroom (lo setea `main` con un closure
+    /// que consulta `onVroomJoinCheck` en el scripting; server-core no puede
+    /// depender del crate de scripting directamente).
+    pub fn set_vroom_check(&self, f: Box<dyn Fn(&str, u16) -> bool + Send + Sync>) {
+        *self.vroom_check.write() = Some(f);
+    }
+
+    /// ¿Los scripts permiten que `name` entre al vroom `vroom`? `true` si no
+    /// hay gate registrado (paridad sb0t `VroomJoinCheck`).
+    pub fn check_vroom_join(&self, name: &str, vroom: u16) -> bool {
+        match self.vroom_check.read().as_ref() {
+            Some(f) => f(name, vroom),
+            None => true,
         }
     }
 

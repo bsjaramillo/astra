@@ -16,6 +16,42 @@
 
 ## 0. Resumen ejecutivo
 
+> **Estado (2026-07-13): Fases S0-S4 IMPLEMENTADAS** (suite completa verde).
+> - **S-A ✅**: onTextBefore/onEmoteBefore/onPMBefore ahora retornan el texto
+>   reescrito encadenado entre scripts (string reemplaza; false/null/"" cancela;
+>   true/undefined no toca). Call sites TCP y web usan el texto resultante.
+> - **S-B ✅**: onJoinCheck (login TCP y web — rechaza con error + Rejected),
+>   onFloodBefore (perdona el castigo) y onVroomJoinCheck (wired en /vroom
+>   vía closure `AppContext::set_vroom_check` inyectada desde main — mismo
+>   patrón que ScriptingHooks).
+> - **S-C ✅**: user.sendText/sendEmote difunden público/emote COMO el usuario
+>   a su vroom (respetando ignore lists); sendPM/sendHTML quedan al usuario.
+> - **S-D ✅**: user.kick/disconnect/ban usan AppContext::force_part_user
+>   (PART broadcast Ares+web, movido a server-core) y ban registra en banstats.
+> - **S-E ✅**: props captcha/idle/visible/ghost/localEP/linked/leaf
+>   + ignores(); setters writable customName/vroom (con PART/JOIN broadcast)/
+>   level (con persistencia y UPDATE)/muzzled; `avatar` get/set (base64,
+>   sobre Avatar_getForUser/set:avatar) y `font` get (objeto {name,size,
+>   color,bold,italic,underline}; set no-op — la fija el cliente); métodos
+>   redirect (hashlink), setTopic (a ese usuario), nudge (aprox. texto);
+>   stubs honestos setUrl/scribble/restoreAvatar/getASN.
+> - **S-F ✅**: onCommand(userobj, command, target, args) — target = JSUser
+>   del primer token de args resuelto contra el pool, o null.
+> - **S-G ✅**: `@código` en chat público (TCP y web) evalúa JS en el primer
+>   script activo con `userobj` preseteado — SOLO Owner, sin difundir.
+> - **S-H ✅**: Users.banned() real sobre ctx.bans (con unban()); JSUserFont
+>   cubierto por la prop `font`; HttpRequest con `header(nombre, valor)` y
+>   POST. Única divergencia deliberada: `Channels.enabled()` fijo en true
+>   (los "channels" de Astra son vrooms — siempre disponibles).
+>
+> **Además:** `docs/SCRIPTING-ROADMAP.md` marcado como obsoleto; los scripts
+> de ejemplo (`data/scripts/`) actualizados a las firmas reales (usaban
+> `onUserJoin` y `onCommand` de 3 args — este último se habría ROTO con el
+> nuevo `target`); nuevo `data/scripts/paridad.js` para verificación manual;
+> y un test (`bundled_example_scripts_load_and_run`) que carga cada script de
+> `data/scripts/` e **invoca sus handlers verificando el Result**, para que
+> un cambio de API no los deje rotos en silencio.
+
 Lo que está **bien** (verificado):
 
 - **Eventos**: los 47 callbacks de sb0t existen en Astra (54 handlers, con 7

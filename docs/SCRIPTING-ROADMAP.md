@@ -1,3 +1,9 @@
+> **⚠️ DOCUMENTO OBSOLETO (retirado 2026-07-13).** Este roadmap describe un
+> estado antiguo ("30% de paridad") que ya no existe: la paridad de la API
+> de scripting se completó (fases 1-5 + auditoría S0-S4). La fuente de
+> estado vigente es **`docs/AUDITORIA-SCRIPTING.md`**. Se conserva solo como
+> registro histórico del plan original.
+
 # Sub-roadmap: paridad sb0t del scripting JS
 
 > Plan incremental para llevar la API de scripting JS de Astra del 30% al

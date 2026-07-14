@@ -93,6 +93,24 @@ pub fn set_script_dir(ctx: &mut Context, dir: &str) {
     let _ = global.set(js_string!("__SCRIPT_DIR__"), JsValue::from(js_string!(dir)), false, ctx);
 }
 
+/// Registra el NOMBRE del script en su contexto. Sirve para atribuirle los
+/// recursos globales que registre (líneas de `/help`, timers), y así poder
+/// limpiarlos cuando el script se descargue o se recargue.
+pub fn set_script_name(ctx: &mut Context, name: &str) {
+    let global = ctx.global_object();
+    let _ = global.set(js_string!("__SCRIPT_NAME__"), JsValue::from(js_string!(name)), false, ctx);
+}
+
+/// Nombre del script actual (lee `__SCRIPT_NAME__` del context).
+fn current_script_name(ctx: &mut Context) -> String {
+    let global = ctx.global_object();
+    global
+        .get(js_string!("__SCRIPT_NAME__"), ctx)
+        .ok()
+        .and_then(|v| jsvalue_to_string(&v))
+        .unwrap_or_default()
+}
+
 /// Carpeta del script actual (lee `__SCRIPT_DIR__` del context).
 fn current_script_dir(ctx: &mut Context) -> Option<std::path::PathBuf> {
     let global = ctx.global_object();
@@ -474,7 +492,7 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("clearTimer"), 1, NativeFunction::from_fn_ptr(clear_timer_fn))
         .expect("clearTimer should be registered");
     context
-        .register_global_builtin_callable(js_string!("__http_download"), 7, NativeFunction::from_fn_ptr(http_download_fn))
+        .register_global_builtin_callable(js_string!("__http_download"), 8, NativeFunction::from_fn_ptr(http_download_fn))
         .expect("__http_download should be registered");
 
     // ============ Sql (DB propia del script, paridad sb0t) ============
@@ -538,6 +556,21 @@ function __mkUser(name){
       get: function(){ return __user_get(u.__name, p); },
       set: function(v){ __user_do(u.__name, "set:" + p, v == null ? "" : "" + v); }
     });
+  });
+  // avatar: get = base64 (o null); set = base64 (vacío/null limpia).
+  Object.defineProperty(u, "avatar", {
+    enumerable: true, configurable: true,
+    get: function(){ return Avatar_getForUser(u.__name); },
+    set: function(v){ __user_do(u.__name, "set:avatar", v == null ? "" : "" + v); }
+  });
+  // font: objeto {name,size,color,bold,italic,underline} (solo lectura:
+  // la fuente la fija el cliente en el login; el set es no-op).
+  Object.defineProperty(u, "font", {
+    enumerable: true, configurable: true,
+    get: function(){
+      try { return JSON.parse(__user_get(u.__name, "fontJson")); } catch (e) { return null; }
+    },
+    set: function(v){ /* no-op: fuente fijada por el cliente */ }
   });
   // Métodos sb0t restantes
   u.redirect = function(link){ return __user_do(u.__name, "redirect", link == null ? "" : "" + link); };
@@ -773,7 +806,13 @@ function HttpRequest(){
   this.method = "GET"; this.src = ""; this.host = ""; this.params = "";
   this.userAgent = ""; this.accept = ""; this.utf = true; this.oncomplete = null;
   this.response = null; this.status = 0; this.error = "";
+  this.__headers = {};
 }
+// Header custom (paridad sb0t `req.header(nombre, valor)`).
+HttpRequest.prototype.header = function(n, v){
+  if (n != null) this.__headers["" + n] = v == null ? "" : "" + v;
+  return this;
+};
 HttpRequest.prototype.download = function(){
   var self = this;
   var url = this.src || this.host;
@@ -785,7 +824,8 @@ HttpRequest.prototype.download = function(){
     if (typeof self.oncomplete === "function") self.oncomplete(body, status, error);
   };
   var body = (m === "POST") ? ("" + (this.params || "")) : "";
-  var ok = __http_download(m, "" + url, body, "" + this.userAgent, "" + this.accept, !!this.utf, key);
+  var hdrs = ""; try { hdrs = JSON.stringify(this.__headers || {}); } catch (e) {}
+  var ok = __http_download(m, "" + url, body, "" + this.userAgent, "" + this.accept, !!this.utf, key, hdrs);
   if (!ok) delete __httpCbs[key];
   return ok;
 };
@@ -1231,6 +1271,13 @@ fn user_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "localEP" => JsValue::from(js_string!(format!("{}:{}", u.local_ip, u.data_port))),
         "linked" => JsValue::from(false),
         "leaf" => JsValue::null(),
+        "fontJson" => {
+            let f = &u.font;
+            JsValue::from(js_string!(serde_json::json!({
+                "name": f.face, "size": f.size, "color": f.color,
+                "bold": f.bold, "italic": f.italic, "underline": f.underline,
+            }).to_string()))
+        }
         "ignoresJson" => {
             let list = u.ignore_list.read().clone();
             JsValue::from(js_string!(serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())))
@@ -1448,6 +1495,20 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
                 user: server_core::LinkUserSnapshot::from_user(&u),
             });
             true
+        }
+        "set:avatar" => {
+            if arg.trim().is_empty() {
+                *u.avatar.lock() = None;
+                true
+            } else {
+                match base64_decode_bytes(arg.trim()) {
+                    Some(bytes) => {
+                        *u.avatar.lock() = Some(bytes);
+                        true
+                    }
+                    None => false,
+                }
+            }
         }
         // ---- Métodos restantes ----
         "redirect" => match server_core::hashlink::decode(&arg) {
@@ -2009,7 +2070,7 @@ thread_local! {
 /// `handle_help` desde un hilo de tokio (el que procesa el comando). Con un
 /// thread-local, el lector veía un almacén vacío y las líneas de ayuda de los
 /// scripts nunca aparecían en `/help` (bug reportado en producción).
-static HELP_LINES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+static HELP_LINES: std::sync::Mutex<Vec<(String, String, String)>> = std::sync::Mutex::new(Vec::new());
 
 /// Contador monotónico de timer IDs (Fase 20).
 thread_local! {
@@ -3094,14 +3155,15 @@ fn query_get_row_count_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context)
 /// `Help_addLine(command, line)` — agrega una línea custom al comando `/help`.
 /// Ej: `Help_addLine("hola", "/hola - saluda al bot")` → agrega esa línea
 /// cuando el user escribe `/help`. Retorna true si se agregó.
-fn help_add_line_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+fn help_add_line_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let cmd = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     let line = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
     if cmd.is_empty() || line.is_empty() {
         return Ok(JsValue::from(false));
     }
+    let script = current_script_name(ctx);
     if let Ok(mut lines) = HELP_LINES.lock() {
-        let entry = (cmd, line);
+        let entry = (script, cmd, line);
         // Dedup: evitar duplicados si un script se recarga y re-registra.
         if !lines.contains(&entry) {
             lines.push(entry);
@@ -3110,11 +3172,23 @@ fn help_add_line_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Re
     Ok(JsValue::from(true))
 }
 
+/// Elimina las líneas de `/help` registradas por un script. Se llama al
+/// descargarlo (o antes de recargarlo), para que no se acumulen entradas de
+/// instancias muertas.
+pub fn clear_help_lines_for(script: &str) {
+    if let Ok(mut lines) = HELP_LINES.lock() {
+        lines.retain(|(s, _, _)| s != script);
+    }
+}
+
 /// Retorna una copia de las líneas extra de help registradas por scripts.
 /// Usado por `handle_help` en el crate `commands` para agregar líneas
 /// antes de mandar el PM al user. Global → visible desde cualquier hilo.
 pub fn extra_help_lines() -> Vec<(String, String)> {
-    HELP_LINES.lock().map(|l| l.clone()).unwrap_or_default()
+    HELP_LINES
+        .lock()
+        .map(|l| l.iter().map(|(_, c, t)| (c.clone(), t.clone())).collect())
+        .unwrap_or_default()
 }
 
 // ============================================================================
@@ -3138,6 +3212,7 @@ fn set_timer_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
         *c += 1;
         *c
     });
+    let script = current_script_name(ctx);
     ACTIVE_TIMERS.with(|t| t.borrow_mut().insert(id));
     PENDING_TIMERS.with(|t| {
         t.borrow_mut().push_back(PendingTimer {
@@ -3145,9 +3220,9 @@ fn set_timer_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
             fn_name,
             fire_at: std::time::Instant::now() + std::time::Duration::from_secs(secs),
             repeat: true,
+            script,
         });
     });
-    let _ = ctx;
     Ok(JsValue::from(id))
 }
 
@@ -3167,6 +3242,7 @@ fn set_timeout_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Resul
         *c += 1;
         *c
     });
+    let script = current_script_name(ctx);
     ACTIVE_TIMERS.with(|t| t.borrow_mut().insert(id));
     PENDING_TIMERS.with(|t| {
         t.borrow_mut().push_back(PendingTimer {
@@ -3174,9 +3250,9 @@ fn set_timeout_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Resul
             fn_name,
             fire_at: std::time::Instant::now() + std::time::Duration::from_secs(secs),
             repeat: false,
+            script,
         });
     });
-    let _ = ctx;
     Ok(JsValue::from(id))
 }
 
@@ -3191,6 +3267,17 @@ pub struct PendingTimer {
     pub fire_at: std::time::Instant,
     /// Si es repeating, se re-encola después de disparar.
     pub repeat: bool,
+    /// Script que lo agendó (para cancelarlo si se descarga/recarga).
+    pub script: String,
+}
+
+/// Cancela todos los timers agendados por un script. Se llama al
+/// descargarlo: si no, los timers repetitivos de una instancia muerta
+/// siguen re-encolándose para siempre.
+pub fn clear_timers_for(script: &str) {
+    PENDING_TIMERS.with(|t| {
+        t.borrow_mut().retain(|timer| timer.script != script);
+    });
 }
 
 thread_local! {
@@ -3280,6 +3367,8 @@ fn http_download_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Re
     let accept = args.get(4).and_then(jsvalue_to_string).unwrap_or_default();
     let utf = args.get(5).map(|v| v.to_boolean()).unwrap_or(true);
     let key = args.get(6).and_then(jsvalue_to_string).unwrap_or_default();
+    // Headers custom (JSON {nombre: valor}, paridad sb0t `req.header(n, v)`).
+    let headers_json = args.get(7).and_then(jsvalue_to_string).unwrap_or_default();
     if url.is_empty() || key.is_empty() {
         return Ok(JsValue::from(false));
     }
@@ -3309,6 +3398,17 @@ fn http_download_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Re
                     }
                     if !accept.is_empty() {
                         req = req.header(reqwest::header::ACCEPT, accept);
+                    }
+                    if !headers_json.is_empty() {
+                        if let Ok(serde_json::Value::Object(map)) =
+                            serde_json::from_str::<serde_json::Value>(&headers_json)
+                        {
+                            for (k, v) in map {
+                                if let Some(val) = v.as_str() {
+                                    req = req.header(k, val);
+                                }
+                            }
+                        }
                     }
                     match req.send() {
                         Ok(resp) => {

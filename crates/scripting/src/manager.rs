@@ -580,11 +580,28 @@ impl ScriptManager {
             .as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf());
+        // Recargar = REEMPLAZAR: descargar cualquier instancia previa con el
+        // mismo nombre antes de crear la nueva. Sin esto, cada `/loadscript`
+        // acumulaba una instancia más y los eventos se disparaban N veces.
+        let previous: Vec<ScriptId> = self
+            .scripts
+            .lock()
+            .values()
+            .filter(|s| s.name == name)
+            .map(|s| s.id)
+            .collect();
+        for id in previous {
+            self.unload(id);
+        }
+
         let script = Arc::new(Script::new(name.to_string(), path));
         let mut ctx = make_context(self.app.clone());
         if let Some(dir) = &script_dir {
             crate::api::set_script_dir(&mut ctx, &dir.to_string_lossy());
         }
+        // Atribuir al script los recursos globales que registre (líneas de
+        // /help, timers), para poder limpiarlos cuando se descargue.
+        crate::api::set_script_name(&mut ctx, name);
 
         if let Err(e) = eval_script(&mut ctx, source) {
             error!("script '{}': {}", name, e);
@@ -597,9 +614,13 @@ impl ScriptManager {
             return Err(e);
         }
 
-        let onload_result = call_void_handler(&mut ctx, "onLoad", &[], |_| crate::types::ArgKind::Str);
-        if let Err(e) = onload_result {
-            warn!("script '{}' onLoad() error: {}", name, e);
+        // Un error en onLoad NO impide que el script maneje eventos (igual
+        // que sb0t), pero debe ser VISIBLE: antes solo iba al log del server
+        // y desde el chat parecía que "onLoad no se ejecuta".
+        if let Err(e) = call_void_handler(&mut ctx, "onLoad", &[], |_| crate::types::ArgKind::Str) {
+            error!("script '{}' onLoad() error: {}", name, e);
+            script.set_error(e.clone());
+            notify_error_subscribers(&self.app, name, &format!("onLoad: {}", e));
         }
 
         *script.context.lock() = Some(ctx);
@@ -618,6 +639,11 @@ impl ScriptManager {
                 unregister_context(ctx);
             }
             script.set_state(ScriptLifecycle::Unloaded);
+            // Limpiar los recursos globales que dejó registrados: si no, sus
+            // líneas de /help siguen apareciendo y sus timers repetitivos se
+            // re-encolan para siempre aunque el script ya no exista.
+            crate::api::clear_help_lines_for(script.name());
+            crate::api::clear_timers_for(script.name());
             info!("script descargado: {} (id={:?})", script.name(), id);
             true
         } else {
@@ -661,6 +687,7 @@ impl ScriptManager {
                     fn_name: timer.fn_name.clone(),
                     fire_at: now + std::time::Duration::from_secs(1),
                     repeat: true,
+                    script: timer.script.clone(),
                 };
                 ACTIVE_TIMERS.with(|t| t.borrow_mut().insert(timer.id));
                 crate::api::push_pending_timer(next);
@@ -771,12 +798,23 @@ impl ScriptManager {
                 return;
             }
             ScriptRequest::KillScript { name, reply } => {
-                let result = match self.get_by_name(&name) {
-                    Some(script) => {
-                        self.unload(script.id);
-                        Ok(())
+                // TODAS las instancias con ese nombre (no solo la primera:
+                // un bug previo de `load_source` podía dejar duplicados, y
+                // matar una sola dejaba las demás vivas).
+                let ids: Vec<ScriptId> = self
+                    .scripts
+                    .lock()
+                    .values()
+                    .filter(|s| s.name == name)
+                    .map(|s| s.id)
+                    .collect();
+                let result = if ids.is_empty() {
+                    Err(format!("script '{}' no encontrado", name))
+                } else {
+                    for id in ids {
+                        self.unload(id);
                     }
-                    None => Err(format!("script '{}' no encontrado", name)),
+                    Ok(())
                 };
                 let _ = reply.send(result);
                 return;
@@ -830,6 +868,11 @@ impl ScriptManager {
                     Ok(_) => {} // true/undefined/sin handler → no afecta
                     Err(e) => {
                         warn!("script '{}': error en {}: {}", script.name(), handler_name, e);
+                        notify_error_subscribers(
+                            &self.app,
+                            script.name(),
+                            &format!("{}: {}", handler_name, e),
+                        );
                     }
                 }
             }
@@ -868,6 +911,11 @@ impl ScriptManager {
                     Ok(_) => {}
                     Err(e) => {
                         warn!("script '{}': error en {}: {}", script.name(), handler_name, e);
+                        notify_error_subscribers(
+                            &self.app,
+                            script.name(),
+                            &format!("{}: {}", handler_name, e),
+                        );
                     }
                 }
             }
@@ -1809,6 +1857,241 @@ mod tests {
         });
         let text = result.expect("permitido");
         assert!(text.contains("[a]") && text.contains("[b]"), "encadenado: {text}");
+    }
+
+    /// Los scripts de ejemplo de `data/scripts/` deben cargar sin errores y
+    /// sus handlers deben ser invocables (evita que queden con firmas viejas
+    /// tras un cambio de API, como pasó con onUserJoin/onCommand de 3 args).
+    #[test]
+    fn bundled_example_scripts_load_and_run() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("data/scripts");
+        if !root.is_dir() {
+            return; // sin scripts de ejemplo en este checkout
+        }
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&root).expect("read scripts dir") {
+            let path = entry.expect("entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("js") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("read script");
+            let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            let mgr = make_manager();
+            let id = mgr
+                .load_source(&name, None, &src)
+                .unwrap_or_else(|e| panic!("script '{}' no carga: {}", name, e));
+
+            // `load_source` solo LOGUEA los errores de runtime de onLoad (el
+            // script queda activo igual), así que hay que invocar los
+            // handlers y verificar el Result — si no, este test pasaría con
+            // un script que revienta en cada evento.
+            let script = mgr.get(id).expect("script cargado");
+            let mut guard = script.context.lock();
+            let ctx = guard.as_mut().expect("contexto");
+
+            // Se usan los MISMOS ArgKind que en producción (arg 0 = objeto
+            // user, etc.); con Str plano el user llegaría como string y
+            // `user.sendPM(...)` no existiría.
+            let mut run = |handler: &str, args: &[String], kind: fn(usize) -> crate::types::ArgKind| {
+                if let Err(e) = call_handler_with_return(ctx, handler, args, kind) {
+                    panic!("script '{}': {} falló: {}", name, handler, e);
+                }
+            };
+            use crate::types::ArgKind;
+            let user0 = |i: usize| if i == 0 { ArgKind::User } else { ArgKind::Str };
+            let cmd_kind = |i: usize| match i {
+                0 | 2 => ArgKind::User,
+                _ => ArgKind::Str,
+            };
+            run("onLoad", &[], |_| ArgKind::Str);
+            run("onJoin", &["Alice".into()], user0);
+            run("onJoinCheck", &["Alice".into(), "127.0.0.1".into()], user0);
+            run("onHelp", &["Alice".into()], user0);
+            run("onTextBefore", &["Alice".into(), "que feo dia".into()], user0);
+            run("onVroomJoinCheck", &["Alice".into(), "9".into()], user0);
+            run(
+                "onCommand",
+                &["Alice".into(), "pruebas".into(), String::new(), "target".into()],
+                cmd_kind,
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no se verificó ningún script de data/scripts/");
+    }
+
+    #[test]
+    fn repro_onload_runs_on_load_and_no_duplicate_instances() {
+        let mgr = make_manager();
+        // onLoad deja una marca observable en el contexto del script.
+        let src = r#"
+            var CARGAS = 0;
+            function onLoad(){ CARGAS = 1; }
+            function onJoin(u){ CARGAS = CARGAS + 10; }
+            function probe(){ return "" + CARGAS; }
+        "#;
+
+        // Lee la marca del script vivo con ese nombre.
+        let probe = |mgr: &ScriptManager| -> String {
+            let script = mgr.get_by_name("dup").expect("script vivo");
+            let mut g = script.context.lock();
+            let ctx = g.as_mut().unwrap();
+            match call_handler_with_return(ctx, "probe", &[], |_| crate::types::ArgKind::Str) {
+                Ok(HandlerReturn::Text(t)) => t,
+                other => panic!("probe inesperado: {:?}", other.is_ok()),
+            }
+        };
+
+        mgr.load_source("dup", None, src).unwrap();
+        // (a) onLoad debe haber corrido al cargar.
+        assert_eq!(probe(&mgr), "1", "onLoad no corrió al cargar el script");
+
+        // (b) cargar 3 veces el mismo nombre → UNA sola instancia viva.
+        mgr.load_source("dup", None, src).unwrap();
+        mgr.load_source("dup", None, src).unwrap();
+        let dups = mgr.scripts.lock().values().filter(|s| s.name == "dup").count();
+        assert_eq!(dups, 1, "el script quedó cargado {} veces (debe reemplazar la instancia anterior)", dups);
+
+        // (c) y los eventos deben dispararse UNA sola vez.
+        mgr.dispatch(&ScriptEvent::Join {
+            name: "Alice".into(),
+            ip: "127.0.0.1".into(),
+        });
+        assert_eq!(probe(&mgr), "11", "onJoin corrió más de una vez (instancias duplicadas)");
+    }
+
+    /// Reproduce lo que ve el usuario: `#loadscript` de un script cuyo
+    /// `onLoad` hace `print(...)` — el texto debe llegar a la sala.
+    #[test]
+    fn repro_onload_print_reaches_room() {
+        use server_core::user_pool::AresUser;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let db = Database::in_memory().unwrap();
+        let app = Arc::new(AppContext::new(Settings::default(), db));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
+        let mut u = AresUser::new(1, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), [1u8; 16]);
+        u.logged_in = true;
+        u.sender = Some(tx);
+        *u.name.write() = "Alice".to_string();
+        app.user_pool.add(Arc::new(u));
+
+        let mgr = ScriptManager::new(app, std::env::temp_dir().join("astra_scripts_test2"));
+        mgr.load_source("hola", None, r#"function onLoad(){ print("script cargado!"); }"#)
+            .unwrap();
+
+        let pkt = rx
+            .try_recv()
+            .expect("onLoad debió imprimir a la sala al cargar el script");
+        assert!(!pkt.is_empty());
+    }
+
+    #[test]
+    fn killscript_removes_all_instances_and_cleans_resources() {
+        let mgr = make_manager();
+        let src = r#"
+            function onLoad(){ Help_addLine("mio", "linea del script"); setTimer(60, "tick"); }
+            function tick(){}
+        "#;
+        mgr.load_source("victima", None, src).unwrap();
+        assert!(
+            crate::api::extra_help_lines().iter().any(|(c, _)| c == "mio"),
+            "el script debió registrar su línea de /help"
+        );
+
+        // killscript debe dejar CERO instancias…
+        let (tx, rx) = std_mpsc::sync_channel::<Result<(), String>>(1);
+        mgr.dispatch_request(ScriptRequest::KillScript {
+            name: "victima".into(),
+            reply: tx,
+        });
+        rx.recv_timeout(Duration::from_millis(500))
+            .expect("reply")
+            .expect("killscript ok");
+        assert!(mgr.get_by_name("victima").is_none(), "quedó una instancia viva");
+
+        // …y limpiar los recursos que dejó registrados (si no, sus líneas de
+        // /help siguen apareciendo y sus timers se re-encolan para siempre).
+        assert!(
+            !crate::api::extra_help_lines().iter().any(|(c, _)| c == "mio"),
+            "las líneas de /help del script muerto siguen ahí"
+        );
+    }
+
+    #[test]
+    fn onload_error_is_reported_not_swallowed() {
+        // Un onLoad que revienta no debe fallar en silencio: el script queda
+        // cargado (como sb0t) pero con el error registrado y notificado.
+        let mgr = make_manager();
+        let id = mgr
+            .load_source("roto", None, "function onLoad(){ no_existe_esto(); }")
+            .expect("el script carga igual");
+        let script = mgr.get(id).expect("script");
+        let err = script.last_error().expect("el error de onLoad debe quedar registrado");
+        assert!(err.contains("no_existe_esto"), "error inesperado: {err}");
+    }
+
+    /// E2E de `#errors on`: un usuario suscrito debe RECIBIR por PM los
+    /// errores de los scripts — tanto los de carga (eval) como los de
+    /// `onLoad` y los de los handlers en runtime. Antes, los de onLoad y los
+    /// de los hooks solo iban al log del server y el chat no mostraba nada.
+    #[test]
+    fn errors_subscription_delivers_script_errors() {
+        use server_core::user_pool::AresUser;
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let db = Database::in_memory().unwrap();
+        let app = Arc::new(AppContext::new(Settings::default(), db));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
+        let mut u = AresUser::new(1, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), [1u8; 16]);
+        u.logged_in = true;
+        u.sender = Some(tx);
+        *u.name.write() = "Admin".to_string();
+        let admin = Arc::new(u);
+        admin.sub_errors.store(true, Relaxed); // == #errors on
+        app.user_pool.add(admin.clone());
+
+        let mgr = ScriptManager::new(app, std::env::temp_dir().join("astra_scripts_test3"));
+
+        // (a) error de RUNTIME en onLoad → el admin lo recibe.
+        mgr.load_source("roto", None, "function onLoad(){ boom_no_existe(); }")
+            .expect("el script carga igual");
+        assert!(
+            rx.try_recv().is_ok(),
+            "#errors on no entregó el error de onLoad"
+        );
+
+        // (b) error dentro de un hook (onTextBefore) → también.
+        mgr.load_source(
+            "roto2",
+            None,
+            "function onTextBefore(u, t){ otra_boom(); return t; }",
+        )
+        .unwrap();
+        while rx.try_recv().is_ok() {} // drenar
+        let (rtx, rrx) = std_mpsc::sync_channel::<Option<String>>(1);
+        mgr.dispatch_request(ScriptRequest::TextBefore {
+            from: "Admin".into(),
+            text: "hola".into(),
+            reply: rtx,
+        });
+        let _ = rrx.recv_timeout(Duration::from_millis(500));
+        assert!(
+            rx.try_recv().is_ok(),
+            "#errors on no entregó el error de onTextBefore"
+        );
+
+        // (c) error de SINTAXIS al cargar → también.
+        while rx.try_recv().is_ok() {}
+        let _ = mgr.load_source("roto3", None, "function ( { sintaxis mala");
+        assert!(
+            rx.try_recv().is_ok(),
+            "#errors on no entregó el error de carga"
+        );
     }
 
     #[test]

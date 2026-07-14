@@ -202,6 +202,13 @@ async fn main() -> anyhow::Result<()> {
         "scripting inicializado en {} (handle Send + Clone para dispatchear eventos)",
         scripts_dir.display()
     );
+    // Gate de vroom (onVroomJoinCheck): server-core no puede depender del
+    // scripting, así que se inyecta como closure (mismo patrón que
+    // ScriptingHooks).
+    {
+        let h = scripting.clone();
+        ctx.set_vroom_check(Box::new(move |name, vroom| h.check_vroom_join(name, vroom)));
+    }
 
     // Hooks para que /listscripts, /loadscript y /killscript (crates/commands)
     // puedan hablar con el ScriptManager sin que server-core dependa de

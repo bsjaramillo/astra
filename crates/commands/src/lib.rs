@@ -1040,6 +1040,15 @@ fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Vec<astra
         return vec![];
     }
 
+    // Gate de scripts (onVroomJoinCheck, paridad sb0t): un script puede
+    // rechazar el cambio. Silencioso, como sb0t.
+    {
+        let uname = user.name.read().clone();
+        if !ctx.check_vroom_join(&uname, new_vroom) {
+            return vec![];
+        }
+    }
+
     // Auto-crear el vroom destino si no existe (compat con sb0t)
     if ctx.vrooms.get(new_vroom).is_none() {
         let _ = ctx.vrooms.create(new_vroom, None, None);

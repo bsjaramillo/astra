@@ -1,69 +1,77 @@
 // greet.js — Script de ejemplo para Astra
 //
-// Handlers disponibles (compatibles con sb0t):
-//   onLoad()            - al cargar
-//   onUserJoin(name, ip) - cuando un user se une
-//   onUserPart(name)    - cuando un user se va
-//   onPublic(from, text) - mensaje público
-//   onEmote(from, text)  - emote
-//   onPrivate(from, to, text) - PM
-//   onCommand(from, cmd, args) - comando slash
+// Handlers (nombres y firmas de sb0t):
+//   onLoad()                              - al cargar el script
+//   onJoin(user)                          - un usuario entró
+//   onJoinCheck(user, ip)                 - return false RECHAZA el join
+//   onPart(user)                          - un usuario se fue
+//   onTextReceived(user, text)            - mensaje público (post-broadcast)
+//   onTextBefore(user, text)              - return string REESCRIBE el texto,
+//                                           false/null/"" lo CANCELA
+//   onEmoteReceived(user, text)           - emote
+//   onPM(user, target)                    - PM entre usuarios
+//   onCommand(user, command, target, args)- comando (#cmd o /cmd).
+//                                           `target` = usuario del 1er token
+//                                           de args (objeto user) o null.
+//   onHelp(user)                          - el usuario pidió ayuda
+//
+// El primer argumento es un OBJETO user: tiene .name, .id, .level, .vroom,
+// .externalIp, etc., métodos .ban()/.kick()/.sendPM()/.sendText(), y setters
+// (.vroom = 2, .customName = "X", .level = 50, .muzzled = true).
+// En contexto string se comporta como su nombre ("" + user == user.name).
 
 function onLoad() {
     print("greet.js cargado!");
 }
 
-// Saluda a cada usuario que se une.
-function onUserJoin(name, ip) {
-    print("[" + name + "] se unio desde " + ip);
-    // El user es anonimo por default → PM de bienvenida
-    sendPM("Bot", name, "Bienvenido a la sala! Escribe /help para ver los comandos.");
+// Saluda a cada usuario que entra.
+function onJoin(user) {
+    print("[" + user.name + "] entró desde " + user.externalIp);
+    user.sendPM("Bienvenido a la sala! Escribe #help para ver los comandos.");
 }
 
-// Se despide.
-function onUserPart(name) {
-    print("[" + name + "] se fue");
+function onPart(user) {
+    print("[" + user.name + "] se fue");
 }
 
 // Log de mensajes públicos.
-function onPublic(from, text) {
-    print("[public] " + from + ": " + text);
+function onTextReceived(user, text) {
+    print("[public] " + user.name + ": " + text);
 }
 
-// Comandos slash custom.
-function onCommand(from, command, args) {
+// Líneas propias en el #help (se muestran junto a las del server).
+function onHelp(user) {
+    user.sendPM("/hola - saludo del bot");
+    user.sendPM("/quien <nick> - info de un usuario");
+}
+
+// Comandos custom. OJO: la firma tiene 4 argumentos (paridad sb0t).
+function onCommand(user, command, target, args) {
     if (command === "hola") {
-        sendPublic("Bot", "Hola " + from + "!");
+        print("Hola " + user.name + "!");
     } else if (command === "usuarios") {
-        sendPublic("Bot", "Somos " + userCount() + " usuarios");
+        print("Somos " + Users.count() + " usuarios");
     } else if (command === "quien") {
-        var name = args.trim();
-        if (name.length === 0) {
-            sendPublic("Bot", "uso: /quien <nick>");
+        // `target` ya viene resuelto si el 1er token de args es un usuario.
+        if (target == null) {
+            user.sendPM("uso: /quien <nick de alguien conectado>");
             return;
         }
-        if (!userExists(name)) {
-            sendPublic("Bot", name + " no esta conectado");
-            return;
-        }
-        var ip = getUserIp(name);
-        var level = getUserLevel(name);
-        sendPublic("Bot", name + " → ip=" + ip + " nivel=" + level);
+        user.sendPM(target.name + " → ip=" + target.externalIp +
+                    " nivel=" + target.level + " vroom=" + target.vroom);
     } else if (command === "topico") {
         if (args.length > 0) {
-            setTopic(args);
-            sendPublic("Bot", "Topic actualizado.");
+            Room.setTopic(args);
+            print("Topic actualizado.");
         } else {
-            sendPublic("Bot", "Topic actual: " + getTopic());
+            user.sendPM("Topic actual: " + Room.topic());
         }
     } else if (command === "hash") {
         if (args.length === 0) {
-            sendPublic("Bot", "uso: /hash <texto>");
+            user.sendPM("uso: /hash <texto>");
             return;
         }
-        sendPM("Bot", from,
-            "SHA1: " + astraHash(args) + "\n" +
-            "MD5:  " + astraMd5(args)
-        );
+        user.sendPM("SHA1: " + Crypto.hashSHA1(args));
+        user.sendPM("MD5:  " + Crypto.hashMD5(args));
     }
 }
