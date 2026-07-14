@@ -173,6 +173,12 @@ pub async fn handle_tcp_client(
         ip: user.external_ip.to_string(),
     });
 
+    // Autologin al entrar (paridad sb0t `Joined()`: corre `AutoLogin.GetLevel`
+    // para TODOS los que entran y les aplica el nivel). Antes esto solo pasaba
+    // si el cliente mandaba el opcode `ClientAutologin` — los clientes que no
+    // lo mandan entraban como regulares aunque tuvieran autologin.
+    let _ = astra_commands::dispatch_autologin(&ctx, &user);
+
     // Greet de bienvenida (PM del bot al usuario que entra)
     send_greet(&ctx, &user);
     // MOTD (message of the day), tras el greet.

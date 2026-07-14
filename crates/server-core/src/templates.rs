@@ -107,6 +107,9 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     // Whowas (Category.WhoWas de sb0t)
     ("whowas.entry", "whowas: +n +ip +v +t"),
     ("whowas.none", "no results were found containing +n"),
+    // Autologin (AdminLogin #4/#5 de sb0t)
+    ("autologin.added", "+n has been added to auto login as a level +l admin"),
+    ("autologin.removed", "+n has been removed from auto login"),
     // Locate (Category.Locate de sb0t: quién está en qué vroom)
     ("locate.header", "vroom location list"),
     ("locate.entry", "+n is currently in vroom +v"),

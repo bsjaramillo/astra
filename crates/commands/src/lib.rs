@@ -1991,19 +1991,38 @@ fn handle_addautologin(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     let mut parts = args.rsplitn(2, char::is_whitespace);
     let level_str = parts.next().unwrap_or("");
     let target_name = parts.next().unwrap_or("").trim();
-    let Some(level) = parse_level(level_str) else {
-        send_system_line(ctx, user, "Usage: /addautologin <nick> <moderator|admin>");
-        return;
+    // Escala de sb0t (`Eval.AddAutologin`): 1 = moderator, 2 = admin,
+    // 3 = host. OJO: NO es la escala de `/grant` (donde "1" es regular y
+    // "2" voice) — `#addautologin bob 1` en sb0t da MODERADOR.
+    let level = match level_str {
+        "1" => ILevel::Moderator,
+        "2" => ILevel::Admin,
+        "3" => ILevel::Owner,
+        // Extra de Astra: aceptar también los nombres.
+        other => match parse_level(other) {
+            Some(l) if (l as u8) >= ILevel::Moderator as u8 => l,
+            _ => {
+                send_system_line(ctx, user, "Usage: /addautologin <nick> <1-3>  (1=moderator, 2=admin, 3=host)");
+                return;
+            }
+        },
     };
     if target_name.is_empty() {
-        send_system_line(ctx, user, "Usage: /addautologin <nick> <moderator|admin>");
+        send_system_line(ctx, user, "Usage: /addautologin <nick> <1-3>  (1=moderator, 2=admin, 3=host)");
         return;
     }
     let Some(target) = ctx.user_pool.get_by_name(target_name) else {
-        send_system_line(ctx, user, "User not found.");
+        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
         return;
     };
     let name = target.name.read().clone();
+    // El nivel se MUESTRA en la escala de sb0t (1-3), aunque internamente
+    // Astra use 50/80/100.
+    let sb0t_level = match level {
+        ILevel::Owner => 3,
+        ILevel::Admin => 2,
+        _ => 1,
+    };
     match ctx.ip_autologins.add(&target.guid, &name, level, target.external_ip) {
         Ok(()) => {
             let msg = format!(
@@ -2011,14 +2030,51 @@ fn handle_addautologin(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
                 level as u8,
                 level_name(level)
             );
-            apply_level(ctx, user, &target, level, &msg);
+            // Aplica el nivel AHORA (con el opchange + refresh de userlist).
+            // `apply_level` retorna false si ya tenía ese nivel: en ese caso
+            // igual hay que refrescarle el estado al cliente, porque el
+            // autologin recién creado es lo que el admin quiere ver aplicado.
+            if !apply_level(ctx, user, &target, level, &msg) {
+                push_level_refresh(ctx, &target);
+            }
+            // Anuncio a la sala (AdminLogin#4 de sb0t).
+            ctx.broadcast_print(&ctx.templates.render(
+                "autologin.added",
+                &[("+n", &name), ("+l", &sb0t_level.to_string())],
+            ));
             send_system_line(
                 ctx,
                 user,
-                &format!("'{}' added to IP autologin as {} ({}).", name, level as u8, level_name(level)),
+                &format!("'{}' added to IP autologin as {} ({}).", name, sb0t_level, level_name(level)),
             );
         }
         Err(e) => send_system_line(ctx, user, &format!("Failed: {}", e)),
+    }
+}
+
+/// Reenvía al cliente su nivel actual: el paquete de "admin login"
+/// (opchange) y un refresh de su entrada en la userlist de la sala. Se usa
+/// cuando el nivel no cambió pero el cliente necesita verlo aplicado.
+fn push_level_refresh(ctx: &AppContext, target: &Arc<AresUser>) {
+    let level = *target.level.read();
+    let _ = target.send(outbound::build_opchange(
+        level as u8 >= ILevel::Moderator as u8,
+    ));
+    let name = target.name.read().clone();
+    let vroom = *target.vroom.read();
+    let ws_msg = format!("UPDATE:{},1:{}{}", name.encode_utf16().count(), name, level as u8);
+    for u in ctx.user_pool.users() {
+        if !u.logged_in
+            || *u.vroom.read() != vroom
+            || u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            let _ = tx.send(ws_msg.clone());
+        } else {
+            let _ = u.send(outbound::build_join_or_userlist_c(target, u.ares_crypto));
+        }
     }
 }
 
@@ -2034,7 +2090,7 @@ fn handle_remautologin(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Usage: /remautologin <id>");
         return;
     };
-    let Some((guid_hex_str, ip)) = ctx.ip_autologins.remove(id) else {
+    let Some((guid_hex_str, ip, entry_name)) = ctx.ip_autologins.remove(id) else {
         send_system_line(ctx, user, "No autologin entry with that id.");
         return;
     };
@@ -2052,6 +2108,11 @@ fn handle_remautologin(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
             );
         }
     }
+    // Anuncio a la sala (AdminLogin#5 de sb0t).
+    ctx.broadcast_print(
+        &ctx.templates
+            .render("autologin.removed", &[("+n", &entry_name)]),
+    );
     send_system_line(ctx, user, "Autologin entry removed.");
 }
 
@@ -5604,6 +5665,91 @@ mod tests {
         // Substrings vetados (paridad sb0t): no se aplican.
         let _ = dispatch_builtin(&ctx, &carol, "customname", "visit www.spam.com");
         assert_eq!(carol.custom_name.read().clone(), Some("Cazadora".to_string()));
+    }
+
+    #[test]
+    fn builtin_addautologin_uses_sb0t_scale_and_pushes_level() {
+        let ctx = make_test_ctx();
+        let (owner, mut owner_rx) = make_test_user(1, "Owner");
+        *owner.level.write() = ILevel::Owner;
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(owner.clone());
+        ctx.user_pool.add(bob.clone());
+
+        // Escala sb0t: 1 = MODERATOR (no "regular", como interpretaba
+        // /grant). Este era el bug: `#addautologin Bob 1` dejaba a Bob en
+        // Regular y, al no cambiar el nivel, no se le enviaba nada.
+        let (handled, _) = dispatch_builtin(&ctx, &owner, "addautologin", "Bob 1");
+        assert!(handled);
+        assert_eq!(*bob.level.read(), ILevel::Moderator, "1 debe ser moderator");
+
+        // Bob debe recibir el paquete de op-change (el "paquete de
+        // actualización de login") además del aviso.
+        let mut got_opchange = false;
+        while let Ok(pkt) = bob_rx.try_recv() {
+            if pkt[0] == TcpMsg::ServerOpChange as u8 {
+                got_opchange = true;
+            }
+        }
+        assert!(got_opchange, "Bob no recibió el paquete de op-change");
+
+        // Y la sala ve el anuncio (AdminLogin#4 de sb0t).
+        let mut lines = Vec::new();
+        while let Ok(pkt) = owner_rx.try_recv() {
+            if pkt[0] == TcpMsg::Pmt as u8 {
+                let (_f, t) = decode_pvt(pkt);
+                lines.push(t);
+            }
+        }
+        assert!(
+            lines.iter().any(|t| t == "Bob has been added to auto login as a level 1 admin"),
+            "no se anunció el autologin a la sala; llegó: {:?}",
+            lines
+        );
+
+        // Persistido con el nivel correcto → se restaura al reingresar.
+        let level = ctx
+            .ip_autologins
+            .get_level(&bob.guid, bob.external_ip)
+            .expect("entrada de autologin");
+        assert_eq!(level, ILevel::Moderator);
+
+        // 2 = admin, 3 = host (escala sb0t).
+        let _ = dispatch_builtin(&ctx, &owner, "addautologin", "Bob 2");
+        assert_eq!(*bob.level.read(), ILevel::Admin);
+        let _ = dispatch_builtin(&ctx, &owner, "addautologin", "Bob 3");
+        assert_eq!(*bob.level.read(), ILevel::Owner);
+    }
+
+    #[test]
+    fn dispatch_autologin_restores_level_on_rejoin() {
+        // Paridad sb0t `Joined()`: al entrar, el nivel del autologin se
+        // aplica (y se le manda el op-change), sin depender de que el
+        // cliente mande el opcode ClientAutologin.
+        let ctx = make_test_ctx();
+        let (owner, _o_rx) = make_test_user(1, "Owner");
+        *owner.level.write() = ILevel::Owner;
+        let (bob, _b_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(owner.clone());
+        ctx.user_pool.add(bob.clone());
+        let _ = dispatch_builtin(&ctx, &owner, "addautologin", "Bob 2");
+
+        // Bob se reconecta (mismo guid/IP, nueva sesión regular).
+        ctx.user_pool.remove(bob.id);
+        let (bob2, mut bob2_rx) = make_test_user(2, "Bob");
+        assert!((*bob2.level.read() as u8) < ILevel::Moderator as u8);
+        ctx.user_pool.add(bob2.clone());
+
+        assert!(dispatch_autologin(&ctx, &bob2), "el autologin debió aplicarse");
+        assert_eq!(*bob2.level.read(), ILevel::Admin, "nivel no restaurado al reingresar");
+
+        let mut got_opchange = false;
+        while let Ok(pkt) = bob2_rx.try_recv() {
+            if pkt[0] == TcpMsg::ServerOpChange as u8 {
+                got_opchange = true;
+            }
+        }
+        assert!(got_opchange, "no se envió el op-change al reingresar");
     }
 
     #[test]

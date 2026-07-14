@@ -92,8 +92,9 @@ impl IpAutologinManager {
     /// deliberadamente no permite auto-otorgar el nivel más alto vía mero
     /// reconocimiento de IP.
     pub fn add(&self, guid: &[u8; 16], name: &str, level: ILevel, ip: IpAddr) -> Result<(), String> {
-        if !matches!(level, ILevel::Moderator | ILevel::Admin) {
-            return Err("level must be moderator or admin".to_string());
+        // sb0t (`Eval.AddAutologin`) acepta 1-3 = moderator/admin/host.
+        if !matches!(level, ILevel::Moderator | ILevel::Admin | ILevel::Owner) {
+            return Err("level must be moderator, admin or host".to_string());
         }
         let guid_str = guid_hex(guid);
         let mut entries = self.entries.write();
@@ -179,12 +180,12 @@ impl IpAutologinManager {
     /// Elimina una entrada por id. Retorna `(guid, ip)` (para que el
     /// caller pueda degradar a Regular a cualquier usuario conectado que
     /// matchee, paridad `AutoLogin.Remove` de sb0t).
-    pub fn remove(&self, id: i64) -> Option<(String, IpAddr)> {
+    pub fn remove(&self, id: i64) -> Option<(String, IpAddr, String)> {
         let mut entries = self.entries.write();
         let pos = entries.iter().position(|e| e.id == id)?;
         let entry = entries.remove(pos);
         let _ = self.db.remove_ip_autologin(id);
-        Some((entry.guid, entry.ip))
+        Some((entry.guid, entry.ip, entry.name))
     }
 
     /// Lista `(id, name, ip, level)` en el orden en que fueron creadas.
@@ -247,11 +248,15 @@ mod tests {
     }
 
     #[test]
-    fn owner_and_regular_rejected() {
+    fn accepts_sb0t_levels_1_to_3_and_rejects_the_rest() {
+        // sb0t `Eval.AddAutologin` acepta 1-3 = moderator/admin/host.
         let mgr = IpAutologinManager::new(mem_db());
         let guid = [5u8; 16];
-        assert!(mgr.add(&guid, "Dave", ILevel::Owner, ip("1.1.1.1")).is_err());
+        assert!(mgr.add(&guid, "Dave", ILevel::Moderator, ip("1.1.1.1")).is_ok());
+        assert!(mgr.add(&guid, "Dave", ILevel::Admin, ip("1.1.1.1")).is_ok());
+        assert!(mgr.add(&guid, "Dave", ILevel::Owner, ip("1.1.1.1")).is_ok());
         assert!(mgr.add(&guid, "Dave", ILevel::Regular, ip("1.1.1.1")).is_err());
+        assert!(mgr.add(&guid, "Dave", ILevel::Voice, ip("1.1.1.1")).is_err());
     }
 
     #[test]
