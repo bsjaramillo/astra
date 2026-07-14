@@ -56,30 +56,58 @@ use crate::types::{Script, ScriptEvent, ScriptId, ScriptState as ScriptLifecycle
 /// ejecuta la función JS correspondiente, captura el return value (bool)
 /// y lo envía de vuelta.
 pub enum ScriptRequest {
-    /// Hook pre-mensaje público. `reply.send(true)` → proceder, `false` → cancelar.
+    /// Hook pre-mensaje público. Reply: `None` = cancelado por un script;
+    /// `Some(texto)` = proceder con ese texto (posiblemente REESCRITO —
+    /// paridad sb0t: `onTextBefore` retorna el string encadenado entre
+    /// scripts; retornar `false`/`null`/`""` cancela).
     TextBefore {
         from: String,
         text: String,
-        reply: std_mpsc::SyncSender<bool>,
+        reply: std_mpsc::SyncSender<Option<String>>,
     },
-    /// Hook pre-emote.
+    /// Hook pre-emote (misma semántica de reescritura que TextBefore).
     EmoteBefore {
         from: String,
         text: String,
-        reply: std_mpsc::SyncSender<bool>,
+        reply: std_mpsc::SyncSender<Option<String>>,
     },
-    /// Hook pre-PM.
+    /// Hook pre-PM (misma semántica de reescritura que TextBefore).
     PMBefore {
         from: String,
         to: String,
         text: String,
-        reply: std_mpsc::SyncSender<bool>,
+        reply: std_mpsc::SyncSender<Option<String>>,
     },
     /// Hook gate de scribble. `reply.send(false)` → rechazar el scribble.
     ScribbleCheck {
         from: String,
         is_pm: bool,
         reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de login (paridad sb0t `Joining`): `false` → rechazar el join.
+    JoinCheck {
+        name: String,
+        ip: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de cambio de vroom (paridad `VroomJoinCheck`).
+    VroomJoinCheck {
+        name: String,
+        vroom: u16,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de castigo por flood (paridad `Flooding`): `false` → perdonar.
+    FloodBefore {
+        name: String,
+        msg: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Eval inline de chat (`@código`, paridad sb0t TextSending): evalúa
+    /// `code` en el primer script activo con `userobj` preseteado al emisor.
+    EvalChat {
+        name: String,
+        code: String,
+        reply: std_mpsc::SyncSender<Result<(), String>>,
     },
     /// Lista los nombres de los scripts cargados (`/listscripts`).
     ListScripts {
@@ -107,7 +135,11 @@ impl ScriptRequest {
             ScriptRequest::EmoteBefore { .. } => "onEmoteBefore",
             ScriptRequest::PMBefore { .. } => "onPMBefore",
             ScriptRequest::ScribbleCheck { .. } => "onScribbleCheck",
-            ScriptRequest::ListScripts { .. }
+            ScriptRequest::JoinCheck { .. } => "onJoinCheck",
+            ScriptRequest::VroomJoinCheck { .. } => "onVroomJoinCheck",
+            ScriptRequest::FloodBefore { .. } => "onFloodBefore",
+            ScriptRequest::EvalChat { .. }
+            | ScriptRequest::ListScripts { .. }
             | ScriptRequest::LoadScript { .. }
             | ScriptRequest::KillScript { .. } => unreachable!("resuelto antes en dispatch_request"),
         }
@@ -144,7 +176,13 @@ impl ScriptRequest {
             ScriptRequest::ScribbleCheck { from, is_pm, .. } => {
                 vec![from.clone(), is_pm.to_string()]
             }
-            ScriptRequest::ListScripts { .. }
+            ScriptRequest::JoinCheck { name, ip, .. } => vec![name.clone(), ip.clone()],
+            ScriptRequest::VroomJoinCheck { name, vroom, .. } => {
+                vec![name.clone(), vroom.to_string()]
+            }
+            ScriptRequest::FloodBefore { name, msg, .. } => vec![name.clone(), msg.clone()],
+            ScriptRequest::EvalChat { .. }
+            | ScriptRequest::ListScripts { .. }
             | ScriptRequest::LoadScript { .. }
             | ScriptRequest::KillScript { .. } => unreachable!("resuelto antes en dispatch_request"),
         }
@@ -169,38 +207,72 @@ impl ScriptHandle {
     }
 
     /// Hook pre-mensaje público. Bloquea hasta 100ms esperando respuesta.
-    /// Retorna `true` si se debe proceder, `false` si algún script canceló.
-    pub fn check_text_before(&self, from: &str, text: &str) -> bool {
-        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+    /// Retorna `None` si algún script canceló; `Some(texto)` para proceder
+    /// (el texto puede venir REESCRITO por los scripts, paridad sb0t).
+    pub fn check_text_before(&self, from: &str, text: &str) -> Option<String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let request = ScriptRequest::TextBefore {
             from: from.to_string(),
             text: text.to_string(),
             reply: tx,
         };
-        self.send_and_wait(request, rx)
+        self.send_and_wait(request, rx, Some(text.to_string()))
     }
 
-    /// Hook pre-emote. Retorna `true` si se debe proceder.
-    pub fn check_emote_before(&self, from: &str, text: &str) -> bool {
-        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+    /// Hook pre-emote. Misma semántica de reescritura que `check_text_before`.
+    pub fn check_emote_before(&self, from: &str, text: &str) -> Option<String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let request = ScriptRequest::EmoteBefore {
             from: from.to_string(),
             text: text.to_string(),
             reply: tx,
         };
-        self.send_and_wait(request, rx)
+        self.send_and_wait(request, rx, Some(text.to_string()))
+    }
+
+    /// Gate de login (paridad sb0t `Joining`): `false` → rechazar el join.
+    pub fn check_join(&self, name: &str, ip: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::JoinCheck {
+            name: name.to_string(),
+            ip: ip.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
+    }
+
+    /// Gate de cambio de vroom. `false` → rechazar el cambio.
+    pub fn check_vroom_join(&self, name: &str, vroom: u16) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::VroomJoinCheck {
+            name: name.to_string(),
+            vroom,
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
+    }
+
+    /// Gate de castigo por flood. `false` → perdonar (no castigar).
+    pub fn check_flood(&self, name: &str, msg: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::FloodBefore {
+            name: name.to_string(),
+            msg: msg.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
     }
 
     /// Hook pre-PM. Retorna `true` si se debe proceder.
-    pub fn check_pm_before(&self, from: &str, to: &str, text: &str) -> bool {
-        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+    pub fn check_pm_before(&self, from: &str, to: &str, text: &str) -> Option<String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let request = ScriptRequest::PMBefore {
             from: from.to_string(),
             to: to.to_string(),
             text: text.to_string(),
             reply: tx,
         };
-        self.send_and_wait(request, rx)
+        self.send_and_wait(request, rx, Some(text.to_string()))
     }
 
     /// Hook gate de scribble. Retorna `false` si el scribble debe rechazarse.
@@ -211,15 +283,34 @@ impl ScriptHandle {
             is_pm,
             reply: tx,
         };
-        self.send_and_wait(request, rx)
+        self.send_and_wait(request, rx, true)
     }
 
-    fn send_and_wait(&self, request: ScriptRequest, rx: std_mpsc::Receiver<bool>) -> bool {
+    /// Eval inline de chat (`@código`): evalúa en el primer script activo
+    /// con `userobj` = el emisor. SOLO debe llamarse para usuarios Owner.
+    pub fn eval_chat(&self, name: &str, code: &str) -> Result<(), String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Result<(), String>>(1);
+        if self
+            .tx_req
+            .send(ScriptRequest::EvalChat {
+                name: name.to_string(),
+                code: code.to_string(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return Err("script manager down".to_string());
+        }
+        rx.recv_timeout(Duration::from_millis(500))
+            .unwrap_or_else(|_| Err("eval timeout".to_string()))
+    }
+
+    fn send_and_wait<T>(&self, request: ScriptRequest, rx: std_mpsc::Receiver<T>, fallback: T) -> T {
         if self.tx_req.send(request).is_err() {
-            return true; // manager down → allow
+            return fallback; // manager down → allow
         }
         // Esperar respuesta con timeout de 100ms
-        rx.recv_timeout(Duration::from_millis(100)).unwrap_or(true)
+        rx.recv_timeout(Duration::from_millis(100)).unwrap_or(fallback)
     }
 
     /// Lista los nombres de los scripts cargados (`/listscripts`).
@@ -660,6 +751,25 @@ impl ScriptManager {
                 let _ = reply.send(result);
                 return;
             }
+            ScriptRequest::EvalChat { name, code, reply } => {
+                let scripts = self.scripts.lock().clone();
+                let mut result = Err("no scripts loaded".to_string());
+                for (_, script) in scripts.iter() {
+                    if script.state() != ScriptLifecycle::Active {
+                        continue;
+                    }
+                    let mut ctx_guard = script.context.lock();
+                    if let Some(ctx) = ctx_guard.as_mut() {
+                        // `userobj` preseteado al emisor (paridad sb0t).
+                        let quoted = serde_json::to_string(&name).unwrap_or_else(|_| "\"\"".into());
+                        let js = format!("userobj = user({}); null; {}", quoted, code);
+                        result = eval_script(ctx, &js).map(|_| ());
+                    }
+                    break; // solo el primer script activo, como sb0t
+                }
+                let _ = reply.send(result);
+                return;
+            }
             ScriptRequest::KillScript { name, reply } => {
                 let result = match self.get_by_name(&name) {
                     Some(script) => {
@@ -675,25 +785,74 @@ impl ScriptManager {
         }
 
         let handler_name = request.handler_name();
+        let scripts = self.scripts.lock().clone();
+
+        // Grupo 1: hooks de TEXTO (reescritura encadenada, paridad sb0t
+        // `ServerEvents.TextSending`): cada script recibe el texto actual y
+        // puede retornar un string (reemplaza), false/null/"" (cancela), o
+        // true/undefined (no toca).
+        let (text_reply, mut current, prefix_args) = match &request {
+            ScriptRequest::TextBefore { from, text, reply } => {
+                (Some(reply.clone()), text.clone(), vec![from.clone()])
+            }
+            ScriptRequest::EmoteBefore { from, text, reply } => {
+                (Some(reply.clone()), text.clone(), vec![from.clone()])
+            }
+            ScriptRequest::PMBefore { from, to, text, reply } => {
+                (Some(reply.clone()), text.clone(), vec![from.clone(), to.clone()])
+            }
+            _ => (None, String::new(), vec![]),
+        };
+        if let Some(reply) = text_reply {
+            for (_, script) in scripts.iter() {
+                if script.state() != ScriptLifecycle::Active {
+                    continue;
+                }
+                let mut ctx_guard = script.context.lock();
+                let Some(ctx) = ctx_guard.as_mut() else { continue };
+                let mut args = prefix_args.clone();
+                args.push(current.clone());
+                match call_handler_with_return(ctx, handler_name, &args, |i| request.arg_kind(i)) {
+                    Ok(HandlerReturn::Bool(false)) | Ok(HandlerReturn::Null) => {
+                        debug!("script '{}' canceló via {}", script.name(), handler_name);
+                        let _ = reply.send(None);
+                        return;
+                    }
+                    Ok(HandlerReturn::Text(t)) => {
+                        if t.is_empty() {
+                            // sb0t: IsNullOrEmpty(result) → cancelar.
+                            debug!("script '{}' vació el texto via {}", script.name(), handler_name);
+                            let _ = reply.send(None);
+                            return;
+                        }
+                        current = t;
+                    }
+                    Ok(_) => {} // true/undefined/sin handler → no afecta
+                    Err(e) => {
+                        warn!("script '{}': error en {}: {}", script.name(), handler_name, e);
+                    }
+                }
+            }
+            let _ = reply.send(Some(current));
+            return;
+        }
+
+        // Grupo 2: gates booleanos (ScribbleCheck/JoinCheck/VroomJoinCheck/
+        // FloodBefore): si algún script retorna false, se cancela.
         let args = request.args();
         let reply = match &request {
-            ScriptRequest::TextBefore { reply, .. } => reply.clone(),
-            ScriptRequest::EmoteBefore { reply, .. } => reply.clone(),
-            ScriptRequest::PMBefore { reply, .. } => reply.clone(),
             ScriptRequest::ScribbleCheck { reply, .. } => reply.clone(),
-            ScriptRequest::ListScripts { .. }
-            | ScriptRequest::LoadScript { .. }
-            | ScriptRequest::KillScript { .. } => unreachable!("ya se resolvió arriba"),
+            ScriptRequest::JoinCheck { reply, .. } => reply.clone(),
+            ScriptRequest::VroomJoinCheck { reply, .. } => reply.clone(),
+            ScriptRequest::FloodBefore { reply, .. } => reply.clone(),
+            _ => unreachable!("ya se resolvió arriba"),
         };
 
-        // Si no hay scripts cargados, default = allow
-        let scripts = self.scripts.lock().clone();
         if scripts.is_empty() {
             let _ = reply.send(true);
             return;
         }
 
-        // Recorrer todos los scripts; si alguno cancela, parar
         let mut allow = true;
         for (_, script) in scripts.iter() {
             if script.state() != ScriptLifecycle::Active {
@@ -702,35 +861,13 @@ impl ScriptManager {
             let mut ctx_guard = script.context.lock();
             if let Some(ctx) = ctx_guard.as_mut() {
                 match call_handler_with_return(ctx, handler_name, &args, |i| request.arg_kind(i)) {
-                    Ok(Some(false)) => {
-                        // El script retornó false explícitamente → cancela
+                    Ok(HandlerReturn::Bool(false)) => {
                         allow = false;
                         debug!("script '{}' canceló via {}", script.name(), handler_name);
                     }
-                    Ok(Some(true)) => {
-                        // El script retornó true explícitamente → ok
-                    }
-                    Ok(None) => {
-                        // No hay handler definido, o no es una función → no afecta
-                    }
-                    Ok(Some(other)) => {
-                        // El script retornó algo que no es bool → ignorar,
-                        // pero loguear
-                        warn!(
-                            "script '{}': {} retornó tipo no-bool ({:?})",
-                            script.name(),
-                            handler_name,
-                            other
-                        );
-                    }
+                    Ok(_) => {}
                     Err(e) => {
-                        // Error ejecutando la función → ignorar, no cancelar
-                        warn!(
-                            "script '{}': error en {}: {}",
-                            script.name(),
-                            handler_name,
-                            e
-                        );
+                        warn!("script '{}': error en {}: {}", script.name(), handler_name, e);
                     }
                 }
             }
@@ -790,12 +927,26 @@ fn call_void_handler(
 /// - `Ok(None)` si la función no está definida
 /// - `Ok(Some(other))` si la función retornó algo no-bool
 /// - `Err(e)` si hubo error ejecutando
+/// Resultado de invocar un handler JS con retorno.
+enum HandlerReturn {
+    /// El handler no existe (o no es función) en este script.
+    NoHandler,
+    /// Retornó un booleano explícito.
+    Bool(bool),
+    /// Retornó un string (para los hooks de texto = texto reescrito).
+    Text(String),
+    /// Retornó `null` (sb0t: cancela en los hooks de texto).
+    Null,
+    /// Retornó undefined u otro tipo → no afecta.
+    Other,
+}
+
 fn call_handler_with_return(
     ctx: &mut boa_engine::Context,
     name: &str,
     args: &[String],
     kind: impl Fn(usize) -> crate::types::ArgKind,
-) -> Result<Option<bool>, String> {
+) -> Result<HandlerReturn, String> {
     use boa_engine::js_string;
     use boa_engine::property::PropertyKey;
 
@@ -806,10 +957,10 @@ fn call_handler_with_return(
         .map_err(|e| format!("error buscando '{}': {}", name, e))?;
 
     if func.is_undefined() || func.is_null() {
-        return Ok(None);
+        return Ok(HandlerReturn::NoHandler);
     }
     if !func.is_object() {
-        return Ok(None);
+        return Ok(HandlerReturn::NoHandler);
     }
 
     let js_args = build_handler_args(ctx, args, kind);
@@ -821,9 +972,17 @@ fn call_handler_with_return(
         .map_err(|e| format!("error ejecutando '{}': {}", name, e))?;
 
     if result.is_boolean() {
-        Ok(Some(result.as_boolean().unwrap()))
+        Ok(HandlerReturn::Bool(result.as_boolean().unwrap()))
+    } else if result.is_null() {
+        Ok(HandlerReturn::Null)
+    } else if result.is_string() {
+        let txt = result
+            .as_string()
+            .map(|s| s.to_std_string_lossy())
+            .unwrap_or_default();
+        Ok(HandlerReturn::Text(txt))
     } else {
-        Ok(Some(true)) // no bool → default allow
+        Ok(HandlerReturn::Other)
     }
 }
 
@@ -1562,8 +1721,10 @@ mod tests {
     // thread, sería UB. Por eso testeamos `dispatch_request` directamente
     // sobre el manager, que vive en el thread del test.
 
-    fn check_request(mgr: &ScriptManager, request: ScriptRequest) -> bool {
-        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+    /// Corre un request de texto y devuelve el reply completo:
+    /// `None` = cancelado, `Some(texto)` = permitido (posiblemente reescrito).
+    fn run_text_request(mgr: &ScriptManager, request: ScriptRequest) -> Option<String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let request = match request {
             ScriptRequest::TextBefore { from, text, .. } => ScriptRequest::TextBefore {
                 from,
@@ -1581,20 +1742,111 @@ mod tests {
                 text,
                 reply: tx,
             },
-            ScriptRequest::ScribbleCheck { from, is_pm, .. } => ScriptRequest::ScribbleCheck {
-                from,
-                is_pm,
-                reply: tx,
-            },
-            ScriptRequest::ListScripts { .. }
-            | ScriptRequest::LoadScript { .. }
-            | ScriptRequest::KillScript { .. } => {
-                panic!("check_request es solo para las variantes *Before/ScribbleCheck (reply: bool)")
-            }
+            _ => panic!("run_text_request es solo para los hooks de texto"),
         };
         mgr.dispatch_request(request);
         rx.recv_timeout(Duration::from_millis(200))
             .expect("manager should reply")
+    }
+
+    /// Compat con los tests viejos: ¿el request de texto fue permitido?
+    fn check_request(mgr: &ScriptManager, request: ScriptRequest) -> bool {
+        match request {
+            ScriptRequest::ScribbleCheck { from, is_pm, .. } => {
+                let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+                mgr.dispatch_request(ScriptRequest::ScribbleCheck { from, is_pm, reply: tx });
+                rx.recv_timeout(Duration::from_millis(200)).expect("manager should reply")
+            }
+            other => run_text_request(mgr, other).is_some(),
+        }
+    }
+
+    #[test]
+    fn text_before_can_rewrite_text() {
+        // Paridad sb0t: onTextBefore retorna el texto (reescrito) y se
+        // encadena; false/null/"" cancela.
+        let src = r#"
+            function onTextBefore(from, text) {
+                return ("" + text).replace("feo", "***");
+            }
+        "#;
+        let mgr = make_manager();
+        mgr.load_source("censor", None, src).unwrap();
+
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
+        let result = run_text_request(&mgr, ScriptRequest::TextBefore {
+            from: "Alice".into(),
+            text: "que feo dia".into(),
+            reply: tx,
+        });
+        assert_eq!(result, Some("que *** dia".to_string()));
+    }
+
+    #[test]
+    fn text_before_empty_string_cancels() {
+        let src = r#"function onTextBefore(from, text) { return ""; }"#;
+        let mgr = make_manager();
+        mgr.load_source("test", None, src).unwrap();
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
+        let result = run_text_request(&mgr, ScriptRequest::TextBefore {
+            from: "Alice".into(),
+            text: "hola".into(),
+            reply: tx,
+        });
+        assert_eq!(result, None, "string vacío cancela (sb0t IsNullOrEmpty)");
+    }
+
+    #[test]
+    fn text_before_chains_across_scripts() {
+        let mgr = make_manager();
+        mgr.load_source("a", None, r#"function onTextBefore(f, t){ return t + " [a]"; }"#).unwrap();
+        mgr.load_source("b", None, r#"function onTextBefore(f, t){ return t + " [b]"; }"#).unwrap();
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
+        let result = run_text_request(&mgr, ScriptRequest::TextBefore {
+            from: "Alice".into(),
+            text: "hola".into(),
+            reply: tx,
+        });
+        let text = result.expect("permitido");
+        assert!(text.contains("[a]") && text.contains("[b]"), "encadenado: {text}");
+    }
+
+    #[test]
+    fn join_check_can_reject() {
+        let src = r#"
+            function onJoinCheck(userobj, ip) {
+                if (("" + userobj) == "Malo") return false;
+                return true;
+            }
+        "#;
+        let mgr = make_manager();
+        mgr.load_source("guard", None, src).unwrap();
+
+        let run = |name: &str| -> bool {
+            let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+            mgr.dispatch_request(ScriptRequest::JoinCheck {
+                name: name.into(),
+                ip: "1.2.3.4".into(),
+                reply: tx,
+            });
+            rx.recv_timeout(Duration::from_millis(200)).unwrap()
+        };
+        assert!(!run("Malo"), "script debe rechazar a Malo");
+        assert!(run("Bueno"), "script debe dejar pasar a Bueno");
+    }
+
+    #[test]
+    fn flood_before_can_spare() {
+        let src = r#"function onFloodBefore(userobj, msg) { return false; }"#;
+        let mgr = make_manager();
+        mgr.load_source("mercy", None, src).unwrap();
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        mgr.dispatch_request(ScriptRequest::FloodBefore {
+            name: "Spammer".into(),
+            msg: "aaa".into(),
+            reply: tx,
+        });
+        assert!(!rx.recv_timeout(Duration::from_millis(200)).unwrap());
     }
 
     #[test]
@@ -1602,7 +1854,7 @@ mod tests {
         // Sin handler onTextBefore → default allow
         let mgr = make_manager();
         mgr.load_source("test", None, "function onLoad() {}").unwrap();
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::TextBefore {
             from: "Alice".into(),
             text: "hello".into(),
@@ -1622,7 +1874,7 @@ mod tests {
         let mgr = make_manager();
         mgr.load_source("test", None, src).unwrap();
 
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::TextBefore {
             from: "Alice".into(),
             text: "hello".into(),
@@ -1630,7 +1882,7 @@ mod tests {
         });
         assert!(result, "non-spam should pass");
 
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::TextBefore {
             from: "Bob".into(),
             text: "spam".into(),
@@ -1648,7 +1900,7 @@ mod tests {
         "#;
         let mgr = make_manager();
         mgr.load_source("test", None, src).unwrap();
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::TextBefore {
             from: "Alice".into(),
             text: "anything".into(),
@@ -1666,7 +1918,7 @@ mod tests {
         "#;
         let mgr = make_manager();
         mgr.load_source("test", None, src).unwrap();
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::TextBefore {
             from: "Alice".into(),
             text: "x".into(),
@@ -1685,7 +1937,7 @@ mod tests {
         "#;
         let mgr = make_manager();
         mgr.load_source("test", None, src).unwrap();
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::EmoteBefore {
             from: "Alice".into(),
             text: "short emote".into(),
@@ -1693,7 +1945,7 @@ mod tests {
         });
         assert!(result);
 
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::EmoteBefore {
             from: "Bob".into(),
             text: "x".repeat(60),
@@ -1714,7 +1966,7 @@ mod tests {
         "#;
         let mgr = make_manager();
         mgr.load_source("test", None, src).unwrap();
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::PMBefore {
             from: "Bob".into(),
             to: "Alice".into(),
@@ -1723,7 +1975,7 @@ mod tests {
         });
         assert!(!result, "PM a Alice debería ser bloqueado");
 
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::PMBefore {
             from: "Bob".into(),
             to: "Charlie".into(),
@@ -1741,7 +1993,7 @@ mod tests {
         let mgr = make_manager();
         mgr.load_source("good", None, "function onTextBefore() { return true; }").unwrap();
         mgr.load_source("bad", None, "function onTextBefore() { return false; }").unwrap();
-        let (tx, _rx) = std_mpsc::sync_channel::<bool>(1);
+        let (tx, _rx) = std_mpsc::sync_channel::<Option<String>>(1);
         let result = check_request(&mgr, ScriptRequest::TextBefore {
             from: "Alice".into(),
             text: "hello".into(),

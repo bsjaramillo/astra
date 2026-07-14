@@ -210,7 +210,10 @@ pub enum ScriptEvent {
     /// Intento de login inválido
     InvalidLoginAttempt { name: String, ip: String },
     /// Comando slash ejecutado
-    Command { from: String, command: String, args: String },
+    /// Comando ejecutado. `target` = nick del primer token de args si es un
+    /// usuario online (sb0t onCommand(userobj, command, target, args) — el
+    /// handler recibe un JSUser o null en la 3ª posición).
+    Command { from: String, command: String, target: String, args: String },
 
     // --- Idle ---
     /// User pasó a idle
@@ -429,6 +432,12 @@ impl ScriptEvent {
                 2 => ArgKind::Pm,
                 _ => ArgKind::Str,
             },
+            // onCommand(userobj, command, target, args): el target (arg 2)
+            // también es un JSUser — o null si no se resolvió (string vacío).
+            Command { .. } => match idx {
+                0 | 2 => ArgKind::User,
+                _ => ArgKind::Str,
+            },
             _ => {
                 if self.user_arg_index() == Some(idx) {
                     ArgKind::User
@@ -488,8 +497,8 @@ impl ScriptEvent {
             LoginGranted { name } => vec![name.clone()],
             Logout { name } => vec![name.clone()],
             InvalidLoginAttempt { name, ip } => vec![name.clone(), ip.clone()],
-            Command { from, command, args } => {
-                vec![from.clone(), command.clone(), args.clone()]
+            Command { from, command, target, args } => {
+                vec![from.clone(), command.clone(), target.clone(), args.clone()]
             }
 
             // Idle
@@ -626,7 +635,7 @@ mod tests {
             ScriptEvent::LoginGranted { name: "".into() }.handler_name(),
             ScriptEvent::Logout { name: "".into() }.handler_name(),
             ScriptEvent::InvalidLoginAttempt { name: "".into(), ip: "".into() }.handler_name(),
-            ScriptEvent::Command { from: "".into(), command: "".into(), args: "".into() }.handler_name(),
+            ScriptEvent::Command { from: "".into(), command: "".into(), target: "".into(), args: "".into() }.handler_name(),
             ScriptEvent::Idled { name: "".into() }.handler_name(),
             ScriptEvent::Unidled { name: "".into() }.handler_name(),
             ScriptEvent::Registering { name: "".into(), ip: "".into() }.handler_name(),

@@ -132,6 +132,30 @@ pub async fn handle_tcp_client(
     let user_arc = user.clone();
     let user_id = user.id;
 
+    // Gate de scripts (onJoinCheck, paridad sb0t `Joining`): un script puede
+    // rechazar el join ANTES de anunciar al usuario a la sala.
+    {
+        let jname = user.name.read().clone();
+        let jip = user.external_ip.to_string();
+        if !scripting.check_join(&jname, &jip) {
+            info!("join de '{}' rechazado por script (onJoinCheck)", jname);
+            let mut w = proto_ares::PacketWriter::with_msg_crypto(
+                proto_ares::TcpMsg::ServerError,
+                user.ares_crypto,
+            );
+            w.write_string_nt("You have been rejected from this room.").ok();
+            let _ = user.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
+            scripting.dispatch(astra_scripting::ScriptEvent::Rejected {
+                name: jname,
+                ip: jip,
+                reason: "script".to_string(),
+            });
+            ctx.user_pool.remove(user_id);
+            ctx.stats.on_user_part();
+            return Ok(());
+        }
+    }
+
     // ============================================================
     // Post-login: enviar JOIN a los demás y USERLIST al nuevo
     // ============================================================
@@ -641,12 +665,20 @@ fn read_crypto_text(
 fn is_text_flooding(
     ctx: &AppContext,
     user: &Arc<server_core::user_pool::AresUser>,
+    scripting: &ScriptHandle,
     kind: server_core::flood_control::FloodKind,
     text: &str,
 ) -> bool {
     let level = *user.level.read();
     let now = server_core::time::unix_time();
     if user.flood.is_flooding(kind, text, level, now) {
+        // Gate de scripts (onFloodBefore, paridad sb0t `Flooding`): si algún
+        // script retorna false, se perdona el flood (no se castiga).
+        let fname = user.name.read().clone();
+        if !scripting.check_flood(&fname, text) {
+            debug!("flood de '{}' perdonado por script (onFloodBefore)", fname);
+            return false;
+        }
         ctx.stats.on_flood();
         let mut w = proto_ares::PacketWriter::with_msg_crypto(
             proto_ares::TcpMsg::ServerError,
@@ -738,7 +770,7 @@ async fn dispatch_message(
             let text = read_crypto_text(user, &pkt.data[1..]);
             let is_cmd = text.as_deref().map(|t| t.trim_start().starts_with('/')).unwrap_or(false);
             if !is_cmd
-                && is_text_flooding(ctx, user, FloodKind::Public, text.as_deref().unwrap_or(""))
+                && is_text_flooding(ctx, user, scripting, FloodKind::Public, text.as_deref().unwrap_or(""))
             {
                 return Ok(true);
             }
@@ -746,13 +778,13 @@ async fn dispatch_message(
         }
         TcpMsg::Emote => {
             let text = read_crypto_text(user, &pkt.data[1..]);
-            if is_text_flooding(ctx, user, FloodKind::Emote, text.as_deref().unwrap_or("")) {
+            if is_text_flooding(ctx, user, scripting, FloodKind::Emote, text.as_deref().unwrap_or("")) {
                 return Ok(true);
             }
             handle_emote(ctx, user, &pkt.data[1..], scripting).await;
         }
         TcpMsg::Pmt => {
-            if is_text_flooding(ctx, user, FloodKind::Pm, "") {
+            if is_text_flooding(ctx, user, scripting, FloodKind::Pm, "") {
                 return Ok(true);
             }
             handle_pvt(ctx, user, &pkt.data[1..], scripting).await;
@@ -1016,6 +1048,18 @@ async fn handle_public(
 
     let name = user.name.read().clone();
 
+    // Eval inline `@código` (paridad sb0t TextSending, gated a Owner): se
+    // evalúa como JS en el primer script con `userobj` = el emisor, y el
+    // texto NO se difunde.
+    if let Some(code) = text.strip_prefix('@') {
+        if (*user.level.read() as u8) >= server_core::ILevel::Owner as u8 {
+            if let Err(e) = scripting.eval_chat(&name, code) {
+                let _ = user.print(&ctx.settings.bot_name, &format!("eval error: {}", e));
+            }
+        }
+        return;
+    }
+
     // Si el mensaje empieza con '/' o '#', es un comando (paridad sb0t
     // TCPProcessor.cs:343: ambos prefijos, y el texto no se difunde).
     if let Some((cmd, args)) = astra_commands::parse_command(&text) {
@@ -1080,11 +1124,15 @@ async fn handle_public(
         text = text.to_lowercase();
     }
 
-    // Hook onTextBefore: si algún script retorna false, cancelar el broadcast
-    if !scripting.check_text_before(&name, &text) {
-        debug!("onTextBefore canceló mensaje de '{}'", name);
-        return;
-    }
+    // Hook onTextBefore: un script puede cancelar el mensaje (None) o
+    // REESCRIBIRLO (Some(texto)) — paridad sb0t TextSending.
+    let text = match scripting.check_text_before(&name, &text) {
+        Some(t) => t,
+        None => {
+            debug!("onTextBefore canceló mensaje de '{}'", name);
+            return;
+        }
+    };
 
     // Hablar en público saca del idle y anuncia el tiempo ausente
     // (paridad sb0t TCPProcessor: unidle dentro del path de TextSending).
@@ -1156,11 +1204,14 @@ async fn handle_emote(
     }
 
     let name = user.name.read().clone();
-    // Hook onEmoteBefore
-    if !scripting.check_emote_before(&name, &text) {
-        debug!("onEmoteBefore canceló emote de '{}'", name);
-        return;
-    }
+    // Hook onEmoteBefore: puede cancelar (None) o reescribir (Some).
+    let text = match scripting.check_emote_before(&name, &text) {
+        Some(t) => t,
+        None => {
+            debug!("onEmoteBefore canceló emote de '{}'", name);
+            return;
+        }
+    };
     // Paridad sb0t TCPProcessor (emote path): primero el unidle si estaba
     // idle, luego un emote que empiece con "idles" marca al usuario como
     // ausente (`#me idles almorzando`), y el emote se difunde igual.
@@ -1207,11 +1258,14 @@ async fn handle_pvt(
     // Buscar al destinatario
     if let Some(target) = ctx.user_pool.get_by_name(&target_name) {
         let from = user.name.read().clone();
-        // Hook onPMBefore: si algún script retorna false, cancelar el PM
-        if !scripting.check_pm_before(&from, &target_name, &text) {
-            debug!("onPMBefore canceló PM de '{}' a '{}'", from, target_name);
-            return;
-        }
+        // Hook onPMBefore: puede cancelar (None) o reescribir el PM (Some).
+        let text = match scripting.check_pm_before(&from, &target_name, &text) {
+            Some(t) => t,
+            None => {
+                debug!("onPMBefore canceló PM de '{}' a '{}'", from, target_name);
+                return;
+            }
+        };
         // /pmblock: si el target bloquea PMs y el emisor es regular, se trata
         // como ignore (Moderator+ siempre pasan).
         let blocked_by_pmblock = target.pm_blocked.load(std::sync::atomic::Ordering::Relaxed)

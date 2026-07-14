@@ -77,6 +77,41 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     ("adminaction.ban10", "+n was banned for 10 minutes by +a"),
     ("adminaction.ban60", "+n was banned for 60 minutes by +a"),
     ("adminaction.cbans", "+a has cleared the ban list"),
+    ("adminaction.redirect", "+n has been redirected to +r by +a"),
+    ("adminaction.customname", "+n's custom name has been set by +a"),
+    ("adminaction.uncustomname", "+n's custom name has been unset by +a"),
+    // Listado de admins (Category.AdminList de sb0t; se difunde a la sala)
+    ("adminlist.header", "ADMIN LIST REQUESTED BY [+n]"),
+    ("adminlist.entry", "Level +l : +n"),
+    ("adminlist.footer", "List Complete"),
+    // Announce (Notification#19: aviso a mods de quién anunció)
+    ("announce.by", "+a announced"),
+    // Clearscreen (Notification#14)
+    ("clearscreen.by", "screen cleared by +n"),
+    // Whois (Category.Whois #0-9 de sb0t)
+    ("whois.name", "Name: +n"),
+    ("whois.extip", "External IP: +n"),
+    ("whois.localip", "Local IP: +n"),
+    ("whois.dataport", "Data Port: +n"),
+    ("whois.version", "Version: +n"),
+    ("whois.vroom", "Vroom: +n"),
+    ("whois.id", "ID: +n"),
+    ("whois.registered", "Registered: +n"),
+    // Shout (Messaging#0 de sb0t)
+    ("shout.line", "+n> [SHOUT] +t"),
+    // Avisos a mods (Notification #15/#16 de sb0t)
+    ("clone.by", "+n was cloned by +a"),
+    ("move.by", "+n was moved to vroom +v by +a"),
+    // Status actualizado (RoomInfo#6 de sb0t)
+    ("status.updated", "+n has updated the host status"),
+    // Whowas (Category.WhoWas de sb0t)
+    ("whowas.entry", "whowas: +n +ip +v +t"),
+    ("whowas.none", "no results were found containing +n"),
+    // Locate (Category.Locate de sb0t: quién está en qué vroom)
+    ("locate.header", "vroom location list"),
+    ("locate.entry", "+n is currently in vroom +v"),
+    ("locate.footer", "end of list"),
+    ("locate.empty", "location list empty"),
 
     // -- Mensajes generales del sistema (errores, usos, avisos y
     //    confirmaciones sin valores interpolados). Se auto-resuelven en

@@ -30,8 +30,9 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("help", ILevel::Regular),
     ("nick", ILevel::Regular),
     ("vroom", ILevel::Regular),
-    ("customname", ILevel::Moderator),
-    ("uncustomname", ILevel::Moderator),
+    // customname/uncustomname NO se gatean acá: la forma self-service es
+    // para cualquier usuario (nivel > Regular o flag `general`); el gate
+    // Moderator de la forma target-based vive en el handler.
     ("users", ILevel::Regular),
     ("topic", ILevel::Regular),
     ("motd", ILevel::Regular),
@@ -67,7 +68,8 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("oldname", ILevel::Admin),
     ("changemessage", ILevel::Moderator),
     ("announce", ILevel::Moderator),
-    ("shout", ILevel::Moderator),
+    // shout NO se gatea acá: sb0t lo permite a nivel > Regular o con el
+    // flag `general` (gate dentro del handler).
     ("opmsg", ILevel::Moderator),
     ("adminmsg", ILevel::Moderator),
     ("echo", ILevel::Moderator),
@@ -77,7 +79,8 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("unkiddy", ILevel::Moderator),
     ("mtimeout", ILevel::Owner),
     ("clearscreen", ILevel::Moderator),
-    ("locate", ILevel::Moderator),
+    // locate NO se gatea acá: la lista de vrooms es para nivel > Regular o
+    // flag `general` (sb0t); el gate Mod de la consulta geoip vive dentro.
     ("customnames", ILevel::Owner),
     ("roomflags", ILevel::Moderator),
     ("cloak", ILevel::Owner),

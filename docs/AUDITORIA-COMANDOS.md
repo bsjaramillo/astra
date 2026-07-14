@@ -11,10 +11,31 @@
 > unmuzzle/cbans) con soporte stealth/cloak; `is_user_command` estricto bajo
 > `disableadmins`; `DEFAULT_HELP_LINES` actualizado.
 >
-> **Pendiente:** `customname` target-based (sb0t: mod fija el nombre de OTRO;
-> Astra: self-service), `disableadmins` silencioso, formatos exactos de
-> whois/id/admins/trace, `redirect` con hashlink real, verificación manual
-> con cliente Ares e inbizio (Fase 4).
+> **Segunda tanda Fase 3 (2026-07-13):** `customname`/`uncustomname`
+> target-based con anuncio público y self-service gated por nivel/`general`
+> (+ substrings vetados); `disableadmins` silencioso; `whois` multilínea
+> (Category.Whois #0-9 + línea extra de Astra); `id` formato "Nick: id";
+> `admins` difundido a toda la sala (AdminList #0-2, stealth-aware);
+> `announce` = print del server + aviso "+a announced" a mods;
+> `clearscreen` = 500 líneas + anuncio stealth-aware; `locate` = lista de
+> vrooms de sb0t (Category.Locate; la consulta geoip por nick queda como
+> extra Mod+).
+>
+> **Fase 4 (2026-07-13):** hashlink Ares implementado
+> (`server-core/src/hashlink.rs`: XOR e67/d67 seed 28435 + zlib + base64,
+> paridad `core/Hashlink.cs`) — `/redirect` acepta `arlnk://` y
+> `CHATROOM:ip:port|nombre`, y anuncia AdminAction#20; `shout` con formato
+> Messaging#0 (`+n> [SHOUT] +t`, nivel>Regular o `general`, sin gate de
+> tabla); `stats` separado de `uptime` con el bloque multilínea de
+> Category.Stats; `clone`/`move` avisan a mods (Notification#15/16);
+> `status` anuncia RoomInfo#6; `whowas` formato WhoWas#0/#1 (50 resultados,
+> fecha absoluta); bloque de `roominfo` con textos RoomInfo#0-5. Fix de
+> paso: `announce_last_seen` interpretaba ms como segundos.
+>
+> **Pendiente (fuera del alcance de la auditoría de comandos):**
+> `roomsearch` real (requiere la channel list UDP), tags de media en MOTD
+> (divergencia documentada), y la verificación manual con cliente Ares e
+> inbizio.
 
 > Fuente de verdad: `~/Development/C#/sb0t` — `commands/ServerEvents.cs` (dispatch),
 > `commands/Eval.cs` (handlers + niveles `[CommandLevel]`), `core/Events.cs` (built-ins

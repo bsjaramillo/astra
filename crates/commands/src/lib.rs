@@ -45,6 +45,8 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/pmall <text> - PM every connected user",
     "/opmsg <text> - message all moderators+",
     "/uptime - show server uptime and stats",
+    "/stats - server metrics block (mod)",
+    "/shout <text> - shout as server text",
     "/version - show server version",
     "/register <password> - register your account",
     "/unregister - delete your account",
@@ -173,7 +175,7 @@ pub fn parse_command(text: &str) -> Option<(&str, &str)> {
 /// `from` es el nick del usuario que ejecutó el comando. `command` y
 /// `args` vienen de `parse_command`.
 pub fn dispatch(
-    _ctx: &AppContext,
+    ctx: &AppContext,
     scripting: &ScriptHandle,
     from: &str,
     command: &str,
@@ -182,9 +184,23 @@ pub fn dispatch(
     let event = ScriptEvent::Command {
         from: from.to_string(),
         command: command.to_string(),
+        target: resolve_command_target(ctx, args),
         args: args.to_string(),
     };
     scripting.dispatch(event);
+}
+
+/// Resuelve el `target` de un comando (paridad sb0t: el primer token de los
+/// args, si corresponde a un usuario online). Vacío = sin target (null en JS).
+pub fn resolve_command_target(ctx: &AppContext, args: &str) -> String {
+    let first = args.trim().split_whitespace().next().unwrap_or("");
+    if first.is_empty() {
+        return String::new();
+    }
+    match ctx.user_pool.get_by_name(first) {
+        Some(u) => u.name.read().clone(),
+        None => String::new(),
+    }
 }
 
 /// Ejecuta comandos built-in del servidor.
@@ -217,7 +233,7 @@ pub fn dispatch_builtin(
         && !has_level(user, ILevel::Owner)
         && !is_user_command(&cmd)
     {
-        send_system_line(ctx, user, "Admin commands are currently disabled.");
+        // Silencioso, como sb0t (ServerEvents.cs:886): ni siquiera responde.
         return (true, vec![]);
     }
 
@@ -372,8 +388,13 @@ pub fn dispatch_builtin(
             handle_opmsg(ctx, user, args);
             (true, vec![])
         }
-        "uptime" | "stats" => {
+        "uptime" => {
             handle_uptime(ctx, user, args);
+            (true, vec![])
+        }
+        // `/stats` (Mod, paridad Eval.Stats): bloque multilínea de métricas.
+        "stats" => {
+            handle_stats(ctx, user, args);
             (true, vec![])
         }
         "version" => {
@@ -616,7 +637,7 @@ pub fn dispatch_builtin(
             (true, vec![])
         }
         "shout" => {
-            handle_announce(ctx, user, args);
+            handle_shout(ctx, user, args);
             (true, vec![])
         }
         "mtimeout" => {
@@ -791,11 +812,11 @@ pub fn dispatch_builtin(
             (true, vec![])
         }
         "customname" => {
-            handle_cname(ctx, user, args);
+            handle_customname(ctx, user, args, true);
             (true, vec![])
         }
         "uncustomname" => {
-            handle_cname(ctx, user, "-");
+            handle_customname(ctx, user, args, false);
             (true, vec![])
         }
         "listbans" => {
@@ -1058,36 +1079,97 @@ fn handle_vroom(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Vec<astra
     }]
 }
 
-fn handle_cname(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+fn handle_customname(ctx: &AppContext, user: &Arc<AresUser>, args: &str, set: bool) {
+    // Paridad sb0t Eval.CustomName/UncustomName: forma target-based para
+    // mods (`/customname <nick> <nombre>`) y self-service para el propio
+    // usuario (permitido si nivel > Regular o el flag `general` está on).
     let trimmed = args.trim();
+
     if trimmed.is_empty() {
-        let current = user.custom_name.read().clone();
-        match current {
-            Some(value) => send_system_line(ctx, user, &format!("Custom name: {}", value)),
-            None => send_system_line(ctx, user, "Custom name is not set."),
+        if set {
+            // Extra de Astra: sin args muestra el propio custom name.
+            let current = user.custom_name.read().clone();
+            match current {
+                Some(value) => send_system_line(ctx, user, &format!("Custom name: {}", value)),
+                None => send_system_line(ctx, user, "Custom name is not set."),
+            }
+        } else {
+            // `/uncustomname` sin args: limpia el propio.
+            apply_custom_name(ctx, user, user, None);
         }
         return;
     }
 
-    let next = if trimmed == "-" {
-        None
-    } else {
-        Some(trimmed.chars().take(40).collect::<String>())
-    };
-
-    *user.custom_name.write() = next.clone();
-    ctx.publish_link_event(server_core::LinkEvent::CustomName {
-        origin: None,
-        name: user.name.read().clone(),
-        custom_name: next.clone(),
-    });
-
-    match next {
-        Some(value) => send_system_line(ctx, user, &format!("Custom name set to '{}'.", value)),
-        None => send_system_line(ctx, user, "Custom name cleared."),
+    // ¿Primer token es un usuario online? → forma target-based.
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    if let Some(target) = ctx.user_pool.get_by_name(first) {
+        if target.id != user.id {
+            if !can_edit_topic(user) {
+                send_system_line(ctx, user, &ctx.templates.get("error.access_moderator"));
+                return;
+            }
+            let value = if set {
+                if rest.len() < 2 {
+                    send_system_line(ctx, user, "Usage: /customname <nick> <name>");
+                    return;
+                }
+                Some(rest)
+            } else {
+                None
+            };
+            if let Some(v) = value {
+                if custom_name_blocked(v) {
+                    return;
+                }
+            }
+            apply_custom_name(ctx, user, &target, value);
+            return;
+        }
     }
+
+    // Self-service (sb0t: nivel > Regular o Settings.General).
+    if !(has_level(user, ILevel::Voice) || ctx.room_flags.get("general")) {
+        return;
+    }
+    let value = if set { Some(trimmed) } else { None };
+    if let Some(v) = value {
+        if v.len() < 2 || custom_name_blocked(v) {
+            return;
+        }
+    }
+    apply_custom_name(ctx, user, user, value);
 }
 
+/// Substrings vetados en custom names (paridad sb0t: evitar spam de salas).
+fn custom_name_blocked(v: &str) -> bool {
+    let up = v.to_uppercase();
+    up.contains("CHATROOM") || up.contains("HTTP") || up.contains("WWW") || up.contains("ARLNK")
+}
+
+/// Aplica (o limpia) el custom name de `target` y anuncia la acción a la
+/// sala (AdminAction #5/#6 de sb0t, stealth-aware).
+fn apply_custom_name(
+    ctx: &AppContext,
+    issuer: &Arc<AresUser>,
+    target: &Arc<AresUser>,
+    value: Option<&str>,
+) {
+    let next = value.map(|v| v.chars().take(40).collect::<String>());
+    *target.custom_name.write() = next.clone();
+    ctx.publish_link_event(server_core::LinkEvent::CustomName {
+        origin: None,
+        name: target.name.read().clone(),
+        custom_name: next.clone(),
+    });
+    let key = if next.is_some() {
+        "adminaction.customname"
+    } else {
+        "adminaction.uncustomname"
+    };
+    announce_admin_action(ctx, issuer, key, &target.name.read().clone());
+}
 fn handle_users(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     let mut users: Vec<String> = ctx
         .user_pool
@@ -1386,20 +1468,31 @@ fn handle_whois(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         return;
     };
 
-    let guid_hex = guid_to_hex(&target.guid);
-    let level = *target.level.read() as u8;
+    // Formato multilínea de sb0t (Category.Whois #0-9).
+    let registered = matches!(ctx.accounts.find_by_guid(&target.guid), Ok(Some(_)));
+    let name = target.name.read().clone();
+    let lines = [
+        ctx.templates.render("whois.name", &[("+n", &name)]),
+        ctx.templates.render("whois.extip", &[("+n", &target.external_ip.to_string())]),
+        ctx.templates.render("whois.localip", &[("+n", &target.local_ip.to_string())]),
+        ctx.templates.render("whois.dataport", &[("+n", &target.data_port.to_string())]),
+        ctx.templates.render("whois.version", &[("+n", &target.version)]),
+        ctx.templates.render("whois.vroom", &[("+n", &target.vroom.read().to_string())]),
+        ctx.templates.render("whois.id", &[("+n", &target.id.to_string())]),
+        ctx.templates.render("whois.registered", &[("+n", if registered { "True" } else { "False" })]),
+    ];
+    for line in lines {
+        send_system_line(ctx, user, &line);
+    }
+    // Extra de Astra (no está en sb0t, útil para moderación).
     send_system_line(
         ctx,
         user,
         &format!(
-            "WHOIS {}: ip={} local_ip={} guid={} level={} files={} ver='{}'",
-            target.name.read(),
-            target.external_ip,
-            target.local_ip,
-            guid_hex,
-            level,
+            "Level: {} | files: {} | guid: {}",
+            *target.level.read() as u8,
             target.file_count,
-            target.version
+            guid_to_hex(&target.guid)
         ),
     );
 }
@@ -1531,6 +1624,69 @@ fn handle_opmsg(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         if (*other.level.read() as u8) >= ILevel::Moderator as u8 {
             let _ = other.send_pvt(&bot, &line);
         }
+    }
+}
+
+/// Aviso solo para moderadores+ (paridad `Server.Print(ILevel.Moderator,...)`).
+fn notify_mods(ctx: &AppContext, text: &str) {
+    for u in ctx.user_pool.users() {
+        if u.logged_in && (*u.level.read() as u8) >= ILevel::Moderator as u8 {
+            let _ = u.print(&ctx.settings.bot_name, text);
+        }
+    }
+}
+
+/// `/shout <texto>` (paridad sb0t `Eval.Shout`, Messaging#0): grito visible
+/// para toda la sala como texto del server "+n> [SHOUT] +t". Permitido para
+/// nivel > Regular o con el flag `general`; los muzzleados no gritan.
+fn handle_shout(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !(has_level(user, ILevel::Voice) || ctx.room_flags.get("general")) {
+        return;
+    }
+    if user.is_muzzled() {
+        return;
+    }
+    let text = args.trim();
+    if text.is_empty() {
+        send_system_line(ctx, user, "Usage: /shout <text>");
+        return;
+    }
+    let name = user.name.read().clone();
+    let line = ctx.templates.render("shout.line", &[("+n", &name), ("+t", text)]);
+    ctx.broadcast_print(&line);
+}
+
+/// `/stats` (Mod, paridad sb0t `Eval.Stats`): bloque multilínea con las
+/// métricas del server (Category.Stats; se omiten las que Astra no trackea:
+/// language/hashlink/roomsearch size).
+fn handle_stats(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    let secs = ctx.uptime_secs();
+    let uptime = format!("{}d {}h {}m", secs / 86400, (secs / 3600) % 24, (secs / 60) % 60);
+    let quarantined = ctx
+        .user_pool
+        .users()
+        .iter()
+        .filter(|u| u.quarantined.load(std::sync::atomic::Ordering::Relaxed))
+        .count();
+    let lines = [
+        format!("Stats for {}", ctx.settings.room_name),
+        String::new(),
+        format!("Uptime: {}", uptime),
+        format!("Bytes received: {}", ctx.stats.bytes_in()),
+        format!("Bytes sent: {}", ctx.stats.bytes_out()),
+        format!("Invalid logins: {}", ctx.stats.invalid_logins()),
+        format!("Flooded users: {}", ctx.stats.floods()),
+        format!("Rejected users: {}", ctx.stats.rejections()),
+        format!("Join count: {}", ctx.stats.total_users()),
+        format!("Part count: {}", ctx.stats.parts()),
+        format!("User count: {}", ctx.user_pool.len()),
+        format!("Quarantined user count: {}", quarantined),
+        format!("Peak user count: {}", ctx.stats.peak_users()),
+        format!("Message count: {}", ctx.stats.messages()),
+        format!("PM count: {}", ctx.stats.pms()),
+    ];
+    for line in lines {
+        send_system_line(ctx, user, &line);
     }
 }
 
@@ -2564,19 +2720,32 @@ fn handle_whowas(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Usage: /whowas <nick|ip>");
         return;
     }
-    let results = ctx.db.search_user_history(query, 10).unwrap_or_default();
+    // Paridad sb0t Whowas.Query: hasta 50 resultados, formato WhoWas#0
+    // "whowas: +n +ip +v +t" con fecha absoluta.
+    let results = ctx.db.search_user_history(query, 50).unwrap_or_default();
     if results.is_empty() {
-        send_system_line(ctx, user, "No matching history.");
-        return;
-    }
-    send_system_line(ctx, user, &format!("Whowas '{}' ({}):", query, results.len()));
-    for (name, version, ip, last_seen) in &results {
         send_system_line(
             ctx,
             user,
-            &format!(
-                "{} [{}] ver='{}' seen {}",
-                name, ip, version, format_time_ago(*last_seen)
+            &ctx.templates.render("whowas.none", &[("+n", query)]),
+        );
+        return;
+    }
+    for (name, version, ip, last_seen) in &results {
+        // last_seen está en milisegundos.
+        let when = chrono::DateTime::from_timestamp(*last_seen / 1000, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        send_system_line(
+            ctx,
+            user,
+            &ctx.templates.render(
+                "whowas.entry",
+                &[("+n", name), ("+ip", ip), ("+v", version), ("+t", &when)],
             ),
         );
     }
@@ -2656,22 +2825,18 @@ pub fn roominfo_lines(ctx: &AppContext) -> Vec<String> {
         .filter(|u| u.logged_in && (*u.level.read() as u8) >= ILevel::Owner as u8)
         .count();
 
-    let mut lines = vec![
-        format!("Room: {}", ctx.settings.room_name),
-        format!("Users: {} ({} ops, {} owners)", total, ops, owners),
-    ];
+    // Textos de sb0t (Category.RoomInfo #0-5).
     let secs = ctx.uptime_secs();
-    lines.push(format!(
-        "Uptime: {}d {}h {}m",
-        secs / 86400,
-        (secs / 3600) % 24,
-        (secs / 60) % 60
-    ));
-    let status = ctx.room_status();
-    if !status.is_empty() {
-        lines.push(format!("Status: {}", status));
-    }
-    lines
+    let uptime = format!("{}d {}h {}m", secs / 86400, (secs / 3600) % 24, (secs / 60) % 60);
+    vec![
+        "Room Information".to_string(),
+        String::new(),
+        format!("Current hosts: {}", owners),
+        format!("Current user count: {}", total),
+        format!("Current admin count: {}", ops),
+        format!("Server uptime: {}", uptime),
+        format!("Host status: {}", ctx.room_status()),
+    ]
 }
 
 fn handle_status(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
@@ -2696,12 +2861,21 @@ fn handle_status(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     } else {
         send_system_line(ctx, user, &format!("Room status set to '{}'.", next));
     }
+    // Anuncio a la sala (RoomInfo#6 de sb0t), stealth-aware.
+    let by = if ctx.room_flags.get("stealth") {
+        ctx.settings.room_name.clone()
+    } else {
+        user.name.read().clone()
+    };
+    ctx.broadcast_print(&ctx.templates.render("status.updated", &[("+n", &by)]));
 }
 
 fn handle_id(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     let target_name = args.trim();
     if target_name.is_empty() {
-        send_system_line(ctx, user, &format!("Your id is {}.", user.id));
+        // Paridad sb0t Eval.ID: "Nick: id" del propio usuario.
+        let name = user.name.read().clone();
+        send_system_line(ctx, user, &format!("{}: {}", name, user.id));
         return;
     }
     match ctx.user_pool.get_by_name(target_name) {
@@ -2945,6 +3119,16 @@ fn handle_move(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     });
     send_system_line(ctx, &target, &format!("You were moved to vroom {}.", new_vroom));
     send_system_line(ctx, user, &format!("Moved '{}' to vroom {}.", target_name, new_vroom));
+    // Aviso a mods (Notification#16 de sb0t).
+    let issuer_name = user.name.read().clone();
+    let tname = target.name.read().clone();
+    notify_mods(
+        ctx,
+        &ctx.templates.render(
+            "move.by",
+            &[("+n", &tname), ("+a", &issuer_name), ("+v", &new_vroom.to_string())],
+        ),
+    );
 }
 
 fn handle_changename(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
@@ -3045,6 +3229,9 @@ fn handle_changemessage(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     send_system_line(ctx, user, &format!("Set personal message for '{}'.", target_name));
 }
 
+/// `/admins` (Mod, paridad sb0t `Eval.Admins`): difunde A TODA LA SALA el
+/// listado de admins online (header con quién lo pidió — stealth-aware —,
+/// una línea por op y footer, AdminList #0-2).
 fn handle_admins(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     let mut ops: Vec<(String, u8)> = ctx
         .user_pool
@@ -3054,14 +3241,19 @@ fn handle_admins(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         .map(|u| (u.name.read().clone(), *u.level.read() as u8))
         .collect();
     ops.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase())));
-    if ops.is_empty() {
-        send_system_line(ctx, user, "No ops online.");
-        return;
-    }
-    send_system_line(ctx, user, &format!("Ops online ({}):", ops.len()));
+    let requester = if ctx.room_flags.get("stealth") {
+        ctx.settings.room_name.clone()
+    } else {
+        user.name.read().clone()
+    };
+    ctx.broadcast_print(&ctx.templates.render("adminlist.header", &[("+n", &requester)]));
     for (name, level) in &ops {
-        send_system_line(ctx, user, &format!("{} (level {})", name, level));
+        ctx.broadcast_print(&ctx.templates.render(
+            "adminlist.entry",
+            &[("+n", name), ("+l", &level.to_string())],
+        ));
     }
+    ctx.broadcast_print(&ctx.templates.get("adminlist.footer"));
 }
 
 fn handle_announce(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
@@ -3074,11 +3266,13 @@ fn handle_announce(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Usage: /announce <text>");
         return;
     }
-    // El bot lo dice en público a toda la sala.
-    let bot = ctx.settings.bot_name.clone();
+    // Paridad sb0t Eval.Announce: texto del server a toda la sala + aviso
+    // "+a announced" solo a moderadores+.
+    ctx.broadcast_print(text);
+    let by = ctx.templates.render("announce.by", &[("+a", &user.name.read().clone())]);
     for u in ctx.user_pool.users() {
-        if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = u.send_public(&bot, text);
+        if u.logged_in && (*u.level.read() as u8) >= ILevel::Moderator as u8 {
+            let _ = u.print(&ctx.settings.bot_name, &by);
         }
     }
 }
@@ -3130,6 +3324,11 @@ fn handle_clone(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     };
     // Difunde un mensaje público/emote como si lo dijera el target.
     let name = target.name.read().clone();
+    let issuer_name = user.name.read().clone();
+    notify_mods(
+        ctx,
+        &ctx.templates.render("clone.by", &[("+n", &name), ("+a", &issuer_name)]),
+    );
     let emote = text.strip_prefix("/me ");
     let vroom = *target.vroom.read();
     for u in ctx.user_pool.users() {
@@ -3222,17 +3421,39 @@ fn handle_redirect(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "You cannot redirect a user of equal or higher level.");
         return;
     }
+    // Destino: hashlink Ares (`arlnk://...` o `CHATROOM:ip:port|nombre`,
+    // paridad sb0t Hashlinks.Decrypt) o `ip:port` plano (extra de Astra).
     let dest = dest.strip_prefix("astrahash://").unwrap_or(dest);
-    let Some((ip_str, port_str)) = dest.rsplit_once(':') else {
-        send_system_line(ctx, user, "Destination must be ip:port.");
-        return;
-    };
-    let (Ok(ip), Ok(port)) = (ip_str.parse::<IpAddr>(), port_str.parse::<u16>()) else {
-        send_system_line(ctx, user, "Invalid ip:port.");
-        return;
+    let (ip, port, room_label): (IpAddr, u16, String) =
+        if let Some(hr) = server_core::hashlink::decode(dest) {
+            (IpAddr::V4(hr.ip), hr.port, hr.name)
+        } else if let Some((ip_str, port_str)) = dest.rsplit_once(':') {
+            match (ip_str.parse::<IpAddr>(), port_str.parse::<u16>()) {
+                (Ok(ip), Ok(port)) => (ip, port, format!("{}:{}", ip, port)),
+                _ => {
+                    send_system_line(ctx, user, "Invalid destination (arlnk:// or ip:port).");
+                    return;
+                }
+            }
+        } else {
+            send_system_line(ctx, user, "Invalid destination (arlnk:// or ip:port).");
+            return;
     };
     let _ = target.send(outbound::build_redirect_c(ip, port, &ctx.settings.room_name, target.ares_crypto));
     send_system_line(ctx, user, &format!("Redirected '{}' to {}:{}.", target_name, ip, port));
+    // Anuncio público (AdminAction#20 de sb0t), stealth-aware.
+    let signer = if ctx.room_flags.get("stealth")
+        || user.cloaked.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        ctx.settings.room_name.clone()
+    } else {
+        user.name.read().clone()
+    };
+    let tname = target.name.read().clone();
+    ctx.broadcast_print(&ctx.templates.render(
+        "adminaction.redirect",
+        &[("+n", &tname), ("+a", &signer), ("+r", &room_label)],
+    ));
 }
 
 fn handle_disableadmins(ctx: &AppContext, user: &Arc<AresUser>, disable: bool) {
@@ -3341,26 +3562,65 @@ fn handle_clearscreen(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
         return;
     }
-    // Envía líneas en blanco a todos para "limpiar" la pantalla (paridad sb0t).
+    // Paridad sb0t Eval.ClearScreen: 500 líneas vacías a cada cliente y
+    // anuncio "screen cleared by +n" (stealth-aware).
+    let bot = ctx.settings.bot_name.clone();
     for u in ctx.user_pool.users() {
         if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
-        for _ in 0..50 {
-            let _ = u.send_public(" ", " ");
+        for _ in 0..500 {
+            let _ = u.print(&bot, "");
         }
     }
-    send_system_line(ctx, user, "Screen cleared.");
+    let by = if ctx.room_flags.get("stealth") {
+        ctx.settings.room_name.clone()
+    } else {
+        user.name.read().clone()
+    };
+    ctx.broadcast_print(&ctx.templates.render("clearscreen.by", &[("+n", &by)]));
 }
 
 fn handle_locate(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
-    if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
-        return;
-    }
     let target_name = args.trim();
     if target_name.is_empty() {
-        send_system_line(ctx, user, "Usage: /locate <nick>");
+        // Paridad sb0t Eval.Locate: lista quién está en qué vroom (>0).
+        // Disponible para nivel > Regular o con el flag `general` activo.
+        if !(has_level(user, ILevel::Voice) || ctx.room_flags.get("general")) {
+            return;
+        }
+        let mut found = false;
+        for u in ctx.user_pool.users() {
+            if !u.logged_in
+                || u.cloaked.load(std::sync::atomic::Ordering::Relaxed)
+                || *u.vroom.read() == 0
+            {
+                continue;
+            }
+            if !found {
+                found = true;
+                send_system_line(ctx, user, &ctx.templates.get("locate.header"));
+                send_system_line(ctx, user, "");
+            }
+            let name = u.name.read().clone();
+            let vroom = u.vroom.read().to_string();
+            send_system_line(
+                ctx,
+                user,
+                &ctx.templates.render("locate.entry", &[("+n", &name), ("+v", &vroom)]),
+            );
+        }
+        if found {
+            send_system_line(ctx, user, "");
+            send_system_line(ctx, user, &ctx.templates.get("locate.footer"));
+        } else {
+            send_system_line(ctx, user, &ctx.templates.get("locate.empty"));
+        }
+        return;
+    }
+    // Extra de Astra: `/locate <nick>` = geoip del usuario (Mod+).
+    if !can_edit_topic(user) {
+        send_system_line(ctx, user, "Access denied. Moderator+ required.");
         return;
     }
     let Some(t) = ctx.user_pool.get_by_name(target_name) else {
@@ -4278,22 +4538,9 @@ fn guid_to_hex(guid: &[u8; 16]) -> String {
 /// nombre y notificar la salida. Usado por `/kick` y por el hijack de
 /// login (nick duplicado desde la misma IP externa).
 pub fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
-    let tname = target.name.read().clone();
-    let ws_part = format!("PART:{}:{}", tname.encode_utf16().count(), tname);
-
-    ctx.user_pool.remove(target.id);
-    ctx.stats.on_user_part();
-
-    for u in ctx.user_pool.users() {
-        if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            continue;
-        }
-        if let Some(tx) = &u.ws_text_sender {
-            let _ = tx.send(ws_part.clone());
-        } else {
-            let _ = u.send(outbound::build_part_c(target, u.ares_crypto));
-        }
-    }
+    // Delegado a server-core (`AppContext::force_part_user`) para que el
+    // scripting (`user.kick()`/`ban()`) pueda expulsar sin ciclo de deps.
+    ctx.force_part_user(target);
 }
 
 fn broadcast_topic(ctx: &AppContext, text: &str) {
@@ -5089,12 +5336,19 @@ mod tests {
         let (handled, _) = dispatch_builtin(&ctx, &alice, "whois", "Bob");
         assert!(handled);
 
-        let msg = alice_rx.try_recv().expect("whois");
-        let (_from, text) = decode_pvt(msg);
-        assert!(text.contains("WHOIS Bob"));
-        assert!(text.contains("ip=10.0.0.2"));
-        assert!(text.contains("guid=02020202020202020202020202020202"));
-        assert!(text.contains("level=2"));
+        // Formato multilínea de sb0t (Category.Whois).
+        assert_eq!(next_pvt_text(&mut alice_rx), "Name: Bob");
+        assert_eq!(next_pvt_text(&mut alice_rx), "External IP: 10.0.0.2");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Local IP: 10.0.0.2");
+        let _dataport = next_pvt_text(&mut alice_rx);
+        let _version = next_pvt_text(&mut alice_rx);
+        assert_eq!(next_pvt_text(&mut alice_rx), "Vroom: 0");
+        assert_eq!(next_pvt_text(&mut alice_rx), "ID: 2");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Registered: False");
+        // Línea extra de Astra con level/files/guid.
+        let extra = next_pvt_text(&mut alice_rx);
+        assert!(extra.contains("Level: 2"), "extra: {extra}");
+        assert!(extra.contains("guid: 02020202020202020202020202020202"), "extra: {extra}");
     }
 
     #[test]
@@ -5242,6 +5496,105 @@ mod tests {
         let reply = next_pvt_text(&mut alice_rx);
         assert!(reply.contains("denied") || reply.contains("required"), "reply: {reply}");
         assert!(!ctx.room_flags.get("history"));
+    }
+
+    #[test]
+    fn builtin_redirect_accepts_arlnk_hashlink() {
+        let ctx = make_test_ctx();
+        let (alice, mut a_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Admin;
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let link = server_core::hashlink::encode(&server_core::hashlink::HashlinkRoom {
+            ip: "203.0.113.9".parse().unwrap(),
+            port: 2500,
+            name: "Otra Sala".to_string(),
+        });
+        let _ = dispatch_builtin(&ctx, &alice, "redirect", &format!("Bob arlnk://{}", link));
+
+        // Bob recibe el paquete de redirect al ip:port decodificado.
+        let pkt = bob_rx.try_recv().expect("redirect pkt");
+        assert_eq!(pkt[0], TcpMsg::ServerRedirect as u8);
+        // Confirmación al emisor + anuncio público con el nombre de la sala.
+        assert!(next_pvt_text(&mut a_rx).starts_with("Redirected 'Bob' to 203.0.113.9:2500"));
+        assert_eq!(
+            next_pvt_text(&mut a_rx),
+            "Bob has been redirected to Otra Sala by Alice"
+        );
+    }
+
+    #[test]
+    fn builtin_shout_uses_sb0t_format() {
+        let ctx = make_test_ctx();
+        let (alice, mut a_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        let (bob, mut bob_rx) = make_test_user(2, "Bob");
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "shout", "hola sala");
+        assert_eq!(next_pvt_text(&mut bob_rx), "Alice> [SHOUT] hola sala");
+        assert_eq!(next_pvt_text(&mut a_rx), "Alice> [SHOUT] hola sala");
+
+        // Regular sin flag general: silencio.
+        ctx.room_flags.set("general", false);
+        let _ = dispatch_builtin(&ctx, &bob, "shout", "yo tambien");
+        assert!(a_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn builtin_stats_prints_sb0t_block() {
+        let ctx = make_test_ctx();
+        let (alice, mut a_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &alice, "stats", "");
+        let header = next_pvt_text(&mut a_rx);
+        assert!(header.starts_with("Stats for "), "header: {header}");
+        let _blank = next_pvt_text(&mut a_rx);
+        assert!(next_pvt_text(&mut a_rx).starts_with("Uptime: "));
+        assert!(next_pvt_text(&mut a_rx).starts_with("Bytes received: "));
+    }
+
+    #[test]
+    fn builtin_customname_target_form_and_selfservice() {
+        let ctx = make_test_ctx();
+        let (alice, mut a_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        let (bob, _b_rx) = make_test_user(2, "Bob");
+        let (carol, _c_rx) = make_test_user(3, "Carol");
+        ctx.user_pool.add(alice.clone());
+        ctx.user_pool.add(bob.clone());
+        ctx.user_pool.add(carol.clone());
+
+        // Mod fija el custom name de otro usuario + anuncio público.
+        let _ = dispatch_builtin(&ctx, &alice, "customname", "Bob Bobby");
+        assert_eq!(bob.custom_name.read().clone(), Some("Bobby".to_string()));
+        assert_eq!(
+            next_pvt_text(&mut a_rx),
+            "Bob's custom name has been set by Alice"
+        );
+
+        // Y lo limpia con uncustomname <nick>.
+        let _ = dispatch_builtin(&ctx, &alice, "uncustomname", "Bob");
+        assert_eq!(bob.custom_name.read().clone(), None);
+
+        // Regular sin flag `general`: self-service denegado en silencio.
+        ctx.room_flags.set("general", false);
+        let _ = dispatch_builtin(&ctx, &carol, "customname", "Cazadora");
+        assert_eq!(carol.custom_name.read().clone(), None);
+
+        // Con `general` on, el regular sí puede.
+        ctx.room_flags.set("general", true);
+        let _ = dispatch_builtin(&ctx, &carol, "customname", "Cazadora");
+        assert_eq!(carol.custom_name.read().clone(), Some("Cazadora".to_string()));
+
+        // Substrings vetados (paridad sb0t): no se aplican.
+        let _ = dispatch_builtin(&ctx, &carol, "customname", "visit www.spam.com");
+        assert_eq!(carol.custom_name.read().clone(), Some("Cazadora".to_string()));
     }
 
     #[test]
@@ -5504,9 +5857,16 @@ mod tests {
             .unwrap();
 
         let _ = dispatch_builtin(&ctx, &alice, "whowas", "char");
-        assert_eq!(next_pvt_text(&mut alice_rx), "Whowas 'char' (1):");
+        // Formato sb0t WhoWas#0: "whowas: +n +ip +v +t".
         let line = next_pvt_text(&mut alice_rx);
-        assert!(line.contains("Charlie [9.9.9.9]"), "got: {}", line);
+        assert!(line.starts_with("whowas: Charlie 9.9.9.9 Ares 2.5 "), "got: {}", line);
+
+        // Sin resultados: WhoWas#1.
+        let _ = dispatch_builtin(&ctx, &alice, "whowas", "nadie");
+        assert_eq!(
+            next_pvt_text(&mut alice_rx),
+            "no results were found containing nadie"
+        );
     }
 
     #[test]
@@ -5517,13 +5877,19 @@ mod tests {
         ctx.user_pool.add(alice.clone());
 
         let _ = dispatch_builtin(&ctx, &alice, "roominfo", "");
-        assert!(next_pvt_text(&mut alice_rx).starts_with("Room: "));
-        assert!(next_pvt_text(&mut alice_rx).starts_with("Users: 1"));
-        assert!(next_pvt_text(&mut alice_rx).starts_with("Uptime: "));
+        // Bloque con los textos de sb0t (RoomInfo #0-5).
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room Information");
+        let _blank = next_pvt_text(&mut alice_rx);
+        assert_eq!(next_pvt_text(&mut alice_rx), "Current hosts: 1");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Current user count: 1");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Current admin count: 1");
+        assert!(next_pvt_text(&mut alice_rx).starts_with("Server uptime: "));
+        assert!(next_pvt_text(&mut alice_rx).starts_with("Host status:"));
 
-        // set status → aparece en roominfo
+        // set status → confirma + anuncia la actualización (RoomInfo#6)
         let _ = dispatch_builtin(&ctx, &alice, "status", "under maintenance");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room status set to 'under maintenance'.");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Alice has updated the host status");
         let _ = dispatch_builtin(&ctx, &alice, "status", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Status: under maintenance");
     }
@@ -5733,7 +6099,7 @@ mod tests {
             }
             t
         };
-        assert_eq!(last, "Screen cleared.");
+        assert_eq!(last, "screen cleared by Alice");
     }
 
     #[test]
@@ -5930,29 +6296,29 @@ mod tests {
         ctx.user_pool.add(carol);
 
         let _ = dispatch_builtin(&ctx, &alice, "admins", "");
-        assert_eq!(next_pvt_text(&mut alice_rx), "Ops online (2):");
-        assert_eq!(next_pvt_text(&mut alice_rx), "Bob (level 80)");
-        assert_eq!(next_pvt_text(&mut alice_rx), "Alice (level 50)");
+        // Paridad sb0t: se difunde a TODA la sala con los textos AdminList.
+        assert_eq!(next_pvt_text(&mut alice_rx), "ADMIN LIST REQUESTED BY [Alice]");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Level 80 : Bob");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Level 50 : Alice");
+        assert_eq!(next_pvt_text(&mut alice_rx), "List Complete");
     }
 
     #[test]
     fn builtin_announce_broadcasts_public() {
         let ctx = make_test_ctx();
-        let (alice, _a_rx) = make_test_user(1, "Alice");
+        let (alice, mut a_rx) = make_test_user(1, "Alice");
         let (bob, mut bob_rx) = make_test_user(2, "Bob");
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob);
 
         let _ = dispatch_builtin(&ctx, &alice, "announce", "server reboot soon");
-        // Bob recibe un público del bot
-        let pkt = bob_rx.try_recv().expect("announce");
-        assert_eq!(pkt[0], TcpMsg::Public as u8);
-        let mut r = PacketReader::new(&pkt[1..]);
-        let from = r.read_string_nt().unwrap();
-        let text = r.read_string_nt().unwrap();
-        assert_eq!(from, "Astra");
-        assert_eq!(text, "server reboot soon");
+        // Alice (mod) ve el texto y el aviso de autor (Notification#19).
+        assert_eq!(next_pvt_text(&mut a_rx), "server reboot soon");
+        assert_eq!(next_pvt_text(&mut a_rx), "Alice announced");
+        // Bob (regular) recibe el texto del server, sin el aviso de autor.
+        assert_eq!(next_pvt_text(&mut bob_rx), "server reboot soon");
+        assert!(bob_rx.try_recv().is_err(), "el aviso '+a announced' es solo para mods");
     }
 
     #[test]
@@ -6003,10 +6369,10 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &owner, "disableadmins", "");
         assert_eq!(next_pvt_text(&mut owner_rx), "Admin commands disabled.");
 
-        // Un moderador ya no puede usar comandos admin
+        // Un moderador ya no puede usar comandos admin (silencioso, sb0t).
         let (handled, _) = dispatch_builtin(&ctx, &mod_u, "kiddy", "Owner");
         assert!(handled);
-        assert_eq!(next_pvt_text(&mut mod_rx), "Admin commands are currently disabled.");
+        assert!(mod_rx.try_recv().is_err(), "el gate es silencioso");
 
         // Pero sí comandos de usuario
         let (handled, _) = dispatch_builtin(&ctx, &mod_u, "help", "");

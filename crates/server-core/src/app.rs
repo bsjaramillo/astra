@@ -659,7 +659,8 @@ impl AppContext {
         let Some((old_name, _, _, last_seen)) = results.first() else {
             return;
         };
-        let when = chrono::DateTime::from_timestamp(*last_seen, 0)
+        // `last_seen` viene en milisegundos (ver user_history::add_user).
+        let when = chrono::DateTime::from_timestamp(*last_seen / 1000, 0)
             .map(|t| {
                 t.with_timezone(&chrono::Local)
                     .format("%Y-%m-%d %H:%M")
@@ -808,6 +809,29 @@ impl AppContext {
             _ => return false,
         }
         true
+    }
+
+    /// Expulsión inmediata: remueve al usuario del pool y difunde su PART a
+    /// toda la sala (clientes Ares y web). NO registra la salida en el
+    /// historial — eso lo hace el cleanup del socket al cerrarse. Usado por
+    /// `/kick`, el hijack de login, y `user.kick()/ban()` desde scripts.
+    pub fn force_part_user(&self, target: &std::sync::Arc<crate::user_pool::AresUser>) {
+        let tname = target.name.read().clone();
+        let ws_part = format!("PART:{}:{}", tname.encode_utf16().count(), tname);
+
+        self.user_pool.remove(target.id);
+        self.stats.on_user_part();
+
+        for u in self.user_pool.users() {
+            if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            if let Some(tx) = &u.ws_text_sender {
+                let _ = tx.send(ws_part.clone());
+            } else {
+                let _ = u.send(crate::outbound::build_part_c(target, u.ares_crypto));
+            }
+        }
     }
 
     /// Remueve un usuario del pool y difunde su PART a la sala (cifrando por

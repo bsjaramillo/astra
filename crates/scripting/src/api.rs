@@ -204,6 +204,12 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("__records_json"), 0, NativeFunction::from_fn_ptr(records_json_fn))
         .expect("__records_json should be registered");
     context
+        .register_global_builtin_callable(js_string!("__banned_json"), 0, NativeFunction::from_fn_ptr(banned_json_fn))
+        .expect("__banned_json should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__unban_ident"), 1, NativeFunction::from_fn_ptr(unban_ident_fn))
+        .expect("__records_json should be registered");
+    context
         .register_global_builtin_callable(js_string!("__record_ban"), 6, NativeFunction::from_fn_ptr(record_ban_fn))
         .expect("__record_ban should be registered");
 
@@ -505,13 +511,15 @@ const SB0T_COMPAT_PRELUDE: &str = r#"
 var __USER_PROPS = ["name","orgName","id","level","vroom","externalIp","localIp",
   "dns","guid","version","age","gender","sex","country","region","fileCount","port",
   "muzzled","cloaked","registered","encrypted","owner","webClient","customClient",
-  "browsable","fastPing","canHTML","personalMessage","customName","joinTime"];
+  "browsable","fastPing","canHTML","personalMessage","customName","joinTime",
+  "captcha","idle","visible","ghost","localEP","linked","leaf"];
 function __mkUser(name){
   if (name == null) return null;
   var u = { __name: "" + name };
   __USER_PROPS.forEach(function(p){
     Object.defineProperty(u, p, {
       enumerable: true,
+      configurable: true,
       get: function(){ return __user_get(u.__name, p); }
     });
   });
@@ -523,6 +531,23 @@ function __mkUser(name){
   u.sendHTML = function(t){ return __user_do(u.__name, "sendHTML", t == null ? "" : "" + t); };
   u.sendEmote = function(t){ return __user_do(u.__name, "sendEmote", t == null ? "" : "" + t); };
   u.exists = function(){ return userExists(u.__name); };
+  // Setters writable (paridad sb0t: u.customName = "X", u.vroom = 2, u.level = 1)
+  ["customName","vroom","level","muzzled"].forEach(function(p){
+    Object.defineProperty(u, p, {
+      enumerable: true,
+      get: function(){ return __user_get(u.__name, p); },
+      set: function(v){ __user_do(u.__name, "set:" + p, v == null ? "" : "" + v); }
+    });
+  });
+  // Métodos sb0t restantes
+  u.redirect = function(link){ return __user_do(u.__name, "redirect", link == null ? "" : "" + link); };
+  u.setTopic = function(t){ return __user_do(u.__name, "setTopic", t == null ? "" : "" + t); };
+  u.nudge = function(){ return __user_do(u.__name, "nudge", ""); };
+  u.setUrl = function(){ return false; };      // stub: URL por-usuario no soportada
+  u.scribble = function(){ return false; };    // stub: scribble dirigido no soportado
+  u.restoreAvatar = function(){ return false; };
+  u.getASN = function(){ return null; };       // stub: sin base ASN
+  u.ignores = function(){ try { return JSON.parse(__user_get(u.__name, "ignoresJson") || "[]"); } catch (e) { return []; } };
   // En contexto string el objeto se comporta como su nombre: mantiene
   // compat con handlers "nativos" de Astra que usaban el nombre (string)
   // como primer argumento (concatenación, ==, plantillas).
@@ -555,7 +580,15 @@ var Users = {
       return r;
     });
   },
-  banned: function(){ return []; },
+  // JSBannedUser reales (con unban()), sobre la ban list del server.
+  banned: function(){
+    var arr;
+    try { arr = JSON.parse(__banned_json()); } catch (e) { return []; }
+    return arr.map(function(b){
+      b.unban = function(){ return __unban_ident(b.ident); };
+      return b;
+    });
+  },
   // Usuarios remotos vía link: (linkName, userName) → objetos user.
   linked: function(){
     var arr;
@@ -1190,9 +1223,51 @@ fn user_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "personalMessage" => JsValue::from(js_string!(u.personal_message.lock().clone())),
         "customName" => JsValue::from(js_string!(u.custom_name.read().clone().unwrap_or_default())),
         "joinTime" => JsValue::from(u.join_time as f64),
+        // Props añadidas por la auditoría de scripting (paridad JSUser sb0t).
+        "captcha" => JsValue::from(!u.needs_captcha.load(Relaxed)),
+        "idle" => JsValue::from(app.idle.is_idle(u.id)),
+        "visible" => JsValue::from(!u.cloaked.load(Relaxed)),
+        "ghost" => JsValue::from(u.ghosting),
+        "localEP" => JsValue::from(js_string!(format!("{}:{}", u.local_ip, u.data_port))),
+        "linked" => JsValue::from(false),
+        "leaf" => JsValue::null(),
+        "ignoresJson" => {
+            let list = u.ignore_list.read().clone();
+            JsValue::from(js_string!(serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())))
+        }
         _ => JsValue::null(),
     };
     Ok(v)
+}
+
+/// `__banned_json()` — lista de bans activos como JSON (para `Users.banned()`).
+fn banned_json_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let json = lookup_app(ctx)
+        .map(|app| {
+            let mut arr = Vec::new();
+            app.bans.for_each(|b| {
+                arr.push(serde_json::json!({
+                    "name": b.name,
+                    "version": b.version,
+                    "externalIp": b.external_ip.to_string(),
+                    "ident": b.ident,
+                }));
+            });
+            serde_json::Value::Array(arr).to_string()
+        })
+        .unwrap_or_else(|| "[]".to_string());
+    Ok(JsValue::from(js_string!(json)))
+}
+
+/// `__unban_ident(ident)` — quita un ban por ident (para `bannedUser.unban()`).
+fn unban_ident_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let ident = args
+        .get(0)
+        .and_then(|v| v.as_number())
+        .map(|n| n as u16)
+        .unwrap_or(0);
+    let ok = lookup_app(ctx).map(|app| app.bans.unban(ident)).unwrap_or(false);
+    Ok(JsValue::from(ok))
 }
 
 /// `__user_do(name, action, arg)` — ejecuta una acción sobre el usuario
@@ -1216,8 +1291,9 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
             );
             w.write_string_nt("You have been kicked from the room.").ok();
             let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
-            let uid = u.id;
-            app.user_pool.remove(uid);
+            // PART broadcast a toda la sala (paridad IUser.Disconnect de
+            // sb0t) — sin esto los demás clientes ven un usuario fantasma.
+            app.force_part_user(&u);
             true
         }
         "ban" => {
@@ -1230,20 +1306,185 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
                 u.data_port,
             );
             if ident != 0 {
+                // Registro para /banstats (el "banner" es el script).
+                app.record_ban("script", &u.name.read(), &u.external_ip.to_string());
                 let mut w = proto_ares::PacketWriter::with_msg_crypto(
                     proto_ares::TcpMsg::ServerError,
                     u.ares_crypto,
                 );
                 w.write_string_nt("You have been banned from the room.").ok();
                 let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
-                app.user_pool.remove(u.id);
+                app.force_part_user(&u);
                 true
             } else {
                 false
             }
         }
-        "sendText" | "sendPM" | "sendHTML" => u.send_pvt(&bot, &arg),
-        "sendEmote" => u.send_pvt(&bot, &arg),
+        // Paridad sb0t `IUser.SendText/SendEmote` (AresClient.cs:345): el
+        // usuario "dice" el texto/emote EN PÚBLICO a todo su vroom — es el
+        // mecanismo de #clone. (El PM del bot es `sendPM`.)
+        "sendText" => {
+            let name = u.name.read().clone();
+            let vroom = *u.vroom.read();
+            for other in app.user_pool.users() {
+                if other.logged_in
+                    && *other.vroom.read() == vroom
+                    && !other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+                    && !other.ignore_list.read().iter().any(|n| n.eq_ignore_ascii_case(&name))
+                {
+                    let _ = other.send_public(&name, &arg);
+                }
+            }
+            true
+        }
+        "sendEmote" => {
+            let name = u.name.read().clone();
+            let vroom = *u.vroom.read();
+            for other in app.user_pool.users() {
+                if other.logged_in
+                    && *other.vroom.read() == vroom
+                    && !other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+                    && !other.ignore_list.read().iter().any(|n| n.eq_ignore_ascii_case(&name))
+                {
+                    let _ = other.send_emote(&name, &arg);
+                }
+            }
+            true
+        }
+        // sendHTML: a ESE usuario (los clientes Astra no renderizan HTML,
+        // va como texto de sistema — paridad funcional con SendHTML).
+        "sendPM" | "sendHTML" => u.send_pvt(&bot, &arg),
+        // ---- Setters writable (paridad JSUser de sb0t) ----
+        "set:customName" => {
+            let next = if arg.trim().is_empty() {
+                None
+            } else {
+                Some(arg.trim().chars().take(40).collect::<String>())
+            };
+            *u.custom_name.write() = next.clone();
+            app.publish_link_event(server_core::LinkEvent::CustomName {
+                origin: None,
+                name: u.name.read().clone(),
+                custom_name: next,
+            });
+            true
+        }
+        "set:muzzled" => {
+            let v = arg == "true" || arg == "1";
+            u.muzzled.store(v, std::sync::atomic::Ordering::Relaxed);
+            app.publish_link_event(server_core::LinkEvent::UserUpdated {
+                origin: None,
+                user: server_core::LinkUserSnapshot::from_user(&u),
+            });
+            true
+        }
+        "set:vroom" => {
+            let Ok(new_vroom) = arg.trim().parse::<u16>() else {
+                return Ok(JsValue::from(false));
+            };
+            let old_vroom = *u.vroom.read();
+            if old_vroom == new_vroom {
+                return Ok(JsValue::from(true));
+            }
+            // PART del vroom viejo + JOIN al nuevo para los espectadores.
+            let mut part_user = server_core::user_pool::AresUser::new(u.id, u.external_ip, u.guid);
+            part_user.logged_in = true;
+            *part_user.name.write() = u.name.read().clone();
+            *part_user.vroom.write() = old_vroom;
+            *u.vroom.write() = new_vroom;
+            for other in app.user_pool.users() {
+                if !other.logged_in
+                    || other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    continue;
+                }
+                let ov = *other.vroom.read();
+                if ov == old_vroom {
+                    let _ = other.send(server_core::outbound::build_part_c(&part_user, other.ares_crypto));
+                }
+                if ov == new_vroom {
+                    let _ = other.send(server_core::outbound::build_join_or_userlist_c(&u, other.ares_crypto));
+                }
+            }
+            app.publish_link_event(server_core::LinkEvent::VroomChanged {
+                origin: None,
+                user: server_core::LinkUserSnapshot::from_user(&u),
+            });
+            true
+        }
+        "set:level" => {
+            let Ok(v) = arg.trim().parse::<u8>() else {
+                return Ok(JsValue::from(false));
+            };
+            let new_level = match v {
+                0 => server_core::ILevel::Anonymous,
+                1 => server_core::ILevel::Regular,
+                2 => server_core::ILevel::Voice,
+                50 => server_core::ILevel::Moderator,
+                80 => server_core::ILevel::Admin,
+                100 => server_core::ILevel::Owner,
+                _ => return Ok(JsValue::from(false)),
+            };
+            *u.level.write() = new_level;
+            if let Ok(Some(_)) = app.accounts.find_by_guid(&u.guid) {
+                let _ = app.accounts.set_level(&u.guid, new_level as u8);
+            }
+            // Refrescar el nivel en los clientes de su vroom.
+            let vroom = *u.vroom.read();
+            let uname = u.name.read().clone();
+            let ws_msg = format!("UPDATE:{},1:{}{}", uname.encode_utf16().count(), uname, new_level as u8);
+            for other in app.user_pool.users() {
+                if !other.logged_in || *other.vroom.read() != vroom {
+                    continue;
+                }
+                if let Some(tx) = &other.ws_text_sender {
+                    let _ = tx.send(ws_msg.clone());
+                } else {
+                    let _ = other.send(server_core::outbound::build_join_or_userlist_c(&u, other.ares_crypto));
+                }
+            }
+            app.publish_link_event(server_core::LinkEvent::UserUpdated {
+                origin: None,
+                user: server_core::LinkUserSnapshot::from_user(&u),
+            });
+            true
+        }
+        // ---- Métodos restantes ----
+        "redirect" => match server_core::hashlink::decode(&arg) {
+            Some(hr) => {
+                let _ = u.send(server_core::outbound::build_redirect_c(
+                    std::net::IpAddr::V4(hr.ip),
+                    hr.port,
+                    &app.settings.room_name,
+                    u.ares_crypto,
+                ));
+                app.force_part_user(&u);
+                true
+            }
+            None => {
+                // También ip:port plano (extra de Astra).
+                if let Some((ip_s, port_s)) = arg.rsplit_once(':') {
+                    if let (Ok(ip), Ok(port)) = (ip_s.parse::<std::net::IpAddr>(), port_s.parse::<u16>()) {
+                        let _ = u.send(server_core::outbound::build_redirect_c(
+                            ip, port, &app.settings.room_name, u.ares_crypto,
+                        ));
+                        app.force_part_user(&u);
+                        return Ok(JsValue::from(true));
+                    }
+                }
+                false
+            }
+        },
+        "setTopic" => {
+            // Topic dirigido SOLO a ese usuario (paridad IUser.SetTopic).
+            let _ = u.send(server_core::outbound::build_topic_c(&arg, u.ares_crypto));
+            true
+        }
+        "nudge" => {
+            // Sin opcode de nudge dedicado: se aproxima con un texto del
+            // server a ese usuario (los clientes web no soportan buzz).
+            u.print(&bot, "*** nudge ***")
+        }
         _ => false,
     };
     Ok(JsValue::from(ok))
@@ -3206,6 +3447,11 @@ pub fn eval_script(ctx: &mut Context, source: &str) -> Result<(), String> {
 /// el objeto tiene toString/valueOf = nombre, así que sigue funcionando en
 /// contexto string.
 pub fn build_user_object(ctx: &mut Context, name: &str) -> JsValue {
+    // Nombre vacío = "sin usuario" (p.ej. target no resuelto de onCommand):
+    // el handler recibe null, como en sb0t.
+    if name.is_empty() {
+        return JsValue::null();
+    }
     let user_fn = match ctx.global_object().get(js_string!("user"), ctx) {
         Ok(v) if v.is_object() => v,
         _ => return JsValue::from(js_string!(name)),
@@ -3822,13 +4068,57 @@ mod tests {
             if (names.indexOf("Alice") < 0) throw "names missing Alice";
             var locals = Users.local();
             if (locals.length !== 1 || locals[0].name !== "Alice") throw "local() bad";
-            // sendText llega como PM al usuario
+            // sendText: el usuario "dice" el texto en público (paridad
+            // sb0t IUser.SendText — mecanismo de #clone).
             if (u.sendText("hola") !== true) throw "sendText not true";
         "#,
         );
         assert!(result.is_ok(), "user object should resolve: {:?}", result);
         let pkt = rx.try_recv().expect("Alice should receive a packet from sendText");
-        assert_eq!(pkt[0], 25, "expected Pmt opcode (25), got {}", pkt[0]);
+        assert_eq!(pkt[0], 10, "expected Public opcode (10), got {}", pkt[0]);
+        let mut r = proto_ares::PacketReader::new(&pkt[1..]);
+        assert_eq!(r.read_string_nt().unwrap(), "Alice", "el público sale como el usuario");
+        assert_eq!(r.read_string_nt().unwrap(), "hola");
+        unregister_context(&ctx);
+    }
+
+    #[test]
+    fn user_setters_and_new_props() {
+        let app = make_app();
+        let (alice, _rx) = make_user(1, "Alice", "10.0.0.1");
+        app.user_pool.add(alice.clone());
+
+        let mut ctx = make_context(app.clone());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            var u = user("Alice");
+            // Props nuevas
+            if (u.visible !== true) throw "visible bad";
+            if (u.idle !== false) throw "idle bad";
+            if (u.linked !== false) throw "linked bad";
+            if (u.localEP.indexOf(":") < 0) throw "localEP bad: " + u.localEP;
+            // Setters writable (paridad sb0t)
+            u.customName = "Alicia";
+            if (u.customName !== "Alicia") throw "customName setter bad: " + u.customName;
+            u.muzzled = true;
+            if (u.muzzled !== true) throw "muzzled setter bad";
+            u.level = 50;
+            if (u.level !== 50) throw "level setter bad: " + u.level;
+            u.vroom = 3;
+            if (u.vroom !== 3) throw "vroom setter bad: " + u.vroom;
+            // Métodos stub no revientan
+            if (u.getASN() !== null) throw "getASN bad";
+            if (u.setUrl("x") !== false) throw "setUrl bad";
+            var ig = u.ignores();
+            if (!Array.isArray(ig)) throw "ignores bad";
+        "#,
+        );
+        assert!(result.is_ok(), "setters/props: {:?}", result);
+        assert_eq!(alice.custom_name.read().clone(), Some("Alicia".to_string()));
+        assert!(alice.is_muzzled());
+        assert_eq!(*alice.level.read(), server_core::ILevel::Moderator);
+        assert_eq!(*alice.vroom.read(), 3);
         unregister_context(&ctx);
     }
 

@@ -93,6 +93,9 @@ pub mod text_effects;
 /// Flags de sala (toggles caps/scribbles/audios/... on|off).
 pub mod room_flags;
 
+/// Hashlinks de sala Ares (`arlnk://`), paridad `core/Hashlink.cs` de sb0t.
+pub mod hashlink;
+
 /// Filtros de nombre (join / file).
 pub mod name_filters;
 

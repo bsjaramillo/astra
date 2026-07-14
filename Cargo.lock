@@ -2781,6 +2781,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "flate2",
  "futures",
  "hmac",
  "maxminddb",

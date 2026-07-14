@@ -108,6 +108,27 @@ pub async fn handle_connection(
 
     let user_id = user.id;
 
+    // Gate de scripts (onJoinCheck, paridad sb0t `Joining`): un script puede
+    // rechazar el join antes de anunciar al usuario.
+    {
+        let jname = user.name.read().clone();
+        let jip = user.external_ip.to_string();
+        if !scripting.check_join(&jname, &jip) {
+            info!("ws join de '{}' rechazado por script (onJoinCheck)", jname);
+            let _ = user.print(&ctx.settings.bot_name, "You have been rejected from this room.");
+            scripting.dispatch(ScriptEvent::Rejected {
+                name: jname,
+                ip: jip,
+                reason: "script".to_string(),
+            });
+            ctx.user_pool.remove(user_id);
+            ctx.stats.on_user_part();
+            drop(ws_text_tx);
+            let _ = write_task.await;
+            return Ok(());
+        }
+    }
+
     // Autologin (cuenta por GUID, o reconocimiento por IP+GUID): a
     // diferencia del path TCP nativo (donde el cliente debe mandar el
     // opcode `ClientAutologin` explícitamente), el protocolo de texto ib0t
@@ -585,12 +606,18 @@ pub(crate) fn avatar_b64_of(user: &AresUser) -> String {
 fn ws_is_text_flooding(
     ctx: &AppContext,
     user: &Arc<AresUser>,
+    scripting: &astra_scripting::ScriptHandle,
     kind: server_core::flood_control::FloodKind,
     text: &str,
 ) -> bool {
     let level = *user.level.read();
     let now = server_core::time::unix_time();
     if user.flood.is_flooding(kind, text, level, now) {
+        // Gate de scripts (onFloodBefore): false → perdonar el flood.
+        let fname = user.name.read().clone();
+        if !scripting.check_flood(&fname, text) {
+            return false;
+        }
         ctx.stats.on_flood();
         if let Some(tx) = &user.ws_text_sender {
             let _ = tx.send(
@@ -626,13 +653,13 @@ async fn dispatch_ws_message(
             // Control de flood (rate-limit + duplicados). Comandos (/ o #)
             // exentos. Nivel > Regular exento (lo maneja is_flooding).
             let is_cmd = args.trim_start().starts_with(['/', '#']);
-            if !is_cmd && ws_is_text_flooding(ctx, user, FloodKind::Public, args) {
+            if !is_cmd && ws_is_text_flooding(ctx, user, scripting, FloodKind::Public, args) {
                 return Ok(true);
             }
             handle_ws_public(ctx, user, args, scripting);
         }
         "EMOTE" => {
-            if ws_is_text_flooding(ctx, user, FloodKind::Emote, args) {
+            if ws_is_text_flooding(ctx, user, scripting, FloodKind::Emote, args) {
                 return Ok(true);
             }
             handle_ws_emote(ctx, user, args, scripting);
@@ -642,7 +669,7 @@ async fn dispatch_ws_message(
         }
         "COMMAND" => handle_ws_command(ctx, user, args, scripting),
         "PM" => {
-            if ws_is_text_flooding(ctx, user, FloodKind::Pm, "") {
+            if ws_is_text_flooding(ctx, user, scripting, FloodKind::Pm, "") {
                 return Ok(true);
             }
             handle_ws_pm(ctx, user, args, scripting);
@@ -692,6 +719,7 @@ fn handle_ws_command(
     scripting.dispatch(astra_scripting::ScriptEvent::Command {
         from,
         command: cmd.to_string(),
+        target: astra_commands::resolve_command_target(ctx, cargs),
         args: cargs.to_string(),
     });
 }
@@ -703,6 +731,16 @@ fn handle_ws_public(
     scripting: &astra_scripting::ScriptHandle,
 ) {
     if text.is_empty() {
+        return;
+    }
+    // Eval inline `@código` (paridad sb0t, gated a Owner): no se difunde.
+    if let Some(code) = text.strip_prefix('@') {
+        if (*user.level.read() as u8) >= server_core::ILevel::Owner as u8 {
+            let name = user.name.read().clone();
+            if let Err(e) = scripting.eval_chat(&name, code) {
+                let _ = user.print(&ctx.settings.bot_name, &format!("eval error: {}", e));
+            }
+        }
         return;
     }
     // Comando: `/cmd` o `#cmd` (paridad WebProcessor.Text de sb0t).
@@ -729,11 +767,13 @@ fn handle_ws_public(
         }
     }
     let name = user.name.read().clone();
-    // Hook cancelable onTextBefore (paridad TCP): un script puede bloquear el
-    // mensaje devolviendo false.
-    if !scripting.check_text_before(&name, text) {
-        return;
-    }
+    // Hook onTextBefore (paridad TCP): un script puede cancelar (None) o
+    // REESCRIBIR el mensaje (Some(texto)).
+    let text = match scripting.check_text_before(&name, text) {
+        Some(t) => t,
+        None => return,
+    };
+    let text = text.as_str();
     // Hablar en público saca del idle (paridad sb0t WebProcessor).
     if ctx.unidle_user(user).is_some() {
         scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
@@ -803,10 +843,12 @@ fn handle_ws_pm(
         );
         return;
     }
-    // Hook cancelable onPMBefore + evento onPrivate (paridad TCP).
-    if !scripting.check_pm_before(&from, target_name, &text) {
-        return;
-    }
+    // Hook onPMBefore + evento onPrivate (paridad TCP): puede cancelar o
+    // reescribir el PM.
+    let text = match scripting.check_pm_before(&from, target_name, &text) {
+        Some(t) => t,
+        None => return,
+    };
     ctx.stats.on_pm();
     scripting.dispatch(astra_scripting::ScriptEvent::Private {
         from: from.clone(),
@@ -1245,10 +1287,12 @@ fn handle_ws_emote(
         return;
     }
     let name = user.name.read().clone();
-    // Hook cancelable onEmoteBefore (paridad TCP).
-    if !scripting.check_emote_before(&name, text) {
-        return;
-    }
+    // Hook onEmoteBefore (paridad TCP): puede cancelar o reescribir.
+    let text = match scripting.check_emote_before(&name, text) {
+        Some(t) => t,
+        None => return,
+    };
+    let text = text.as_str();
     // Paridad sb0t WebProcessor: unidle si estaba idle; un emote que empieza
     // con "idles" marca ausente (`#me idles almorzando`), y se difunde igual.
     if ctx.unidle_user(user).is_some() {
