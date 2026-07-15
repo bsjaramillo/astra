@@ -375,9 +375,16 @@ async fn ws_handshake_login(
     let frame = read_ws_frame(read_half, buf).await?;
     let (opcode, payload) = match frame {
         Some(f) => f,
-        None => return Ok(None),
+        None => {
+            // El cliente abrió el WebSocket y lo cerró SIN mandar el login.
+            // Este patrón, repetido desde una misma IP, es el síntoma de un
+            // cliente/healthcheck reconectando en bucle sin llegar a entrar.
+            info!("ws: {} abrió el WebSocket y lo cerró sin mandar login", peer);
+            return Ok(None);
+        }
     };
     if !matches!(opcode, WsOpcode::Text) {
+        info!("ws: {} mandó un primer frame no-texto (opcode {:?}), sin login", peer, opcode);
         return Ok(None);
     }
 

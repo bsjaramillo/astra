@@ -80,6 +80,26 @@ async fn handle_ws_connection(
         }
     };
 
+    // 2.5) Rate-limit de conexiones por IP — SOLO para handshakes WebSocket
+    // de clientes de sala (no para el panel HTTP, que hace polling `fetch`
+    // cada 5s y NO debe contar como "conexión nueva": si contara, el propio
+    // administrador se auto-banearía). Paridad con el path Ares nativo. Se
+    // exime a proxies reversos confiables y loopback (detrás de un proxy
+    // todos los usuarios web comparten la IP, así que ahí no se puede
+    // limitar por IP).
+    if !ctx.trusted_proxies.is_trusted(peer.ip()) {
+        if let Some(reason) = ctx.security.conn_flood.check(peer.ip()) {
+            warn!(
+                "REJECTED WS (rate limit de conexiones por IP): {} — {}",
+                peer,
+                reason.message()
+            );
+            // Cerrar sin completar el upgrade (el cliente verá conexión rechazada).
+            let _ = send_http_error(&mut stream, 429, "Too many connections").await;
+            return Ok(());
+        }
+    }
+
     // 3) Calcular Sec-WebSocket-Accept
     let accept = compute_accept_key(&key);
 
