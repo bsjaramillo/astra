@@ -2080,7 +2080,8 @@ fn push_level_refresh(ctx: &AppContext, target: &Arc<AresUser>) {
     ));
     let name = target.name.read().clone();
     let vroom = *target.vroom.read();
-    let ws_msg = format!("UPDATE:{},1:{}{}", name.encode_utf16().count(), name, level as u8);
+    let level_str = (level as u8).to_string();
+    let ws_msg = format!("UPDATE:{},{}:{}{}", name.encode_utf16().count(), level_str.len(), name, level_str);
     for u in ctx.user_pool.users() {
         if !u.logged_in
             || *u.vroom.read() != vroom
@@ -2252,7 +2253,8 @@ fn apply_level(
     let level_byte = new_level as u8;
     let name = target.name.read().clone();
     let vroom = *target.vroom.read();
-    let ws_msg = format!("UPDATE:{},1:{}{}", name.encode_utf16().count(), name, level_byte);
+    let level_str = level_byte.to_string();
+    let ws_msg = format!("UPDATE:{},{}:{}{}", name.encode_utf16().count(), level_str.len(), name, level_str);
     for u in ctx.user_pool.users() {
         if !u.logged_in
             || *u.vroom.read() != vroom

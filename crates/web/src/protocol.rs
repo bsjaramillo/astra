@@ -214,29 +214,39 @@ fn userinfo_like(
     inbizier_mobile: bool,
 ) -> String {
     let id_str = id.to_string();
+    let level_str = level.to_string();
     let web = if inbizier_web { "1" } else { "0" };
     let mobile = if inbizier_mobile { "1" } else { "0" };
-    // lens: name,pmsg,avatar,id,1,1,1 ; vals: name+pmsg+avatar+id+level+web+mobile
+    // lens: name,pmsg,avatar,id,LEVEL,1,1 ; vals: name+pmsg+avatar+id+level+web+mobile
+    // OJO: la longitud del nivel DEBE ser la real (`clen(level_str)`), no un
+    // "1" hardcodeado — el cliente parsea cada campo por su longitud declarada
+    // (`substring(0, len)`), así que un nivel de 2-3 dígitos (Moderator=50,
+    // Admin=80, Owner=100) declarado con largo 1 hacía que el cliente leyera
+    // solo el primer dígito y desalineara todo lo que sigue.
     format!(
-        "{}:{},{},{},{},1,1,1:{}{}{}{}{}{}{}",
+        "{}:{},{},{},{},{},1,1:{}{}{}{}{}{}{}",
         ident,
         clen(name),
         clen(pmsg),
         clen(avatar_b64),
         clen(&id_str),
+        clen(&level_str),
         name,
         pmsg,
         avatar_b64,
         id_str,
-        level,
+        level_str,
         web,
         mobile
     )
 }
 
-/// `USERLIST:{nameLen},1:{name}{level}` — item de userlist simple (no inbizier).
+/// `USERLIST:{nameLen},{levelLen}:{name}{level}` — item de userlist simple
+/// (no inbizier). La longitud del nivel debe ser la real (ver nota en
+/// `userinfo_like`): niveles de 2-3 dígitos con largo 1 desalinean el parseo.
 pub fn build_userlist_item(name: &str, level: u8) -> String {
-    format!("USERLIST:{},1:{}{}", clen(name), name, level)
+    let level_str = level.to_string();
+    format!("USERLIST:{},{}:{}{}", clen(name), clen(&level_str), name, level_str)
 }
 
 /// `USERLIST_END:` — fin de la userlist.
@@ -286,9 +296,11 @@ pub fn build_pm(name: &str, text: &str) -> String {
     format!("PM:{},{}:{}{}", clen(name), clen(text), name, text)
 }
 
-/// `UPDATE:{nameLen},1:{name}{level}` — cambio de nivel de un usuario.
+/// `UPDATE:{nameLen},{levelLen}:{name}{level}` — cambio de nivel de un usuario.
+/// La longitud del nivel debe ser la real (ver nota en `userinfo_like`).
 pub fn build_update(name: &str, level: u8) -> String {
-    format!("UPDATE:{},1:{}{}", clen(name), name, level)
+    let level_str = level.to_string();
+    format!("UPDATE:{},{}:{}{}", clen(name), clen(&level_str), name, level_str)
 }
 
 /// `NOSUCH:{len}:{text}`.
@@ -573,14 +585,15 @@ mod tests {
 
     #[test]
     fn build_userinfo_shape() {
-        // USERINFO:name,pmsg,av,id,1,1,1:{name}{pmsg}{av}{id}{level}{web}{mobile}
+        // USERINFO:name,pmsg,av,id,LEVEL,1,1:{name}{pmsg}{av}{id}{level}{web}{mobile}
+        // El largo del nivel es el REAL (100 → 3 chars), no 1 hardcodeado.
         let s = build_userinfo("Ann", "", "", 7, 100, true, false);
-        assert_eq!(s, "USERINFO:3,0,0,1,1,1,1:Ann710010");
+        assert_eq!(s, "USERINFO:3,0,0,1,3,1,1:Ann710010");
     }
 
     #[test]
     fn build_userlist_item_simple() {
-        assert_eq!(build_userlist_item("Cy", 50), "USERLIST:2,1:Cy50");
+        assert_eq!(build_userlist_item("Cy", 50), "USERLIST:2,2:Cy50");
     }
 
     #[test]
@@ -637,14 +650,14 @@ mod tests {
         let name = "luna💖";
         let s = build_userinfo(name, "", "", 1, 100, false, true);
         // "luna" (4) + 💖 (2 utf16 units) = 6
-        assert!(s.starts_with(&format!("USERINFO:6,0,0,1,1,1,1:{}", name)));
+        assert!(s.starts_with(&format!("USERINFO:6,0,0,1,3,1,1:{}", name)));
     }
 
     #[test]
     fn level_is_decimal_byte() {
         // level 100 → "100", concatenado tras el id.
         let s = build_userinfo("X", "", "", 0, 255, false, true);
-        assert_eq!(s, "USERINFO:1,0,0,1,1,1,1:X025501");
+        assert_eq!(s, "USERINFO:1,0,0,1,3,1,1:X025501");
     }
 
     #[test]

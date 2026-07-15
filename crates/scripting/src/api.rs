@@ -1479,7 +1479,8 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
             // Refrescar el nivel en los clientes de su vroom.
             let vroom = *u.vroom.read();
             let uname = u.name.read().clone();
-            let ws_msg = format!("UPDATE:{},1:{}{}", uname.encode_utf16().count(), uname, new_level as u8);
+            let lvl_str = (new_level as u8).to_string();
+            let ws_msg = format!("UPDATE:{},{}:{}{}", uname.encode_utf16().count(), lvl_str.len(), uname, lvl_str);
             for other in app.user_pool.users() {
                 if !other.logged_in || *other.vroom.read() != vroom {
                     continue;

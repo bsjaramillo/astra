@@ -159,9 +159,18 @@ pub async fn handle_tcp_client(
     // ============================================================
     // Post-login: enviar JOIN a los demás y USERLIST al nuevo
     // ============================================================
+    // Autologin ANTES del estado inicial (paridad sb0t `Joined()`: corre
+    // `AutoLogin.GetLevel` para todos los que entran). DEBE correr antes de
+    // `send_initial_state` y del broadcast del JOIN, para que el nivel ya
+    // esté aplicado cuando se manda el USERLIST/JOIN — si no, los clientes
+    // ven al usuario como Regular y nunca reciben su nivel real (el path web
+    // ya lo hacía en este orden; el TCP nativo lo aplicaba DESPUÉS y por eso
+    // el nivel del autologin no llegaba en el paquete de entrada).
+    let _ = astra_commands::dispatch_autologin(&ctx, &user);
+
     send_initial_state(&ctx, &user, &scripting).await;
 
-    // Broadcast del JOIN a los usuarios existentes
+    // Broadcast del JOIN a los usuarios existentes (ya con el nivel aplicado).
     broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
     ctx.publish_link_event(LinkEvent::Join {
         origin: None,
@@ -172,12 +181,6 @@ pub async fn handle_tcp_client(
         name: user.name.read().clone(),
         ip: user.external_ip.to_string(),
     });
-
-    // Autologin al entrar (paridad sb0t `Joined()`: corre `AutoLogin.GetLevel`
-    // para TODOS los que entran y les aplica el nivel). Antes esto solo pasaba
-    // si el cliente mandaba el opcode `ClientAutologin` — los clientes que no
-    // lo mandan entraban como regulares aunque tuvieran autologin.
-    let _ = astra_commands::dispatch_autologin(&ctx, &user);
 
     // Greet de bienvenida (PM del bot al usuario que entra)
     send_greet(&ctx, &user);
