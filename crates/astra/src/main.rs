@@ -139,14 +139,42 @@ async fn main() -> anyhow::Result<()> {
     }
     let web_enabled = settings.web_enabled && !cli.no_web;
 
-    // Init tracing: a consola Y a archivo rotativo diario en <data_dir>/logs/.
-    // El `WorkerGuard` del appender no-bloqueante debe vivir todo el programa
-    // (si se dropea, se deja de vaciar el buffer al archivo).
+    // Init tracing: a consola Y (si se puede) a archivo rotativo diario en
+    // <data_dir>/logs/. El `WorkerGuard` del appender no-bloqueante debe vivir
+    // todo el programa (si se dropea, se deja de vaciar el buffer al archivo).
+    //
+    // El log a archivo es BEST-EFFORT: si el directorio no se puede crear o no
+    // es escribible (típico en Docker cuando el volumen pertenece a otro
+    // usuario o está montado read-only), el server NO debe morir — degrada a
+    // solo consola. Antes `rolling::daily` paniqueaba en ese caso.
     let log_level = if cli.verbose { "debug" } else { "info" };
     let logs_dir = std::path::Path::new(&settings.data_dir).join("logs");
-    let _ = std::fs::create_dir_all(&logs_dir);
-    let file_appender = tracing_appender::rolling::daily(&logs_dir, "astra.log");
-    let (file_writer, _log_guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer_result = std::fs::create_dir_all(&logs_dir)
+        .map_err(|e| e.to_string())
+        .and_then(|_| {
+            tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix("astra.log")
+                .build(&logs_dir)
+                .map_err(|e| e.to_string())
+        });
+    let (file_layer, _log_guard) = match file_layer_result {
+        Ok(appender) => {
+            let (file_writer, guard) = tracing_appender::non_blocking(appender);
+            let layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer);
+            (Some(layer), Some(guard))
+        }
+        Err(e) => {
+            eprintln!(
+                "WARN: no se pudo iniciar el log a archivo en {} ({}); usando solo consola",
+                logs_dir.display(),
+                e
+            );
+            (None, None)
+        }
+    };
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -156,13 +184,12 @@ async fn main() -> anyhow::Result<()> {
             .with(filter)
             // Consola (con colores).
             .with(tracing_subscriber::fmt::layer())
-            // Archivo (sin códigos ANSI de color).
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_ansi(false)
-                    .with_writer(file_writer),
-            )
+            // Archivo (sin colores). `Option<Layer>` = no-op si no hay archivo.
+            .with(file_layer)
             .init();
+    }
+    if _log_guard.is_none() {
+        warn!("logs solo a consola (el archivo no está disponible)");
     }
 
     info!("╔════════════════════════════════════════╗");
