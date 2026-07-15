@@ -39,7 +39,11 @@ async fn handle_ws_connection(
     peer: SocketAddr,
     scripting: astra_scripting::ScriptHandle,
 ) -> anyhow::Result<()> {
-    info!("nueva conexión WS desde {}", peer);
+    // "HTTP" y no "WS": hasta leer el request no sabemos si es un handshake
+    // WebSocket (cliente de sala) o un GET normal (panel). Los logs de más
+    // abajo ("WS conectado" / "sirviendo panel HTTP") lo aclaran, para que sea
+    // fácil distinguir qué es cada conexión en el log.
+    debug!("nueva conexión HTTP desde {}", peer);
 
     // 1) Leer el handshake HTTP
     let request = read_http_request(&mut stream).await?;
@@ -63,10 +67,13 @@ async fn handle_ws_connection(
             // HTTP plano (sin upgrade a WebSocket): servir el panel HTML
             // en GET /; cualquier otra cosa es un 400.
             if request.method.eq_ignore_ascii_case("GET") {
-                debug!("HTTP GET {} de {}: sirviendo panel", request.path, peer);
+                // GET normal (navegador abriendo la URL): NO es un cliente de
+                // sala, es el panel HTML. Se loguea distinto para que no se
+                // confunda con un intento de entrar a la sala.
+                info!("HTTP GET {} de {}: sirviendo panel (no es cliente de sala)", request.path, peer);
                 send_http_html(&mut stream, crate::panel::INDEX_HTML).await?;
             } else {
-                warn!("WS handshake sin Sec-WebSocket-Key");
+                warn!("HTTP {} de {} sin Sec-WebSocket-Key (no es WS): 400", request.method, peer);
                 send_http_error(&mut stream, 400, "Missing Sec-WebSocket-Key").await?;
             }
             return Ok(());

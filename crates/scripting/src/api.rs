@@ -3541,6 +3541,15 @@ pub fn eval_script(ctx: &mut Context, source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Como `eval_script` pero devuelve el valor resultante como string (debug).
+#[cfg(test)]
+pub fn eval_script_value(ctx: &mut Context, source: &str) -> Result<String, String> {
+    let v = ctx
+        .eval(boa_engine::Source::from_bytes(source.as_bytes()))
+        .map_err(|e| format!("eval error: {}", e))?;
+    Ok(v.to_string(ctx).map(|s| s.to_std_string_lossy()).unwrap_or_default())
+}
+
 /// Construye el objeto `user` (JSUser) para `name` invocando el global
 /// `user(name)` del prelude. Si el prelude no está disponible, cae al string
 /// del nombre. Se usa para pasar un JSUser a los handlers (paridad sb0t);

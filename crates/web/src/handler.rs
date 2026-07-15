@@ -718,7 +718,9 @@ fn handle_ws_command(
     let from = user.name.read().clone();
     scripting.dispatch(astra_scripting::ScriptEvent::Command {
         from,
-        command: cmd.to_string(),
+        // Línea completa (nombre + args), paridad sb0t — los scripts hacen
+        // command.split(" ") para leer sus argumentos.
+        command: astra_commands::command_full_line(cmd, cargs),
         target: astra_commands::resolve_command_target(ctx, cargs),
         args: cargs.to_string(),
     });

@@ -96,6 +96,39 @@ mod tests {
         assert!(!mgr.is_trusted("8.8.8.8".parse().unwrap()));
     }
 
+    /// Escenario del rate-limit web: una IP pública de cliente (no proxy, no
+    /// loopback) NO está exenta, así que el path web la cuenta y el rate
+    /// limiter la corta si reconecta en bucle. Reproduce la lógica que aplica
+    /// `handle_muxed_connection` en el brazo Web (`counted && conn_flood`).
+    #[test]
+    fn public_client_ip_is_rate_limited_on_web_path() {
+        use crate::security::{ConnectionFloodTracker, RejectReason};
+        use crate::settings::SecurityConfig;
+        let proxies = TrustedProxyManager::new(mem_db());
+        // IP pública de un cliente reconectando en bucle (como 200.50.232.221).
+        let ip: IpAddr = "200.50.232.221".parse().unwrap();
+        // El path web hace `counted = !is_trusted(ip)`.
+        let counted = !proxies.is_trusted(ip);
+        assert!(counted, "una IP pública de cliente NO debe estar exenta");
+
+        let cfg = SecurityConfig {
+            max_new_connections_per_ip: 5,
+            connection_window_secs: 60,
+            ..SecurityConfig::default()
+        };
+        let flood = ConnectionFloodTracker::new(cfg);
+        // Primeras 5 conexiones OK; a partir de ahí, rechazo (bucle frenado).
+        for _ in 0..5 {
+            assert!(counted && flood.check(ip).is_none());
+        }
+        assert!(matches!(flood.check(ip), Some(RejectReason::ConnectionFlood)));
+
+        // Un proxy reverso confiable SÍ queda exento (no se limita por IP,
+        // porque todos los usuarios web comparten esa IP).
+        proxies.add("10.0.0.1");
+        assert!(!(!proxies.is_trusted("10.0.0.1".parse().unwrap())));
+    }
+
     #[test]
     fn add_and_persist() {
         let db = mem_db();

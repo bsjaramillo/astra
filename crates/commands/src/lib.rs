@@ -174,6 +174,13 @@ pub fn parse_command(text: &str) -> Option<(&str, &str)> {
 ///
 /// `from` es el nick del usuario que ejecutó el comando. `command` y
 /// `args` vienen de `parse_command`.
+///
+/// **Paridad sb0t (importante):** el 2º argumento que recibe `onCommand` es
+/// la **línea completa** del comando (nombre + args), NO solo el nombre —
+/// ver `TCPProcessor.Command` → `Events.Command(client, text, ...)` donde
+/// `text` es todo lo escrito tras el `#`. Los scripts hacen
+/// `command.split(" ")` para leer sus argumentos, así que pasar solo el
+/// nombre rompe cualquier subcomando con parámetros (ej. `#nuevojuego perro`).
 pub fn dispatch(
     ctx: &AppContext,
     scripting: &ScriptHandle,
@@ -181,13 +188,24 @@ pub fn dispatch(
     command: &str,
     args: &str,
 ) {
+    let full = command_full_line(command, args);
     let event = ScriptEvent::Command {
         from: from.to_string(),
-        command: command.to_string(),
+        command: full,
         target: resolve_command_target(ctx, args),
         args: args.to_string(),
     };
     scripting.dispatch(event);
+}
+
+/// Reconstruye la línea completa del comando (`"<cmd> <args>"`) que sb0t
+/// pasa a `onCommand` como 2º argumento.
+pub fn command_full_line(command: &str, args: &str) -> String {
+    if args.is_empty() {
+        command.to_string()
+    } else {
+        format!("{} {}", command, args)
+    }
 }
 
 /// Resuelve el `target` de un comando (paridad sb0t: el primer token de los
@@ -4801,6 +4819,14 @@ mod tests {
     fn parse_non_command() {
         assert!(parse_command("hola mundo").is_none());
         assert!(parse_command("").is_none());
+    }
+
+    #[test]
+    fn command_full_line_reconstructs_for_scripts() {
+        // Paridad sb0t: onCommand recibe la línea completa.
+        assert_eq!(command_full_line("nuevojuego", "perro"), "nuevojuego perro");
+        assert_eq!(command_full_line("historialjuego", ""), "historialjuego");
+        assert_eq!(command_full_line("kick", "Bob spam"), "kick Bob spam");
     }
 
     #[test]

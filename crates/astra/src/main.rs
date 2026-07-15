@@ -695,6 +695,23 @@ async fn handle_muxed_connection(
 
     match route {
         ConnectionKind::Web if web_enabled => {
+            // Rate-limit de conexiones nuevas por IP para el path web (paridad
+            // con el path Ares nativo, que ya lo aplica en `check_new_connection`).
+            // Sin esto, un cliente web que reconecta en bucle (o un flood)
+            // martillaba el server sin freno: el cap de concurrentes no lo
+            // frena porque abre y cierra rápido. Se exime a proxies reversos
+            // confiables y loopback (detrás de un proxy todos los usuarios web
+            // comparten IP, así que ahí NO se puede limitar por IP).
+            if counted {
+                if let Some(reason) = ctx.security.conn_flood.check(ip) {
+                    warn!(
+                        "REJECTED web (rate limit de conexiones por IP): {} — {}",
+                        peer,
+                        reason.message()
+                    );
+                    return Ok(());
+                }
+            }
             astra_web::handle_stream(ctx, stream, peer, scripting).await?;
         }
         ConnectionKind::Link if link_enabled => {

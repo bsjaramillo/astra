@@ -368,19 +368,52 @@ pub struct ScriptManager {
 /// `main.js`, `index.js`, y por último el primer `.js` del nivel superior.
 fn resolve_main_file(dir: &Path) -> Option<PathBuf> {
     let dir_name = dir.file_name().and_then(|s| s.to_str())?;
+    // Convención sb0t: el archivo principal se llama igual que la carpeta
+    // (`<script>/<script>.js`). También aceptamos main.js/index.js.
     for cand in [format!("{}.js", dir_name), "main.js".to_string(), "index.js".to_string()] {
         let p = dir.join(&cand);
         if p.is_file() {
             return Some(p);
         }
     }
-    // Fallback: el primer `.js` del nivel superior de la carpeta.
-    std::fs::read_dir(dir)
+
+    // Fallback (cuando el nombre no coincide): entre los `.js` del nivel
+    // superior, elegir de forma DETERMINÍSTICA y preferir el archivo que
+    // realmente parece el principal — el que define handlers de eventos
+    // (onLoad/onCommand/onJoin/...). Antes se tomaba el primer `.js` que
+    // devolvía el filesystem (orden no determinístico), lo que podía cargar
+    // un helper (`utils.js`, `constants.js`) en vez del script real, dejando
+    // el script "cargado" pero sin ninguno de sus handlers.
+    let mut js_files: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file())
-        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("js"))
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("js"))
+        .collect();
+    js_files.sort();
+
+    // Primero: el que declare algún handler de sb0t.
+    if let Some(p) = js_files.iter().find(|p| file_defines_handler(p)) {
+        return Some(p.clone());
+    }
+    // Si ninguno tiene handlers, el primero en orden alfabético (determinístico).
+    js_files.into_iter().next()
+}
+
+/// ¿El archivo `.js` define alguna función handler de sb0t (heurística para
+/// distinguir el script principal de sus helpers/includes)?
+fn file_defines_handler(path: &Path) -> bool {
+    const HANDLERS: &[&str] = &[
+        "onLoad", "onCommand", "onJoin", "onPart", "onPublic", "onText",
+        "onEmote", "onPM", "onHelp", "onTimer", "onJoinCheck",
+    ];
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    HANDLERS
+        .iter()
+        .any(|h| src.contains(&format!("function {}", h)))
 }
 
 impl ScriptManager {
@@ -2092,6 +2125,63 @@ mod tests {
             rx.try_recv().is_ok(),
             "#errors on no entregó el error de carga"
         );
+    }
+
+    #[test]
+    fn resolve_main_prefers_handler_file_when_name_mismatches() {
+        // Carpeta cuyo nombre NO coincide con el .js principal: el fallback
+        // debe elegir el archivo con handlers, no un helper al azar.
+        let dir = std::env::temp_dir().join("astra_resolve_main");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("constants.js"), "var X = 1;").unwrap();
+        std::fs::write(dir.join("utils.js"), "function helper(){ return 1; }").unwrap();
+        std::fs::write(dir.join("game.js"), "function onLoad(){} function onCommand(u,c,t,a){}").unwrap();
+
+        let main = resolve_main_file(&dir).expect("main");
+        assert_eq!(
+            main.file_name().unwrap().to_str().unwrap(),
+            "game.js",
+            "debió elegir el archivo con handlers, no un helper"
+        );
+    }
+
+    #[test]
+    fn oncommand_receives_full_command_line() {
+        // Paridad sb0t: onCommand(userobj, command, target, args) donde
+        // `command` es la LÍNEA COMPLETA (nombre + args), no solo el nombre.
+        // Un script que hace command.split(" ") debe ver los argumentos.
+        let mgr = make_manager();
+        mgr.load_source(
+            "t",
+            None,
+            r#"
+                var LAST = "";
+                function onCommand(u, command, target, args) {
+                    LAST = command;  // guardamos la línea completa recibida
+                }
+            "#,
+        )
+        .unwrap();
+
+        // Simula lo que arma commands::dispatch: command = línea completa.
+        mgr.dispatch(&ScriptEvent::Command {
+            from: "Alice".into(),
+            command: "nuevojuego perro".into(),
+            target: String::new(),
+            args: "perro".into(),
+        });
+
+        let script = mgr.get_by_name("t").unwrap();
+        let mut g = script.context.lock();
+        let ctx = g.as_mut().unwrap();
+        assert_eq!(
+            crate::api::eval_script_value(ctx, "LAST").unwrap(),
+            "nuevojuego perro",
+            "onCommand no recibió la línea completa"
+        );
+        // Y command.split(" ") da los argumentos.
+        assert_eq!(crate::api::eval_script_value(ctx, "LAST.split(' ')[1]").unwrap(), "perro");
     }
 
     #[test]
