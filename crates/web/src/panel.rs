@@ -392,6 +392,7 @@ const I18N = {
     srv_port:"Puerto principal", srv_webport:"Puerto web", srv_ownerpw:"Contraseña de dueño",
     srv_lang:"Idioma (0 = inglés)", srv_datadir:"Carpeta de datos",
     srv_webon:"Web / clientes ib0t habilitados", srv_allowreg:"Permitir registro de cuentas", srv_roomsearch:"Aparecer en la búsqueda de salas (UDP)",
+    srv_seedurl:"URL del seed de búsqueda de salas", srv_seedurl_hint:"JSON de rooms para propagarse en la red Ares al arrancar. Vacío = descarga automática desactivada.",
 
     link_h:"Enlace de salas", link_sub:"Conecta tu sala con otros servidores (Link Hub).",
     link_warn:"⚠️ Requiere <b>reiniciar el servidor</b>. El Link Hub viaja por el puerto principal (no usa un puerto aparte).",
@@ -513,6 +514,7 @@ const I18N = {
     srv_port:"Main port", srv_webport:"Web port", srv_ownerpw:"Owner password",
     srv_lang:"Language (0 = English)", srv_datadir:"Data folder",
     srv_webon:"Web / ib0t clients enabled", srv_allowreg:"Allow account registration", srv_roomsearch:"Show in room search (UDP)",
+    srv_seedurl:"Room-search seed URL", srv_seedurl_hint:"rooms JSON used to join the Ares network on startup. Empty = automatic download disabled.",
 
     link_h:"Room linking", link_sub:"Connect your room with other servers (Link Hub).",
     link_warn:"⚠️ Requires <b>restarting the server</b>. The Link Hub travels over the main port (no separate port).",
@@ -913,6 +915,7 @@ function renderServidor(){
       <label class="check"><input type="checkbox" id="cfgWebEnabled"> ${t("srv_webon")}</label>
       <label class="check"><input type="checkbox" id="cfgAllowReg"> ${t("srv_allowreg")}</label>
       <label class="check"><input type="checkbox" id="cfgRoomsearch"> ${t("srv_roomsearch")}</label>
+      <label class="fld"><span>${t("srv_seedurl")}</span><input id="cfgSeedUrl" placeholder="http://chatrooms.mywire.org/rooms.json"><small class="sub">${t("srv_seedurl_hint")}</small></label>
       <div class="rowend"><button class="btn primary" id="cfgSrvSave">${t("common_save_changes")}</button></div>
     </div>`;
 }
@@ -922,6 +925,7 @@ async function fillServerCfg(){
   g("cfgBotName").value=c.bot_name||""; g("cfgPort").value=c.port||0; g("cfgWebPort").value=c.web_port||0;
   g("cfgOwnerPw").value=c.owner_password||""; g("cfgLanguage").value=c.language||0; g("cfgDataDir").value=c.data_dir||"";
   g("cfgWebEnabled").checked=!!c.web_enabled; g("cfgAllowReg").checked=!!c.allow_registration; g("cfgRoomsearch").checked=!!c.roomsearch;
+  g("cfgSeedUrl").value=c.seed_url||"";
 }
 async function saveServerCfg(){
   const c = await loadConfig(); const g=(id)=>document.getElementById(id);
@@ -929,6 +933,7 @@ async function saveServerCfg(){
   c.port=parseInt(g("cfgPort").value)||0; c.web_port=parseInt(g("cfgWebPort").value)||0;
   c.owner_password=g("cfgOwnerPw").value; c.language=parseInt(g("cfgLanguage").value)||0; c.data_dir=g("cfgDataDir").value;
   c.web_enabled=g("cfgWebEnabled").checked; c.allow_registration=g("cfgAllowReg").checked; c.roomsearch=g("cfgRoomsearch").checked;
+  c.seed_url=g("cfgSeedUrl").value.trim();
   await postConfig(c);
 }
 

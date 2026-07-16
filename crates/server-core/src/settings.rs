@@ -59,10 +59,22 @@ pub struct Settings {
     /// `https://api.github.com`).
     #[serde(default = "default_live_scripts_endpoint")]
     pub live_scripts_endpoint: String,
+    /// URL del `rooms.json` para el seed del room-search UDP. Si el
+    /// room-search está activo y no hay ni seed local ni nodos en la DB, el
+    /// server descarga este JSON al arrancar para poder propagarse en la red
+    /// de Ares (y aparecer en el buscador de salas de los clientes). Poné una
+    /// cadena vacía para DESACTIVAR la descarga automática (podés cargar el
+    /// seed a mano con `astra seed-refresh` o dejando `seed_rooms.json`).
+    #[serde(default = "default_seed_url")]
+    pub seed_url: String,
 }
 
 fn default_live_scripts_endpoint() -> String {
     "https://api.github.com".to_string()
+}
+
+fn default_seed_url() -> String {
+    "http://chatrooms.mywire.org/rooms.json".to_string()
 }
 
 /// Un leaf autorizado a conectarse al Link Hub.
@@ -200,6 +212,7 @@ impl Default for Settings {
             security: SecurityConfig::default(),
             link_trusted_leaves: Vec::new(),
             live_scripts_endpoint: default_live_scripts_endpoint(),
+            seed_url: default_seed_url(),
         }
     }
 }

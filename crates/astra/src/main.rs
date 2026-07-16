@@ -71,16 +71,17 @@ struct Cli {
 enum Command {
     /// Descarga la lista de rooms y regenera el seed local + la DB de nodos.
     SeedRefresh {
-        /// URL del rooms.json a descargar.
-        #[arg(long, default_value = "http://chatrooms.mywire.org/rooms.json")]
-        url: String,
+        /// URL del rooms.json a descargar. Si se omite, usa `seed_url` del
+        /// archivo de configuración (que por defecto apunta al seed público).
+        #[arg(long)]
+        url: Option<String>,
     },
 }
 
-/// Ejecuta `astra seed-refresh`: descarga el rooms.json, lo valida,
-/// sobrescribe `<data_dir>/seed_rooms.json` y fuerza la recarga en la DB.
-async fn seed_refresh(settings: &Settings, url: &str) -> anyhow::Result<()> {
-    info!("descargando seed desde {}", url);
+/// Descarga el `rooms.json` desde `url`, lo valida y lo escribe en
+/// `seed_path`. Retorna la cantidad de rooms. NO toca la DB (eso lo hace el
+/// caller con `load_seed`/`load_seed_force`).
+async fn download_seed_to(url: &str, seed_path: &std::path::Path) -> anyhow::Result<usize> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
@@ -91,15 +92,22 @@ async fn seed_refresh(settings: &Settings, url: &str) -> anyhow::Result<()> {
         .error_for_status()?
         .text()
         .await?;
-
-    // Validar antes de sobrescribir el archivo local
     let count = astra_udp::validate_seed(&body)
         .map_err(|e| anyhow::anyhow!("el JSON descargado no es un seed válido: {}", e))?;
+    if let Some(parent) = seed_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(seed_path, &body)?;
+    Ok(count)
+}
 
+/// Ejecuta `astra seed-refresh`: descarga el rooms.json, lo valida,
+/// sobrescribe `<data_dir>/seed_rooms.json` y fuerza la recarga en la DB.
+async fn seed_refresh(settings: &Settings, url: &str) -> anyhow::Result<()> {
+    info!("descargando seed desde {}", url);
     let data_dir = std::path::PathBuf::from(&settings.data_dir);
-    std::fs::create_dir_all(&data_dir)?;
     let seed_path = data_dir.join("seed_rooms.json");
-    std::fs::write(&seed_path, &body)?;
+    let count = download_seed_to(url, &seed_path).await?;
     info!("seed guardado en {} ({} rooms)", seed_path.display(), count);
 
     let db_path = data_dir.join("astra.db");
@@ -200,7 +208,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Subcomandos: se ejecutan y terminan sin levantar el server.
     if let Some(Command::SeedRefresh { url }) = &cli.command {
-        return seed_refresh(&settings, url).await;
+        // `--url` gana; si se omite, se usa `seed_url` del config (o el default
+        // público si el config no lo trae). Vacío = error explícito.
+        let url = url.clone().unwrap_or_else(|| settings.seed_url.clone());
+        if url.trim().is_empty() {
+            anyhow::bail!("no hay URL de seed: pasá `--url <url>` o configurá `seed_url` en el astra.toml");
+        }
+        return seed_refresh(&settings, &url).await;
     }
 
     info!("configuración cargada: puerto={}, sala='{}'", settings.port, settings.room_name);
@@ -365,6 +379,32 @@ async fn main() -> anyhow::Result<()> {
     let udp_manager = if settings.roomsearch {
         // Cargar seed ANTES de crear el manager (para que el cache esté poblado)
         let seed_path = std::path::PathBuf::from(&settings.data_dir).join("seed_rooms.json");
+
+        // Bootstrap automático: una sala NUEVA no tiene `seed_rooms.json` ni
+        // nodos en la DB, así que no puede propagarse en la red UDP de Ares
+        // (no aparecería en el buscador de salas de los clientes). Si el
+        // room-search está activo y no hay ni seed ni nodos, se descarga el
+        // seed inicial acá — así "just works" sin correr `seed-refresh` a mano.
+        let has_nodes = db.count_nodes().unwrap_or(0) > 0;
+        let seed_url = settings.seed_url.trim();
+        if !seed_path.exists() && !has_nodes && !seed_url.is_empty() {
+            info!(
+                "room-search: sin seed ni nodos; descargando seed inicial de {} ...",
+                seed_url
+            );
+            match download_seed_to(seed_url, &seed_path).await {
+                Ok(n) => info!("seed inicial descargado: {} rooms", n),
+                Err(e) => warn!(
+                    "no se pudo descargar el seed inicial ({}); la sala no aparecerá \
+                     en el buscador hasta cargar un seed (correr `astra seed-refresh` \
+                     o dejar `seed_rooms.json` en el data dir)",
+                    e
+                ),
+            }
+        } else if !seed_path.exists() && !has_nodes && seed_url.is_empty() {
+            info!("room-search: descarga automática de seed desactivada (seed_url vacío)");
+        }
+
         match astra_udp::load_seed(&db, &seed_path) {
             Ok(stats) => {
                 if stats.nodes_added > 0 {
