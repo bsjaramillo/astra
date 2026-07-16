@@ -173,14 +173,19 @@ impl Database {
                 last_seen INTEGER NOT NULL
             );
 
+            -- Cache de peers UDP (gossip del room-search). El modelo en memoria
+            -- (`UdpNodeManager`) es UN nodo por IP: si se oye la misma IP en otro
+            -- puerto, se actualiza el puerto de esa entrada. Por eso el PK es `ip`
+            -- solo (NO (ip, port) como `rooms`). Con (ip, port) el seed cargaba
+            -- varias filas por IP y `update_node_port` chocaba con la UNIQUE
+            -- constraint. `rooms` sí es (ip, port): una IP puede hostear varias.
             CREATE TABLE IF NOT EXISTS nodes (
-                ip TEXT NOT NULL,
+                ip TEXT NOT NULL PRIMARY KEY,
                 port INTEGER NOT NULL,
                 ack INTEGER NOT NULL DEFAULT 0,
                 try_count INTEGER NOT NULL DEFAULT 0,
                 last_connect INTEGER NOT NULL DEFAULT 0,
-                last_sent_ips INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (ip, port)
+                last_sent_ips INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS rooms (
@@ -274,6 +279,45 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_rooms_users ON rooms(users);
             "#,
         )?;
+
+        // Migración de la tabla `nodes` de PK (ip, port) → PK (ip). Las DBs
+        // creadas antes de este cambio tienen la PK compuesta; `CREATE TABLE IF
+        // NOT EXISTS` no las toca, así que hay que reconstruirlas. El síntoma en
+        // esas DBs era el error recurrente "UNIQUE constraint failed:
+        // nodes.ip, nodes.port" al actualizar el puerto de un nodo. Al colapsar
+        // por IP nos quedamos con la fila de mayor `ack` (la más "probada").
+        let nodes_ddl: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(ddl) = nodes_ddl {
+            let normalized = ddl.replace([' ', '\n', '\t'], "").to_lowercase();
+            if normalized.contains("primarykey(ip,port)") {
+                conn.execute_batch(
+                    r#"
+                    CREATE TABLE nodes_new (
+                        ip TEXT NOT NULL PRIMARY KEY,
+                        port INTEGER NOT NULL,
+                        ack INTEGER NOT NULL DEFAULT 0,
+                        try_count INTEGER NOT NULL DEFAULT 0,
+                        last_connect INTEGER NOT NULL DEFAULT 0,
+                        last_sent_ips INTEGER NOT NULL DEFAULT 0
+                    );
+                    INSERT INTO nodes_new (ip, port, ack, try_count, last_connect, last_sent_ips)
+                        SELECT ip, port, MAX(ack), try_count, last_connect, last_sent_ips
+                        FROM nodes GROUP BY ip;
+                    DROP TABLE nodes;
+                    ALTER TABLE nodes_new RENAME TO nodes;
+                    CREATE INDEX IF NOT EXISTS idx_nodes_ack ON nodes(ack);
+                    CREATE INDEX IF NOT EXISTS idx_nodes_last ON nodes(last_connect);
+                    "#,
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -734,29 +778,32 @@ impl Database {
         conn.execute(
             "INSERT INTO nodes (ip, port, ack, try_count, last_connect, last_sent_ips) \
              VALUES (?1, ?2, 1, 0, 0, 0) \
-             ON CONFLICT(ip, port) DO NOTHING",
+             ON CONFLICT(ip) DO NOTHING",
             params![ip, port as i64],
         )?;
         Ok(())
     }
 
-    /// Actualiza el ack de un nodo (incrementa).
-    pub fn bump_node_ack(&self, ip: &str, port: u16, now_ms: i64) -> DbResult<bool> {
+    /// Actualiza el ack de un nodo (incrementa). El nodo se identifica por IP
+    /// (modelo un-nodo-por-IP; ver el schema de `nodes`). El parámetro `port`
+    /// se mantiene por compatibilidad de firma pero no se usa en el WHERE.
+    pub fn bump_node_ack(&self, ip: &str, _port: u16, now_ms: i64) -> DbResult<bool> {
         let conn = self.conn.lock();
         let n = conn.execute(
             "UPDATE nodes SET ack = ack + 1, last_connect = ?1, try_count = 0 \
-             WHERE ip = ?2 AND port = ?3",
-            params![now_ms, ip, port as i64],
+             WHERE ip = ?2",
+            params![now_ms, ip],
         )?;
         Ok(n > 0)
     }
 
-    /// Marca un nodo como "intento fallido" (incrementa try_count).
-    pub fn record_node_failure(&self, ip: &str, port: u16) -> DbResult<bool> {
+    /// Marca un nodo como "intento fallido" (incrementa try_count). Identifica
+    /// por IP (ver [`bump_node_ack`]).
+    pub fn record_node_failure(&self, ip: &str, _port: u16) -> DbResult<bool> {
         let conn = self.conn.lock();
         let n = conn.execute(
-            "UPDATE nodes SET try_count = try_count + 1 WHERE ip = ?1 AND port = ?2",
-            params![ip, port as i64],
+            "UPDATE nodes SET try_count = try_count + 1 WHERE ip = ?1",
+            params![ip],
         )?;
         Ok(n > 0)
     }
@@ -1436,6 +1483,87 @@ mod tests {
     fn open_in_memory() {
         let db = Database::in_memory().unwrap();
         assert_eq!(db.path().to_str().unwrap(), ":memory:");
+    }
+
+    #[test]
+    fn nodes_migrates_from_composite_pk_and_dedups_by_ip() {
+        // Simula una DB vieja: tabla `nodes` con PK (ip, port) y DOS filas de la
+        // MISMA IP (como las que dejaba el seed con varias rooms por host).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE nodes (
+                ip TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                ack INTEGER NOT NULL DEFAULT 0,
+                try_count INTEGER NOT NULL DEFAULT 0,
+                last_connect INTEGER NOT NULL DEFAULT 0,
+                last_sent_ips INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (ip, port)
+            );
+            INSERT INTO nodes (ip, port, ack) VALUES ('9.9.9.9', 5001, 3);
+            INSERT INTO nodes (ip, port, ack) VALUES ('9.9.9.9', 5002, 7);
+            INSERT INTO nodes (ip, port, ack) VALUES ('8.8.8.8', 5000, 1);
+            "#,
+        )
+        .unwrap();
+
+        // Correr las migraciones: debe reconstruir `nodes` con PK(ip) y colapsar
+        // por IP quedándose con la fila de mayor ack (5002/ack=7 para 9.9.9.9).
+        Database::run_migrations(&conn).unwrap();
+
+        let (port, ack): (i64, i64) = conn
+            .query_row(
+                "SELECT port, ack FROM nodes WHERE ip = '9.9.9.9'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(port, 5002, "debe sobrevivir la fila de mayor ack");
+        assert_eq!(ack, 7);
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "9.9.9.9 colapsa a una fila; 8.8.8.8 queda");
+
+        // Regresión del crash: actualizar el puerto de una IP ya NO viola la
+        // UNIQUE constraint (antes: "UNIQUE constraint failed: nodes.ip,port").
+        let db = Arc::new(Database {
+            conn: Mutex::new(conn),
+            path: PathBuf::from(":memory:"),
+        });
+        db.update_node_port("9.9.9.9", 5002).unwrap();
+        db.update_node_port("9.9.9.9", 6000).unwrap();
+        let port: i64 = db
+            .conn
+            .lock()
+            .query_row("SELECT port FROM nodes WHERE ip = '9.9.9.9'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(port, 6000);
+    }
+
+    #[test]
+    fn node_ack_and_failure_persist_by_ip() {
+        // bump_node_ack/record_node_failure se llaman con port=0 desde el
+        // manager; deben persistir igual (identifican por IP).
+        let db = Database::in_memory().unwrap();
+        db.upsert_node("7.7.7.7", 5009).unwrap();
+        assert!(db.bump_node_ack("7.7.7.7", 0, 12345).unwrap());
+        assert!(db.record_node_failure("7.7.7.7", 0).unwrap());
+        let (ack, try_count, last): (i64, i64, i64) = db
+            .conn
+            .lock()
+            .query_row(
+                "SELECT ack, try_count, last_connect FROM nodes WHERE ip = '7.7.7.7'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        // upsert deja ack=1; bump_node_ack lo sube a 2 y resetea try_count a 0;
+        // luego record_node_failure sube try_count a 1.
+        assert_eq!(ack, 2);
+        assert_eq!(try_count, 1);
+        assert_eq!(last, 12345);
     }
 
     #[test]
