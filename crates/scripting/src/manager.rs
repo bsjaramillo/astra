@@ -2022,6 +2022,84 @@ mod tests {
         assert!(!pkt.is_empty());
     }
 
+    /// Igual que [`repro_onload_print_reaches_room`] pero para un usuario WEB
+    /// (ib0t/WebSocket): tiene `ws_text_sender` y NO tiene `sender` binario.
+    /// Antes, `print()` de un script armaba el paquete binario Ares y lo
+    /// mandaba por `u.send()` — que para users web se descarta en silencio,
+    /// así que "onLoad no se ejecuta" desde un cliente web.
+    #[test]
+    fn repro_onload_print_reaches_web_user() {
+        use server_core::user_pool::AresUser;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let db = Database::in_memory().unwrap();
+        let app = Arc::new(AppContext::new(Settings::default(), db));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut u = AresUser::new(1, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), [1u8; 16]);
+        u.logged_in = true;
+        u.ws_text_sender = Some(tx);
+        *u.name.write() = "WebAlice".to_string();
+        app.user_pool.add(Arc::new(u));
+
+        let mgr = ScriptManager::new(app, std::env::temp_dir().join("astra_scripts_test_web"));
+        mgr.load_source("hola", None, r#"function onLoad(){ print("script cargado!"); }"#)
+            .unwrap();
+
+        let msg = rx
+            .try_recv()
+            .expect("el print() de onLoad debió llegar al cliente web como texto ib0t");
+        assert!(
+            msg.starts_with("PUBLIC:") && msg.contains("script cargado!"),
+            "formato inesperado: {}",
+            msg
+        );
+    }
+
+    /// Paridad sb0t de `File.*` (JSFile.cs): los datos de un script viven en
+    /// su subcarpeta `data/` — `File.load("words.txt")` debe leer
+    /// `<script>/data/words.txt` (layout real del script hangman), y
+    /// `File.write` debe escribir ahí (creando `data/` si falta). `include()`
+    /// en cambio resuelve en la RAÍZ de la carpeta del script.
+    #[test]
+    fn file_api_resolves_in_data_subfolder_like_sb0t() {
+        let root = std::env::temp_dir().join(format!("astra_file_data_{}", std::process::id()));
+        let dir = root.join("juego");
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data").join("words.txt"), "perro\ngato\n").unwrap();
+        std::fs::write(dir.join("juego.js"), "").unwrap();
+
+        let mgr = make_manager();
+        mgr.load_source(
+            "juego",
+            Some(dir.join("juego.js")),
+            r#"
+            var EXISTS = File.exists("words.txt");
+            var CONTENT = File.load("words.txt");
+            var WROTE = File.write("scores.txt", "Alice=3");
+            "#,
+        )
+        .unwrap();
+        let probe = |expr: &str| {
+            let scripts = mgr.scripts.lock();
+            let s = scripts.values().find(|s| s.name == "juego").unwrap();
+            let mut guard = s.context.lock();
+            let ctx = guard.as_mut().unwrap();
+            ctx.eval(boa_engine::Source::from_bytes(expr.as_bytes()))
+                .unwrap()
+                .to_string(ctx)
+                .unwrap()
+                .to_std_string_escaped()
+        };
+        assert_eq!(probe("String(EXISTS)"), "true", "File.exists no encontró data/words.txt");
+        assert!(probe("CONTENT").contains("perro"), "File.load no leyó data/words.txt");
+        assert_eq!(probe("String(WROTE)"), "true");
+        assert!(
+            dir.join("data").join("scores.txt").exists(),
+            "File.write debe escribir en data/ (paridad sb0t)"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn killscript_removes_all_instances_and_cleans_resources() {
         let mgr = make_manager();

@@ -321,6 +321,26 @@ impl AresUser {
         self.send(crate::outbound::build_emote_c(from, text, self.ares_crypto))
     }
 
+    /// Como [`send_pvt`](Self::send_pvt) pero para el topic de la sala.
+    pub fn send_topic(&self, text: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx
+                .send(format!("TOPIC:{}:{}", ws_len(text), text))
+                .is_ok();
+        }
+        self.send(crate::outbound::build_topic_c(text, self.ares_crypto))
+    }
+
+    /// Aviso de expulsión/error fatal antes de cerrar la conexión. Para
+    /// clientes web va como `ERROR:` (mismo formato que usa el handshake WS
+    /// para bans); para clientes Ares es el paquete `ServerError`.
+    pub fn send_server_error(&self, text: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx.send(format!("ERROR:{}", text)).is_ok();
+        }
+        self.send(crate::outbound::build_server_error_c(text, self.ares_crypto))
+    }
+
     /// Línea de sistema (respuestas de comandos, avisos del server). Para
     /// clientes web va como `NOSUCH:` (paridad `ib0tClient.Print` de sb0t:
     /// texto de servidor en la ventana principal, no un PM); para clientes

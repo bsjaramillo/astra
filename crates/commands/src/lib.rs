@@ -4634,16 +4634,11 @@ pub fn force_part_user(ctx: &AppContext, target: &Arc<AresUser>) {
 }
 
 fn broadcast_topic(ctx: &AppContext, text: &str) {
-    let ws_msg = format!("TOPIC:{}:{}", text.encode_utf16().count(), text);
     for u in ctx.user_pool.users() {
         if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
-        if let Some(tx) = &u.ws_text_sender {
-            let _ = tx.send(ws_msg.clone());
-        } else {
-            let _ = u.send(outbound::build_topic_c(text, u.ares_crypto));
-        }
+        let _ = u.send_topic(text);
     }
 }
 

@@ -42,7 +42,6 @@ use boa_engine::{
     native_function::NativeFunction,
     value::JsValue,
 };
-use bytes::Bytes;
 use server_core::AppContext;
 
 // ============================================================================
@@ -136,6 +135,45 @@ fn resolve_script_path(ctx: &mut Context, arg: &str, add_js: bool) -> Option<std
     }
     let dir = current_script_dir(ctx)?;
     Some(dir.join(name))
+}
+
+/// Resuelve un path para la API `File.*` — paridad sb0t (`JSFile.cs`): los
+/// datos de un script viven en su subcarpeta **`data/`**
+/// (`<carpeta_del_script>/data/<name>`), NO en la raíz (la raíz es para el
+/// código: `include()` sí resuelve ahí). Los scripts reales dependen de esto
+/// (ej. hangman: `File.load("words.txt")` con el archivo en `data/words.txt`).
+///
+/// - Lecturas: prueba `data/<name>` y cae a `<name>` en la raíz si no existe
+///   (retrocompat con scripts que ya escribieron ahí con versiones previas).
+/// - Escrituras (`for_write`): siempre `data/<name>`, creando `data/` si
+///   falta (sb0t hace lo mismo).
+/// - Paths absolutos: se respetan tal cual (extra de Astra).
+fn resolve_script_data_path(ctx: &mut Context, arg: &str, for_write: bool) -> Option<std::path::PathBuf> {
+    if arg.is_empty() || arg.contains("..") {
+        return None;
+    }
+    let p = std::path::Path::new(arg);
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    let dir = current_script_dir(ctx)?;
+    let data_path = dir.join("data").join(arg);
+    if for_write {
+        if let Some(parent) = data_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        return Some(data_path);
+    }
+    if data_path.exists() {
+        return Some(data_path);
+    }
+    let legacy = dir.join(arg);
+    if legacy.exists() {
+        return Some(legacy);
+    }
+    // No existe en ningún lado: reportar el path canónico (data/) para que
+    // exists/size/etc. fallen contra la ubicación sb0t.
+    Some(data_path)
 }
 
 // ============================================================================
@@ -1013,9 +1051,7 @@ fn print_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsVa
         if !text.is_empty() {
             if let Some(app) = lookup_app(ctx) {
                 let bot = app.settings.bot_name.clone();
-                broadcast_to_users(&app, |c| {
-                    server_core::outbound::build_public_c(&bot, &text, c)
-                });
+                broadcast_public(&app, &bot, &text);
             }
         }
         return Ok(JsValue::undefined());
@@ -1059,7 +1095,7 @@ fn send_public_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Resul
     let from = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
-        broadcast_to_users(&app, |c| server_core::outbound::build_public_c(&from, &text, c));
+        broadcast_public(&app, &from, &text);
         Ok(JsValue::from(true))
     } else {
         Ok(JsValue::from(false))
@@ -1070,7 +1106,7 @@ fn send_emote_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result
     let from = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
-        broadcast_to_users(&app, |c| server_core::outbound::build_emote_c(&from, &text, c));
+        broadcast_emote(&app, &from, &text);
         Ok(JsValue::from(true))
     } else {
         Ok(JsValue::from(false))
@@ -1107,10 +1143,7 @@ fn send_to_user_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Resu
     if let Some(app) = lookup_app(ctx) {
         if let Some(target) = app.user_pool.get_by_name(&name) {
             let ok = match kind.as_str() {
-                "emote" => {
-                    let pkt = server_core::outbound::build_emote_c(&sender, &text, target.ares_crypto);
-                    target.send(pkt)
-                }
+                "emote" => target.send_emote(&sender, &text),
                 "pm" => target.send_pvt(&sender, &text),
                 _ => target.send_public(&sender, &text),
             };
@@ -1199,12 +1232,7 @@ fn kick_user_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
         if let Some(u) = app.user_pool.get_by_name(&name) {
             // Kick best-effort: enviar ServerError, remover del pool. El
             // TCP handler verá el cierre del socket y limpiará.
-            let mut w = proto_ares::PacketWriter::with_msg_crypto(
-                proto_ares::TcpMsg::ServerError,
-                u.ares_crypto,
-            );
-            w.write_string_nt("You have been kicked from the room.").ok();
-            let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
+            let _ = u.send_server_error("You have been kicked from the room.");
             let uid = u.id;
             app.user_pool.remove(uid);
             Ok(JsValue::from(true))
@@ -1332,12 +1360,7 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
     let bot = app.settings.bot_name.clone();
     let ok = match action.as_str() {
         "kick" | "disconnect" => {
-            let mut w = proto_ares::PacketWriter::with_msg_crypto(
-                proto_ares::TcpMsg::ServerError,
-                u.ares_crypto,
-            );
-            w.write_string_nt("You have been kicked from the room.").ok();
-            let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
+            let _ = u.send_server_error("You have been kicked from the room.");
             // PART broadcast a toda la sala (paridad IUser.Disconnect de
             // sb0t) — sin esto los demás clientes ven un usuario fantasma.
             app.force_part_user(&u);
@@ -1355,12 +1378,7 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
             if ident != 0 {
                 // Registro para /banstats (el "banner" es el script).
                 app.record_ban("script", &u.name.read(), &u.external_ip.to_string());
-                let mut w = proto_ares::PacketWriter::with_msg_crypto(
-                    proto_ares::TcpMsg::ServerError,
-                    u.ares_crypto,
-                );
-                w.write_string_nt("You have been banned from the room.").ok();
-                let _ = u.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
+                let _ = u.send_server_error("You have been banned from the room.");
                 app.force_part_user(&u);
                 true
             } else {
@@ -1539,7 +1557,7 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
         },
         "setTopic" => {
             // Topic dirigido SOLO a ese usuario (paridad IUser.SetTopic).
-            let _ = u.send(server_core::outbound::build_topic_c(&arg, u.ares_crypto));
+            let _ = u.send_topic(&arg);
             true
         }
         "nudge" => {
@@ -1659,7 +1677,11 @@ fn set_topic_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
     let topic = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
         app.set_room_topic(topic.clone());
-        broadcast_to_users(&app, |c| server_core::outbound::build_topic_c(&topic, c));
+        for u in app.user_pool.users() {
+            if u.logged_in {
+                let _ = u.send_topic(&topic);
+            }
+        }
         Ok(JsValue::from(true))
     } else {
         Ok(JsValue::from(false))
@@ -1703,7 +1725,7 @@ fn b64_dec_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<J
 
 fn file_exists_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    let exists = resolve_script_path(ctx, &arg, false)
+    let exists = resolve_script_data_path(ctx, &arg, false)
         .map(|p| p.exists())
         .unwrap_or(false);
     Ok(JsValue::from(exists))
@@ -1711,7 +1733,7 @@ fn file_exists_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Resul
 
 fn file_size_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    let size = resolve_script_path(ctx, &arg, false)
+    let size = resolve_script_data_path(ctx, &arg, false)
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|m| m.len() as i64)
         .unwrap_or(-1);
@@ -1720,7 +1742,7 @@ fn file_size_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
 
 fn file_creation_time_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    let secs = resolve_script_path(ctx, &arg, false)
+    let secs = resolve_script_data_path(ctx, &arg, false)
         .and_then(|p| std::fs::metadata(p).ok())
         .and_then(|m| m.created().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -1733,7 +1755,7 @@ fn file_creation_time_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -
 /// script), o `null` si no existe. Para datos del script.
 fn file_read_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    match resolve_script_path(ctx, &arg, false).and_then(|p| std::fs::read_to_string(p).ok()) {
+    match resolve_script_data_path(ctx, &arg, false).and_then(|p| std::fs::read_to_string(p).ok()) {
         Some(s) => Ok(JsValue::from(js_string!(s))),
         None => Ok(JsValue::null()),
     }
@@ -1743,7 +1765,7 @@ fn file_read_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
 /// base64 (para cargar imágenes binarias en Avatar/Scribble). Null si falla.
 fn read_file_b64_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    match resolve_script_path(ctx, &arg, false).and_then(|p| std::fs::read(p).ok()) {
+    match resolve_script_data_path(ctx, &arg, false).and_then(|p| std::fs::read(p).ok()) {
         Some(bytes) => Ok(JsValue::from(js_string!(base64_encode_bytes_to_string(&bytes)))),
         None => Ok(JsValue::null()),
     }
@@ -1754,7 +1776,7 @@ fn read_file_b64_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Res
 fn file_write_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
-    let ok = match resolve_script_path(ctx, &arg, false) {
+    let ok = match resolve_script_data_path(ctx, &arg, true) {
         Some(p) => std::fs::write(p, text.as_bytes()).is_ok(),
         None => false,
     };
@@ -1766,7 +1788,7 @@ fn file_append_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Resul
     use std::io::Write as _;
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
-    let ok = match resolve_script_path(ctx, &arg, false) {
+    let ok = match resolve_script_data_path(ctx, &arg, true) {
         Some(p) => std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1781,7 +1803,7 @@ fn file_append_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Resul
 /// `File_delete(name)` → borra el archivo de la carpeta del script.
 fn file_delete_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    let ok = match resolve_script_path(ctx, &arg, false) {
+    let ok = match resolve_script_data_path(ctx, &arg, false) {
         Some(p) => std::fs::remove_file(p).is_ok(),
         None => false,
     };
@@ -2153,7 +2175,7 @@ fn channels_broadcast_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -
             if !u.logged_in { continue; }
             if *u.vroom.read() != id { continue; }
             if u.quarantined.load(std::sync::atomic::Ordering::Relaxed) { continue; }
-            if u.send(server_core::outbound::build_public_c(&from, &text, u.ares_crypto)) {
+            if u.send_public(&from, &text) {
                 sent += 1;
             }
         }
@@ -2185,10 +2207,7 @@ fn channels_kick_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Res
     // Mover al vroom 0 (default)
     *target.vroom.write() = 0;
     // Notificar al user
-    use proto_ares::TcpMsg;
-    let mut w = proto_ares::PacketWriter::with_msg_crypto(TcpMsg::ServerError, target.ares_crypto);
-    w.write_string_nt(&format!("You have been kicked from vroom {}.", vroom_id)).ok();
-    let _ = target.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
+    let _ = target.send_server_error(&format!("You have been kicked from vroom {}.", vroom_id));
     Ok(JsValue::from(true))
 }
 
@@ -2562,7 +2581,7 @@ fn room_broadcast_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Re
     let text = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     if let Some(app) = lookup_app(ctx) {
         let from = app.settings.bot_name.clone();
-        broadcast_to_users(&app, |c| server_core::outbound::build_public_c(&from, &text, c));
+        broadcast_public(&app, &from, &text);
         Ok(JsValue::from(true))
     } else {
         Ok(JsValue::from(false))
@@ -3463,13 +3482,24 @@ fn format_js_value(v: &JsValue) -> String {
 /// Difunde un paquete a todos los usuarios logueados, construyéndolo
 /// por-destinatario para que cada uno reciba sus strings cifrados con su
 /// propia key si negoció AES (`user.ares_crypto`).
-fn broadcast_to_users<F>(app: &AppContext, build: F)
-where
-    F: Fn(server_core::outbound::Crypto) -> Bytes,
-{
+/// Broadcast de texto público a TODOS los usuarios logueados, web-aware:
+/// usa `AresUser::send_public`, que elige el formato por cliente (texto
+/// ib0t para WebSocket, binario Ares para nativos). Nunca mandar acá
+/// paquetes binarios crudos: los users web tienen `sender = None` y el
+/// binario se descarta en silencio (bug histórico de `print()` en scripts).
+fn broadcast_public(app: &AppContext, from: &str, text: &str) {
     for u in app.user_pool.users() {
         if u.logged_in {
-            let _ = u.send(build(u.ares_crypto));
+            let _ = u.send_public(from, text);
+        }
+    }
+}
+
+/// Como [`broadcast_public`] pero para emotes.
+fn broadcast_emote(app: &AppContext, from: &str, text: &str) {
+    for u in app.user_pool.users() {
+        if u.logged_in {
+            let _ = u.send_emote(from, text);
         }
     }
 }

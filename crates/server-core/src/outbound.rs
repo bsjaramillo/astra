@@ -301,6 +301,13 @@ pub fn build_topic_c(text: &str, crypto: Crypto) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+/// Error fatal del server (`ServerError`) — aviso antes de expulsar.
+pub fn build_server_error_c(text: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerError, crypto);
+    w.write_string_nt(text).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
 /// Redirect a otro servidor (`MSG_CHAT_SERVER_REDIRECT`, opcode 6).
 ///
 /// Formato sb0t: `ip, u16 port, ip, str room_name, str "Redirecting..."`.
