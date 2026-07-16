@@ -2055,6 +2055,53 @@ mod tests {
         );
     }
 
+    /// Paridad sb0t de `Sql.connected` (JSSqlInstance.cs): los scripts reales
+    /// chequean `sql.connected` tras `open()`, no el retorno de `open()`.
+    /// Réplica exacta del `initDatabaseQuery()` del hangman, que sin esta
+    /// propiedad devolvía false → "Error al cargar script".
+    #[test]
+    fn sql_connected_property_like_sb0t() {
+        let root = std::env::temp_dir().join(format!("astra_sql_conn_{}", std::process::id()));
+        let dir = root.join("juego");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("juego.js"), "").unwrap();
+
+        let mgr = make_manager();
+        mgr.load_source(
+            "juego",
+            Some(dir.join("juego.js")),
+            r#"
+            function initDatabaseQuery() {
+                var q = new Query("CREATE TABLE IF NOT EXISTS games (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, user TEXT NOT NULL)");
+                var sql = new Sql();
+                var BEFORE = sql.connected;
+                sql.open("hangman.db");
+                var OK = false;
+                if (sql.connected) { sql.query(q); sql.close(); OK = true; }
+                return { before: BEFORE, ok: OK, after: sql.connected };
+            }
+            var R = initDatabaseQuery();
+            "#,
+        )
+        .unwrap();
+        let probe = |expr: &str| {
+            let scripts = mgr.scripts.lock();
+            let s = scripts.values().find(|s| s.name == "juego").unwrap();
+            let mut guard = s.context.lock();
+            let ctx = guard.as_mut().unwrap();
+            ctx.eval(boa_engine::Source::from_bytes(expr.as_bytes()))
+                .unwrap()
+                .to_string(ctx)
+                .unwrap()
+                .to_std_string_escaped()
+        };
+        assert_eq!(probe("String(R.before)"), "false", "connected debe ser false antes de open()");
+        assert_eq!(probe("String(R.ok)"), "true", "sql.connected debe ser true tras open()");
+        assert_eq!(probe("String(R.after)"), "false", "connected debe volver a false tras close()");
+        assert!(dir.join("sql").join("hangman.db").exists(), "la DB debe crearse en <script>/sql/");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Paridad sb0t de `File.*` (JSFile.cs): los datos de un script viven en
     /// su subcarpeta `data/` — `File.load("words.txt")` debe leer
     /// `<script>/data/words.txt` (layout real del script hangman), y

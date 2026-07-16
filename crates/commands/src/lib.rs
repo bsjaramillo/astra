@@ -1156,8 +1156,16 @@ fn handle_customname(ctx: &AppContext, user: &Arc<AresUser>, args: &str, set: bo
         }
     }
 
-    // Self-service (sb0t: nivel > Regular o Settings.General).
+    // Self-service (sb0t: nivel > Regular o Settings.General). Además, el
+    // custom name iniciado por el propio usuario requiere que la sala tenga
+    // custom names habilitados (sb0t `Settings.Get<bool>("customnames")`,
+    // AresClient.cs:270; toggle `#customnames on|off`, o `Room.customNames`
+    // desde scripts). El seteo por un mod (target-based, arriba) no se gatea.
     if !(has_level(user, ILevel::Voice) || ctx.room_flags.get("general")) {
+        return;
+    }
+    if set && !ctx.room_flags.get("customnames") {
+        send_system_line(ctx, user, "Custom names are disabled in this room.");
         return;
     }
     let value = if set { Some(trimmed) } else { None };
@@ -3000,6 +3008,22 @@ fn handle_customnames(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     if !can_edit_topic(user) {
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
         return;
+    }
+    // Paridad sb0t Eval.CustomNames: `on|off` togglea si la sala permite
+    // custom names (CustomNamesEnabled). Sin args, Astra además lista los
+    // custom names activos (extra).
+    match _args.trim().to_ascii_lowercase().as_str() {
+        "on" => {
+            ctx.room_flags.set("customnames", true);
+            send_system_line(ctx, user, "Custom names enabled.");
+            return;
+        }
+        "off" => {
+            ctx.room_flags.set("customnames", false);
+            send_system_line(ctx, user, "Custom names disabled.");
+            return;
+        }
+        _ => {}
     }
     let mut found = false;
     for u in ctx.user_pool.users() {
@@ -5680,8 +5704,19 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &carol, "customname", "Cazadora");
         assert_eq!(carol.custom_name.read().clone(), None);
 
-        // Con `general` on, el regular sí puede.
+        // Con `general` on pero custom names deshabilitados en la sala
+        // (default sb0t `customnames`=false): self-service sigue bloqueado.
         ctx.room_flags.set("general", true);
+        let _ = dispatch_builtin(&ctx, &carol, "customname", "Cazadora");
+        assert_eq!(carol.custom_name.read().clone(), None);
+
+        // `#customnames on` (Host, paridad Eval.cs:919) habilita y el regular
+        // ya puede. Alice (Mod) no alcanza: hace falta un Owner.
+        let (host, _h_rx) = make_test_user(4, "Hosty");
+        *host.level.write() = ILevel::Owner;
+        ctx.user_pool.add(host.clone());
+        let _ = dispatch_builtin(&ctx, &host, "customnames", "on");
+        assert!(ctx.room_flags.get("customnames"));
         let _ = dispatch_builtin(&ctx, &carol, "customname", "Cazadora");
         assert_eq!(carol.custom_name.read().clone(), Some("Cazadora".to_string()));
 

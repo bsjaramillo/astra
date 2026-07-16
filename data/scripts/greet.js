@@ -64,7 +64,7 @@ function onCommand(user, command, target, args) {
             Room.setTopic(args);
             print("Topic actualizado.");
         } else {
-            user.sendPM("Topic actual: " + Room.topic());
+            user.sendPM("Topic actual: " + Room.topic);
         }
     } else if (command === "hash") {
         if (args.length === 0) {

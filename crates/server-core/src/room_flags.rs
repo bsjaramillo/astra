@@ -57,6 +57,10 @@ pub const FLAG_DEFAULTS: &[(&str, bool)] = &[
     // `lastseen`: al entrar un usuario, anuncia con qué nick y cuándo se lo
     // vio por última vez (sb0t `Settings.LastSeen`, ServerEvents.cs:198).
     ("lastseen", false),
+    // `customnames`: permite custom names (sb0t `Settings.Get<bool>("customnames")`,
+    // toggle `#customnames on|off` Host, expuesto a scripts como `Room.customNames`).
+    // sb0t default: false (Settings.Get<bool> sin valor guardado).
+    ("customnames", false),
 ];
 
 /// Manager de flags de sala: cache en memoria + persistencia SQLite.

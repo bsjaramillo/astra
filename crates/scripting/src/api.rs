@@ -254,6 +254,18 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("__room_get"), 1, NativeFunction::from_fn_ptr(room_get_fn))
         .expect("__room_get should be registered");
     context
+        .register_global_builtin_callable(js_string!("__room_set"), 2, NativeFunction::from_fn_ptr(room_set_fn))
+        .expect("__room_set should be registered");
+    context
+        .register_global_builtin_callable(js_string!("Room_setUrl"), 2, NativeFunction::from_fn_ptr(room_set_url_fn))
+        .expect("Room_setUrl should be registered");
+    context
+        .register_global_builtin_callable(js_string!("Room_clearUrl"), 0, NativeFunction::from_fn_ptr(room_clear_url_fn))
+        .expect("Room_clearUrl should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__channels_search"), 1, NativeFunction::from_fn_ptr(channels_search_fn))
+        .expect("__channels_search should be registered");
+    context
         .register_global_builtin_callable(js_string!("__stats_get"), 1, NativeFunction::from_fn_ptr(stats_get_fn))
         .expect("__stats_get should be registered");
     context
@@ -538,6 +550,7 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         ("__Sql_new", 0usize, sql_new_fn as fn(&JsValue, &[JsValue], &mut Context) -> Result<JsValue, boa_engine::JsError>),
         ("__Sql_open", 2, sql_open_fn),
         ("__Sql_query", 3, sql_query_fn),
+        ("__Sql_connected", 1, sql_connected_fn),
         ("__Sql_canRead", 1, sql_can_read_fn),
         ("__Sql_value", 2, sql_value_fn),
         ("__Sql_close", 1, sql_close_fn),
@@ -595,18 +608,30 @@ function __mkUser(name){
       set: function(v){ __user_do(u.__name, "set:" + p, v == null ? "" : "" + v); }
     });
   });
-  // avatar: get = base64 (o null); set = base64 (vacío/null limpia).
+  // avatar: sb0t devuelve un JSAvatarImage {arg, exists, toScribble(), save()}.
+  // Acá es un String OBJECT con el base64 (compat con scripts de Astra que lo
+  // usaban como string) MÁS esas props sb0t. set = base64 (vacío/null limpia).
   Object.defineProperty(u, "avatar", {
     enumerable: true, configurable: true,
-    get: function(){ return Avatar_getForUser(u.__name); },
+    get: function(){ return __mkAvatarImage(Avatar_getForUser(u.__name), u.__name); },
     set: function(v){ __user_do(u.__name, "set:avatar", v == null ? "" : "" + v); }
   });
-  // font: objeto {name,size,color,bold,italic,underline} (solo lectura:
-  // la fuente la fija el cliente en el login; el set es no-op).
+  // font: sb0t JSUserFont = {enabled, nameColor, textColor, family}. Se
+  // conservan además los campos crudos de Astra (name/size/color/bold/...).
+  // Solo lectura: la fuente la fija el cliente en el login; el set es no-op.
   Object.defineProperty(u, "font", {
     enumerable: true, configurable: true,
     get: function(){
-      try { return JSON.parse(__user_get(u.__name, "fontJson")); } catch (e) { return null; }
+      var f;
+      try { f = JSON.parse(__user_get(u.__name, "fontJson")); } catch (e) { return null; }
+      if (f == null) return null;
+      // Props sb0t (IFont): enabled bool, family/nameColor/textColor strings.
+      f.enabled = !!(f.name && f.name.length);
+      f.family = f.name || "";
+      var c = (typeof f.color === "number") ? (f.color & 0xFFFFFF) : null;
+      f.textColor = c == null ? "" : '#' + ("00000" + c.toString(16)).slice(-6);
+      f.nameColor = "";
+      return f;
     },
     set: function(v){ /* no-op: fuente fijada por el cliente */ }
   });
@@ -629,14 +654,27 @@ function __mkUser(name){
 function user(name){ return __mkUser(name); }
 
 // ---- Objetos estáticos (mapean funciones planas de Astra) ----
+// PARIDAD sb0t: en JSRoom/JSStats/JSChannels/JSLink los valores son
+// PROPIEDADES ([JSProperty]), no métodos — los scripts hacen `Room.name`,
+// `Stats.userCount`, `Channels.enabled` SIN paréntesis. Acá se definen como
+// getters/setters de accessor. NO volver a exponerlos como funciones.
 var Room = {
-  setTopic: Room_setTopic, broadcast: Room_broadcast, topic: getTopic,
-  name: function(){ return __room_get("name"); },
-  botName: function(){ return __room_get("botName"); },
-  port: function(){ return __room_get("port"); },
-  version: function(){ return __room_get("version"); },
-  externalIp: function(){ return __room_get("externalIp"); },
-  startTime: function(){ return __room_get("startTime"); }
+  // Extras de Astra (sb0t setea el topic asignando `Room.topic = x`).
+  setTopic: Room_setTopic, broadcast: Room_broadcast,
+  // Funciones sb0t.
+  setUrl: Room_setUrl, clearUrl: Room_clearUrl,
+  // Propiedades sb0t.
+  get topic(){ return getTopic(); },
+  set topic(v){ Room_setTopic(v == null ? "" : "" + v); },
+  get name(){ return __room_get("name"); },
+  get botName(){ return __room_get("botName"); },
+  get port(){ return __room_get("port"); },
+  get version(){ return __room_get("version"); },
+  get externalIp(){ return __room_get("externalIp"); },
+  get startTime(){ return __room_get("startTime"); },
+  get hashlink(){ return __room_get("hashlink"); },
+  get customNames(){ return __room_get("customNames"); },
+  set customNames(v){ __room_set("customNames", !!v); }
 };
 var Users = {
   count: Users_count, getUserByName: function(n){ return __mkUser(n); },
@@ -668,12 +706,16 @@ var Users = {
   }
 };
 var Channels = { create: Channels_create, "delete": Channels_delete,
+                 // Extras de Astra (channels internos = vrooms).
                  get: function(id){ try { return JSON.parse(Channels_get(id)); } catch (e) { return null; } },
                  list: function(){ try { return JSON.parse(Channels_list()); } catch (e) { return []; } },
-                 available: function(){ try { return JSON.parse(Channels_list()); } catch (e) { return []; } },
-                 enabled: function(){ return true; },
-                 search: function(id){ try { return JSON.parse(Channels_get(id)); } catch (e) { return null; } },
-                 broadcast: Channels_broadcast, setTopic: Channels_setTopic, kick: Channels_kick };
+                 broadcast: Channels_broadcast, setTopic: Channels_setTopic, kick: Channels_kick,
+                 // sb0t JSChannels: available/enabled = propiedades bool sobre la
+                 // channel list de Ares; search(texto) = JSChannel[] con hashlink/
+                 // language/etc (en Astra: tabla rooms del room-search UDP).
+                 get available(){ try { return JSON.parse(__channels_search("")).length > 0; } catch (e) { return false; } },
+                 get enabled(){ return true; },
+                 search: function(text){ try { return JSON.parse(__channels_search(text == null ? "" : "" + text)); } catch (e) { return []; } } };
 var Base64 = { encode: Base64_encode, decode: Base64_decode };
 var Zip = { compress: Zip_compress, uncompress: Zip_decompress, decompress: Zip_decompress };
 var Hashlink = { create: Hashlink_create, parse: Hashlink_parse, encode: Hashlink_create, decode: Hashlink_parse };
@@ -684,34 +726,70 @@ var Entities = {
 };
 var Spelling = { check: Spelling_check, suggest: Spelling_suggest, confirm: Spelling_confirm };
 var Stats = {
+  // Extras de Astra.
   addStat: Stats_addStat, getStat: Stats_getStat,
-  userCount: function(){ return __stats_get("userCount"); },
-  peakUserCount: function(){ return __stats_get("peakUserCount"); },
-  joinCount: function(){ return __stats_get("joinCount"); },
-  partCount: function(){ return __stats_get("partCount"); },
-  dataReceived: function(){ return __stats_get("dataReceived"); },
-  dataSent: function(){ return __stats_get("dataSent"); },
-  floodCount: function(){ return __stats_get("floodCount"); },
-  invalidLoginCount: function(){ return __stats_get("invalidLoginCount"); },
-  rejectionCount: function(){ return __stats_get("rejectionCount"); },
-  messageCount: function(){ return __stats_get("messageCount"); },
-  pmCount: function(){ return __stats_get("pmCount"); }
+  // sb0t JSStats: TODAS propiedades ([JSProperty]), sin paréntesis.
+  get userCount(){ return __stats_get("userCount"); },
+  get peakUserCount(){ return __stats_get("peakUserCount"); },
+  get joinCount(){ return __stats_get("joinCount"); },
+  get partCount(){ return __stats_get("partCount"); },
+  get dataReceived(){ return __stats_get("dataReceived"); },
+  get dataSent(){ return __stats_get("dataSent"); },
+  get floodCount(){ return __stats_get("floodCount"); },
+  get invalidLoginCount(){ return __stats_get("invalidLoginCount"); },
+  get rejectionCount(){ return __stats_get("rejectionCount"); },
+  get messageCount(){ return __stats_get("messageCount"); },
+  get pmCount(){ return __stats_get("pmCount"); }
 };
 var Registry = {
   createKey: Registry_createKey, deleteKey: Registry_deleteKey,
   exists: Registry_exists, getValue: Registry_getValue, getKeys: Registry_getKeys,
   setValue: Registry_setValue, deleteValue: Registry_deleteValue, clear: Registry_clear
 };
-var Crypto = { hashSHA1: Crypto_hashSHA1, hashMD5: Crypto_hashMD5, sha1: Crypto_hashSHA1, md5: Crypto_hashMD5 };
+// CryptoResult (sb0t JSCryptoResult): resultado de md5hash/sha1hash con
+// toHex()/toBase64()/toArray(). Se construye desde el hex que devuelven los
+// natives (los bytes se recuperan parseando pares hex).
+function __mkCryptoResult(hex){
+  if (hex == null) return null;
+  var h = ("" + hex).toLowerCase();
+  var bytes = [];
+  for (var i = 0; i + 1 < h.length; i += 2) bytes.push(parseInt(h.substring(i, i + 2), 16));
+  var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  return {
+    toHex: function(){ return h; },
+    toArray: function(){ return bytes.slice(); },
+    toBase64: function(){
+      var out = "";
+      for (var j = 0; j < bytes.length; j += 3){
+        var b0 = bytes[j], b1 = bytes[j + 1], b2 = bytes[j + 2];
+        out += B64.charAt(b0 >> 2);
+        out += B64.charAt(((b0 & 3) << 4) | (b1 == null ? 0 : b1 >> 4));
+        out += (b1 == null) ? "=" : B64.charAt(((b1 & 15) << 2) | (b2 == null ? 0 : b2 >> 6));
+        out += (b2 == null) ? "=" : B64.charAt(b2 & 63);
+      }
+      return out;
+    },
+    toString: function(){ return h; },
+    valueOf: function(){ return h; }
+  };
+}
+var Crypto = {
+  // Extras de Astra (devuelven el hex plano).
+  hashSHA1: Crypto_hashSHA1, hashMD5: Crypto_hashMD5, sha1: Crypto_hashSHA1, md5: Crypto_hashMD5,
+  // sb0t JSCrypto: md5hash/sha1hash devuelven un CryptoResult.
+  md5hash: function(s){ return s == null ? null : __mkCryptoResult(Crypto_hashMD5("" + s)); },
+  sha1hash: function(s){ return s == null ? null : __mkCryptoResult(Crypto_hashSHA1("" + s)); }
+};
 var Link = { createLink: Link_createLink, connect: Link_createLink, disconnect: Link_disconnect,
              findHub: Link_findHub, findLeaf: Link_findLeaf, findUser: Link_findUser,
              getUserList: Link_getUserList, kickHub: Link_kickHub, list: Link_list,
-             // sb0t: getters de estado del link (Astra no linkea multi-servidor → defaults).
+             // Funciones sb0t.
              leaves: function(){ try { return JSON.parse(Link_list()); } catch (e) { return []; } },
              leaf: function(){ return null; },
-             linked: function(){ try { return JSON.parse(Link_list()).length > 0; } catch (e) { return false; } },
-             name: function(){ return ""; }, externalIp: function(){ return ""; },
-             port: function(){ return 0; }, hashlink: function(){ return ""; } };
+             // sb0t JSLink: linked/name/externalIp/port/hashlink son PROPIEDADES.
+             get linked(){ try { return JSON.parse(Link_list()).length > 0; } catch (e) { return false; } },
+             get name(){ return ""; }, get externalIp(){ return ""; },
+             get port(){ return 0; }, get hashlink(){ return ""; } };
 var File = {
   exists: File_exists, load: File_read, read: File_read, save: File_write, write: File_write,
   append: File_append, appendLine: function(n, t){ return File_append(n, (t == null ? "" : t) + "\r\n"); },
@@ -807,6 +885,43 @@ Timer.prototype.stop = function(){
   return this;
 };
 
+// JSAvatarImage / JSScribbleImage (sb0t): imagen con {arg, exists,
+// toScribble()/toAvatar(), save(name)}. Se implementa como String OBJECT del
+// base64 (mantiene la compat de Astra "avatar = string base64") con las props
+// sb0t encima. `save` y las conversiones usan los stores nativos.
+function __mkAvatarImage(b64, arg){
+  var t = b64 == null ? "" : "" + b64;
+  var s = new String(t);
+  s.arg = arg == null ? "" : "" + arg;
+  Object.defineProperty(s, "exists", { get: function(){ return t.length > 0; } });
+  s.save = function(name){
+    if (!t.length || name == null) return false;
+    var id = Avatar_new(t);
+    return id < 0 ? false : Avatar_save(id, "" + name);
+  };
+  s.toScribble = function(){
+    if (!t.length) return null;
+    return new Scribble(t);
+  };
+  return s;
+}
+function __mkScribbleImage(b64, arg){
+  var t = b64 == null ? "" : "" + b64;
+  var s = new String(t);
+  s.arg = arg == null ? "" : "" + arg;
+  Object.defineProperty(s, "exists", { get: function(){ return t.length > 0; } });
+  s.save = function(name){
+    if (!t.length || name == null) return false;
+    var id = ScribbleImage_new(t);
+    return id < 0 ? false : ScribbleImage_save(id, "" + name);
+  };
+  s.toAvatar = function(){
+    if (!t.length) return null;
+    return new Avatar(t);
+  };
+  return s;
+}
+
 // ---- Avatar: imagen de avatar sobre los natives Avatar_* ----
 function Avatar(src){ this.oncomplete = null; this.__id = -1; if (src != null) this.__id = Avatar_new("" + src); }
 Object.defineProperty(Avatar.prototype, "src", {
@@ -817,7 +932,7 @@ Object.defineProperty(Avatar.prototype, "size", { get: function(){ return this._
 Avatar.prototype.save = function(path){ return this.__id < 0 ? false : Avatar_save(this.__id, "" + path); };
 Avatar.prototype.load = function(path){ var b = __read_file_b64("" + path); if (b == null) return false; this.__id = Avatar_new(b); return this.__id >= 0; };
 Avatar.prototype.setForUser = function(name){ return this.__id < 0 ? false : Avatar_setForUser("" + name, this.__id); };
-Avatar.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null){ self.__id = Avatar_new(Base64_encode(bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
+Avatar.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null && ("" + bytes).length){ self.__id = Avatar_new(Base64_encode("" + bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
 
 // ---- Scribble: imagen scribble sobre los natives ScribbleImage_* ----
 function Scribble(src){ this.oncomplete = null; this.__id = -1; if (src != null) this.__id = ScribbleImage_new("" + src); }
@@ -828,7 +943,7 @@ Object.defineProperty(Scribble.prototype, "src", {
 Object.defineProperty(Scribble.prototype, "size", { get: function(){ return this.__id < 0 ? -1 : ScribbleImage_getSize(this.__id); } });
 Scribble.prototype.save = function(path){ return this.__id < 0 ? false : ScribbleImage_save(this.__id, "" + path); };
 Scribble.prototype.load = function(path){ var b = __read_file_b64("" + path); if (b == null) return false; this.__id = ScribbleImage_new(b); return this.__id >= 0; };
-Scribble.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null){ self.__id = ScribbleImage_new(Base64_encode(bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
+Scribble.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null && ("" + bytes).length){ self.__id = ScribbleImage_new(Base64_encode("" + bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
 
 // ---- HttpRequest: petición HTTP async con oncomplete (Fase 3b) ----
 // __http_download hace la petición en un thread de background; el manager
@@ -851,7 +966,7 @@ HttpRequest.prototype.header = function(n, v){
   if (n != null) this.__headers["" + n] = v == null ? "" : "" + v;
   return this;
 };
-HttpRequest.prototype.download = function(){
+HttpRequest.prototype.download = function(arg){
   var self = this;
   var url = this.src || this.host;
   var m = ("" + this.method).toUpperCase();
@@ -859,7 +974,18 @@ HttpRequest.prototype.download = function(){
   var key = "__http_" + (++__httpSeq);
   __httpCbs[key] = function(body, status, error){
     self.response = body; self.status = status; self.error = error;
-    if (typeof self.oncomplete === "function") self.oncomplete(body, status, error);
+    if (typeof self.oncomplete === "function"){
+      // sb0t: oncomplete recibe un JSHttpRequestResult {arg, page}. Acá es un
+      // String OBJECT del body (compat con scripts de Astra que lo usaban
+      // como string) con page/arg/status/error encima. `arg` es el argumento
+      // opcional de download(arg), como en sb0t.
+      var text = body == null ? "" : "" + body;
+      var result = new String(text);
+      result.page = text;
+      result.arg = arg == null ? "" : "" + arg;
+      result.status = status; result.error = error;
+      self.oncomplete(result, status, error);
+    }
   };
   var body = (m === "POST") ? ("" + (this.params || "")) : "";
   var hdrs = ""; try { hdrs = JSON.stringify(this.__headers || {}); } catch (e) {}
@@ -877,14 +1003,45 @@ ProxyCheck.prototype.query = function(u, callback){
   var r = new HttpRequest();
   r.method = "POST"; r.src = url; r.utf = true; r.userAgent = "Astra";
   r.oncomplete = function(body, status, error){
-    var result = null; try { result = JSON.parse(body); } catch (e) {}
+    // sb0t JSProxyCheckResult: {error, proxy (bool, == "yes"), type, provider}.
+    var j = null; try { j = JSON.parse("" + body); } catch (e) {}
+    var result = {
+      error: (j && j.error != null) ? "" + j.error : (error || ""),
+      proxy: !!(j && j.proxy === "yes"),
+      type: (j && j.type != null) ? "" + j.type : "",
+      provider: (j && j.provider != null) ? "" + j.provider : ""
+    };
     if (typeof callback === "function") callback(result, status, error);
   };
   return r.download();
 };
 
 // ---- XmlParser: DOM XML minimalista, implementación pura JS ----
-function XmlNode(name){ this.nodeName = name || ""; this.nodeValue = ""; this.attributes = {}; this.childNodes = []; this.parentNode = null; }
+// XmlAttrs (sb0t JSNodeAttributes): getValue/setValue/removeValue + length.
+// También es indexable por nombre (attrs["id"]) como objeto plano, para
+// mantener la compat con scripts de Astra que lo usaban como diccionario.
+function XmlAttrs(){}
+Object.defineProperty(XmlAttrs.prototype, "length", {
+  get: function(){ var n = 0; for (var k in this){ if (Object.prototype.hasOwnProperty.call(this, k)) n++; } return n; }
+});
+XmlAttrs.prototype.getValue = function(name){
+  if (name == null) return null;
+  var k = "" + name;
+  return Object.prototype.hasOwnProperty.call(this, k) ? this[k] : null;
+};
+XmlAttrs.prototype.setValue = function(name, value){
+  if (name == null || value == null) return false;
+  this["" + name] = "" + value;
+  return true;
+};
+XmlAttrs.prototype.removeValue = function(name){
+  if (name == null) return false;
+  var k = "" + name;
+  if (!Object.prototype.hasOwnProperty.call(this, k)) return false;
+  delete this[k];
+  return true;
+};
+function XmlNode(name){ this.nodeName = name || ""; this.nodeValue = ""; this.attributes = new XmlAttrs(); this.childNodes = []; this.parentNode = null; }
 XmlNode.prototype.appendChild = function(n){ n.parentNode = this; this.childNodes.push(n); return n; };
 XmlNode.prototype.removeChild = function(n){ var i = this.childNodes.indexOf(n); if (i >= 0){ this.childNodes.splice(i, 1); n.parentNode = null; return true; } return false; };
 XmlNode.prototype.getNodesByName = function(name){
@@ -898,7 +1055,7 @@ XmlParser.prototype.getNodesByName = function(name){ return this.root ? this.roo
 Object.defineProperty(XmlParser.prototype, "nodeName", { get: function(){ return this.root ? this.root.nodeName : ""; } });
 Object.defineProperty(XmlParser.prototype, "nodeValue", { get: function(){ return this.root ? this.root.nodeValue : ""; } });
 Object.defineProperty(XmlParser.prototype, "childNodes", { get: function(){ return this.root ? this.root.childNodes : []; } });
-Object.defineProperty(XmlParser.prototype, "attributes", { get: function(){ return this.root ? this.root.attributes : {}; } });
+Object.defineProperty(XmlParser.prototype, "attributes", { get: function(){ return this.root ? this.root.attributes : new XmlAttrs(); } });
 Object.defineProperty(XmlParser.prototype, "parentNode", { get: function(){ return null; } });
 XmlParser.prototype.load = function(xml){
   this.xml = xml == null ? "" : "" + xml;
@@ -962,6 +1119,7 @@ Sql.prototype.open  = function(file){ return __Sql_open(this.__h, "" + file); };
 Sql.prototype.query = function(q){ return __Sql_query(this.__h, q ? q.__sql : "", q ? q.__params : []); };
 Sql.prototype.value = function(col){ return __Sql_value(this.__h, "" + col); };
 Sql.prototype.close = function(){ return __Sql_close(this.__h); };
+Object.defineProperty(Sql.prototype, "connected", { get: function(){ return __Sql_connected(this.__h); } });
 Object.defineProperty(Sql.prototype, "canRead",   { get: function(){ return __Sql_canRead(this.__h); } });
 Object.defineProperty(Sql.prototype, "lastError", { get: function(){ return __Sql_lastError(this.__h); } });
 
@@ -1584,9 +1742,116 @@ fn room_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "version" => JsValue::from(js_string!(env!("CARGO_PKG_VERSION"))),
         "externalIp" => JsValue::from(js_string!("")),
         "startTime" => JsValue::from(app.uptime_secs() as f64),
+        // sb0t `Room.customNames` (Settings "customnames"): ¿se permiten
+        // custom names en la sala? Getter; el setter va por __room_set.
+        "customNames" => JsValue::from(app.room_flags.get("customnames")),
+        // sb0t `Room.hashlink`: requiere la IP externa del server, que Astra
+        // no autodetecta — string vacío honesto (mismo criterio que externalIp).
+        "hashlink" => JsValue::from(js_string!("")),
         _ => JsValue::null(),
     };
     Ok(v)
+}
+
+/// `__room_set(prop, value)` — setters de `Room` para scripts. Hoy solo
+/// `customNames` (sb0t: `Room.customNames = bool` escribe el setting).
+fn room_set_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let prop = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let value = args.get(1).map(|v| v.to_boolean()).unwrap_or(false);
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(false));
+    };
+    let ok = match prop.as_str() {
+        "customNames" => app.room_flags.set("customnames", value),
+        _ => false,
+    };
+    Ok(JsValue::from(ok))
+}
+
+/// `Room.setUrl(addr, text)` — paridad sb0t `JSRoom.SetUrl`: fija LA URL de
+/// la sala (reemplaza las existentes) y la anuncia a los clientes conectados.
+fn room_set_url_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let addr = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
+    let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    if addr.is_empty() {
+        return Ok(JsValue::from(false));
+    }
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(false));
+    };
+    while !app.urls.is_empty() {
+        if app.urls.remove_at(0).is_none() {
+            break;
+        }
+    }
+    app.urls.add(&addr, &text);
+    // Broadcast inmediato, web-aware (mismo formato que la rotación de main.rs).
+    for u in app.user_pool.users() {
+        if !u.logged_in {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            let text_len = text.encode_utf16().count();
+            let addr_len = addr.encode_utf16().count();
+            let _ = tx.send(format!("URL:{},{}:{}{}", addr_len, text_len, addr, text));
+        } else {
+            let _ = u.send(server_core::outbound::build_url_c(&addr, &text, u.ares_crypto));
+        }
+    }
+    Ok(JsValue::from(true))
+}
+
+/// `Room.clearUrl()` — paridad sb0t `JSRoom.ClearUrl`: borra las URLs de la sala.
+fn room_clear_url_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(false));
+    };
+    while !app.urls.is_empty() {
+        if app.urls.remove_at(0).is_none() {
+            break;
+        }
+    }
+    Ok(JsValue::from(true))
+}
+
+/// `Channels.search(text)` — paridad sb0t `JSChannels.Search`: busca en la
+/// channel list de Ares (en Astra, la tabla `rooms` del room-search UDP) por
+/// nombre (contains, case-insensitive). Devuelve JSON de JSChannel:
+/// name/topic/version/userCount/port/externalIp/language/hashlink.
+fn channels_search_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let needle = args
+        .get(0)
+        .and_then(jsvalue_to_string)
+        .unwrap_or_default()
+        .to_uppercase();
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(js_string!("[]")));
+    };
+    let rooms = app.db.list_rooms().unwrap_or_default();
+    let out: Vec<serde_json::Value> = rooms
+        .iter()
+        .filter(|r| needle.is_empty() || r.name.to_uppercase().contains(&needle))
+        .map(|r| {
+            let hashlink = r
+                .ip
+                .parse::<std::net::Ipv4Addr>()
+                .map(|ip| {
+                    server_core::hashlink::encode(&server_core::hashlink::HashlinkRoom {
+                        ip,
+                        port: r.port,
+                        name: r.name.clone(),
+                    })
+                })
+                .unwrap_or_default();
+            serde_json::json!({
+                "name": r.name, "topic": r.topic, "version": r.version,
+                "userCount": r.users, "port": r.port, "externalIp": r.ip,
+                "language": r.language, "hashlink": hashlink,
+            })
+        })
+        .collect();
+    let json = serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string());
+    Ok(JsValue::from(js_string!(json)))
 }
 
 /// `__stats_get(name)` — contadores del objeto `Stats`. 0 para los que Astra
@@ -2678,7 +2943,7 @@ fn avatar_get_for_user_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) 
 
 /// `Avatar_save(id, path)` — guarda un avatar del store a un archivo en disco.
 /// Retorna `true` si OK.
-fn avatar_save_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+fn avatar_save_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let id = args.get(0)
         .and_then(|v| v.as_number())
         .map(|n| n as i32)
@@ -2687,6 +2952,10 @@ fn avatar_save_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Resu
     if id < 0 || path.is_empty() {
         return Ok(JsValue::from(false));
     }
+    // Paridad sb0t JSAvatarImage.Save: los relativos van a <script>/data/.
+    let Some(path) = resolve_script_data_path(ctx, &path, true) else {
+        return Ok(JsValue::from(false));
+    };
     let bytes = AVATAR_STORE.with(|store| {
         store.borrow().get(id as usize).cloned()
     });
@@ -2694,7 +2963,7 @@ fn avatar_save_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Resu
         Some(b) => match std::fs::write(&path, &b) {
             Ok(_) => Ok(JsValue::from(true)),
             Err(e) => {
-                tracing::warn!("Avatar_save: error escribiendo {}: {}", path, e);
+                tracing::warn!("Avatar_save: error escribiendo {}: {}", path.display(), e);
                 Ok(JsValue::from(false))
             }
         },
@@ -2763,7 +3032,7 @@ fn scribble_image_get_size_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Cont
 }
 
 /// `ScribbleImage_save(id, path)` — guarda scribble a disco.
-fn scribble_image_save_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+fn scribble_image_save_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let id = args.get(0)
         .and_then(|v| v.as_number())
         .map(|n| n as i32)
@@ -2772,6 +3041,10 @@ fn scribble_image_save_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context)
     if id < 0 || path.is_empty() {
         return Ok(JsValue::from(false));
     }
+    // Paridad sb0t JSScribbleImage.Save: los relativos van a <script>/data/.
+    let Some(path) = resolve_script_data_path(ctx, &path, true) else {
+        return Ok(JsValue::from(false));
+    };
     let bytes = SCRIBBLE_STORE.with(|store| {
         store.borrow().get(id as usize).cloned()
     });
@@ -2953,6 +3226,20 @@ fn sql_run(
         out_rows.push(r);
     }
     Ok((cols, out_rows))
+}
+
+/// `sql.connected` (paridad JSSqlInstance de sb0t: `Connection.State ==
+/// Open`). Los scripts reales chequean esto en vez del retorno de `open()`
+/// (ej. hangman: `sql.open(db); if (sql.connected) …`).
+fn sql_connected_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let h = sql_handle(args);
+    let connected = SQL_STORE.with(|s| {
+        s.borrow()
+            .get(&h)
+            .map(|st| st.conn.is_some())
+            .unwrap_or(false)
+    });
+    Ok(JsValue::from(connected))
 }
 
 fn sql_query_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
@@ -3677,6 +3964,64 @@ mod tests {
         assert!(result.is_ok(), "eval should succeed: {:?}", result);
     }
 
+    /// Auditoría 2026-07-16: superficie sb0t que faltaba (barrido exhaustivo
+    /// de [JSProperty]/[JSFunction] contra el prelude). Cubre las 17 ausencias
+    /// y la semántica propiedad-vs-función de los estáticos.
+    #[test]
+    fn sb0t_surface_audit_regressions() {
+        let mut ctx = make_context(make_app());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            // Crypto.md5hash/sha1hash → CryptoResult {toHex,toBase64,toArray}
+            var r = Crypto.sha1hash("hello");
+            if (r == null) throw "sha1hash null";
+            if (r.toHex() !== "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d") throw "toHex: " + r.toHex();
+            if (r.toArray().length !== 20) throw "toArray len: " + r.toArray().length;
+            if (r.toArray()[0] !== 0xaa) throw "toArray[0]: " + r.toArray()[0];
+            if (r.toBase64() !== "qvTGHdzF6KLavt4PO0gs2a6pQ00=") throw "toBase64: " + r.toBase64();
+            if (Crypto.md5hash("hello").toHex() !== "5d41402abc4b2a76b9719d911017c592") throw "md5hash";
+            if (Crypto.md5hash(null) !== null) throw "md5hash(null)";
+
+            // Room: props + setUrl/clearUrl
+            if (Room.customNames !== false) throw "customNames default false";
+            Room.customNames = true;
+            if (Room.customNames !== true) throw "customNames setter";
+            Room.topic = "topic desde script";
+            if (Room.topic !== "topic desde script") throw "Room.topic setter: " + Room.topic;
+            if (Room.setUrl("http://x.example", "mi url") !== true) throw "setUrl";
+            if (Room.clearUrl() !== true) throw "clearUrl";
+
+            // Channels.search: array (vacío sin rooms en la DB)
+            var chans = Channels.search("");
+            if (!Array.isArray(chans)) throw "search not array";
+            if (chans.length !== 0) throw "search should be empty";
+            if (Channels.available !== false) throw "available (sin rooms) should be false";
+
+            // XmlAttrs: getValue/setValue/removeValue/length
+            var xp = new XmlParser();
+            xp.load('<root a="1"><item id="x"/></root>');
+            if (!xp.available) throw "xml not available";
+            if (xp.attributes.getValue("a") !== "1") throw "attr getValue";
+            if (xp.attributes.length !== 1) throw "attr length";
+            if (xp.attributes.setValue("b", "2") !== true) throw "attr setValue";
+            if (xp.attributes.getValue("b") !== "2") throw "attr get b";
+            if (xp.attributes.removeValue("b") !== true) throw "attr removeValue";
+            if (xp.attributes.getValue("b") !== null) throw "attr b should be gone";
+            var item = xp.getNodesByName("item")[0];
+            if (item.attributes.getValue("id") !== "x") throw "node attr";
+            if (item.attributes["id"] !== "x") throw "attr index compat";
+
+            // ProxyCheck result shape se construye en el prelude (query es
+            // async; acá solo verificamos que la clase existe y sus defaults).
+            var pc = new ProxyCheck();
+            if (pc.includeVPN !== true) throw "includeVPN";
+            if (pc.useTLS !== false) throw "useTLS";
+        "#,
+        );
+        assert!(result.is_ok(), "sb0t surface audit failed: {:?}", result);
+    }
+
     #[test]
     fn user_count_real() {
         let app = make_app();
@@ -3771,15 +4116,20 @@ mod tests {
             if (typeof u.sendText !== "function") throw "sendText is not a function";
             if (Users.getUserByName("x") == null) throw "Users.getUserByName null";
 
-            // Room getters
-            if (typeof Room.name() !== "string") throw "Room.name not string";
-            if (typeof Room.port() !== "number") throw "Room.port not number";
-            if (typeof Room.version() !== "string") throw "Room.version not string";
-            if (typeof Room.startTime() !== "number") throw "Room.startTime not number";
+            // Room: PROPIEDADES (paridad sb0t JSRoom — sin paréntesis)
+            if (typeof Room.name !== "string") throw "Room.name not string";
+            if (typeof Room.port !== "number") throw "Room.port not number";
+            if (typeof Room.version !== "string") throw "Room.version not string";
+            if (typeof Room.startTime !== "number") throw "Room.startTime not number";
+            if (typeof Room.topic !== "string") throw "Room.topic not string";
+            if (typeof Room.customNames !== "boolean") throw "Room.customNames not bool";
+            if (typeof Room.hashlink !== "string") throw "Room.hashlink not string";
+            if (typeof Room.setUrl !== "function") throw "Room.setUrl not fn";
+            if (typeof Room.clearUrl !== "function") throw "Room.clearUrl not fn";
 
-            // Stats
-            if (Stats.userCount() !== 0) throw "Stats.userCount != 0";
-            if (typeof Stats.peakUserCount() !== "number") throw "Stats.peak not number";
+            // Stats: PROPIEDADES (paridad sb0t JSStats)
+            if (Stats.userCount !== 0) throw "Stats.userCount != 0";
+            if (typeof Stats.peakUserCount !== "number") throw "Stats.peak not number";
 
             // List
             var L = new List();
@@ -3895,12 +4245,15 @@ mod tests {
             if (Users.banned().length !== 0) throw "banned not empty";
             if (Users.linked().length !== 0) throw "linked not empty";
 
-            // Channels.list/available devuelven array parseado
+            // Channels: list() extra de Astra; enabled/available PROPIEDADES
+            // (paridad sb0t JSChannels) y search() devuelve array.
             if (!Array.isArray(Channels.list())) throw "Channels.list not array";
-            if (Channels.enabled() !== true) throw "Channels.enabled";
+            if (Channels.enabled !== true) throw "Channels.enabled";
+            if (typeof Channels.available !== "boolean") throw "Channels.available not bool";
+            if (!Array.isArray(Channels.search("x"))) throw "Channels.search not array";
 
-            // Link stubs (Astra no linkea)
-            if (Link.linked() !== false) throw "Link.linked should be false";
+            // Link: linked PROPIEDAD (paridad sb0t JSLink)
+            if (Link.linked !== false) throw "Link.linked should be false";
             if (Link.leaves().length !== 0) throw "Link.leaves not empty";
 
             // Leaf stub
@@ -3975,7 +4328,11 @@ mod tests {
         let check = eval_script(
             &mut ctx,
             r#"
-            if (__result !== "HELLO_HTTP") throw "body mismatch: " + __result;
+            // El resultado es un String OBJECT del body (compat Astra) con las
+            // props sb0t JSHttpRequestResult encima: page y arg.
+            if ("" + __result !== "HELLO_HTTP") throw "body mismatch: " + __result;
+            if (__result.page !== "HELLO_HTTP") throw "page mismatch: " + __result.page;
+            if (__result.arg !== "") throw "arg mismatch: " + __result.arg;
             if (__status !== 200) throw "status mismatch: " + __status;
         "#,
         );

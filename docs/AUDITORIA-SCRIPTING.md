@@ -249,3 +249,50 @@ userobj), ⚠️ = difiere.
 - [ ] Suite de paridad: un script de prueba que ejercite cada evento y cada
       método del user object.
 - [ ] Verificación manual con los scripts reales de las salas.
+
+---
+
+## Barrido exhaustivo de superficie (2026-07-16) — post "100% paridad"
+
+Tras un bug real (hangman: `sql.connected` faltante → el script tomaba su rama
+de error en silencio), se hizo el barrido MECÁNICO que la auditoría original
+no hizo: extracción de TODOS los `[JSProperty]`/`[JSFunction]` del código
+fuente de sb0t (272 nombres en 98 archivos) cruzados contra el prelude de
+Astra. Resultado: **17 nombres ausentes + un error sistemático de semántica**
+(los estáticos de sb0t son PROPIEDADES, Astra los exponía como FUNCIONES).
+Todo implementado y verificado; el scan cierra en 0 faltantes.
+
+Implementado en esta pasada:
+- `Sql.connected` (JSSqlInstance) — el disparador de todo.
+- `Room.*` → getters/setters reales (`Room.name`, `Room.topic` con setter,
+  etc.) + `customNames` (get/set, flag de sala nuevo `customnames`, default
+  false como sb0t, con gate en el self-service de `#customname` y toggle
+  `#customnames on|off` Host) + `hashlink` ("" honesto) + `setUrl`/`clearUrl`
+  (reemplazan la lista de URLs y anuncian web-aware).
+- `Stats.*` → 11 propiedades (antes funciones).
+- `Link.linked/name/externalIp/port/hashlink` → propiedades.
+- `Channels.available/enabled` → propiedades; `Channels.search(texto)` REAL
+  sobre la tabla `rooms` del room-search UDP (native `__channels_search`),
+  devuelve JSChannel con `language` y `hashlink` incluidos.
+- `Crypto.md5hash/sha1hash` → devuelven CryptoResult {toHex,toBase64,toArray}.
+- `user.font` → props sb0t {enabled, family, nameColor, textColor} además de
+  los campos crudos de Astra.
+- `user.avatar` → JSAvatarImage: String OBJECT del base64 (compat Astra) con
+  {arg, exists, save(name), toScribble()}; scribble equivalente con toAvatar().
+  `Avatar_save`/`ScribbleImage_save` ahora escriben en `<script>/data/`.
+- `HttpRequest.oncomplete` → recibe JSHttpRequestResult {arg, page} (String
+  OBJECT del body para compat); `download(arg)` acepta el arg de sb0t.
+- `ProxyCheck.query` → callback con {error, proxy, type, provider}.
+- `XmlNode.attributes` → JSNodeAttributes {getValue, setValue, removeValue,
+  length}, indexable como diccionario para compat.
+
+Tests: `sb0t_surface_audit_regressions` (api.rs) cubre todo lo anterior;
+`sql_connected_property_like_sb0t` y `file_api_resolves_in_data_subfolder_like_sb0t`
+(manager.rs) cubren los disparadores. E2E verde con script de superficie por
+WebSocket.
+
+Divergencias honestas que quedan (documentadas, no silenciosas):
+- `Room.externalIp`/`Room.hashlink`/`Link.name/externalIp/port/hashlink`: ""
+  (Astra no autodetecta su IP externa ni corre link multi-servidor completo).
+- `Channels.enabled`: true fijo (no hay off-switch para el room-search local).
+- `user.font.nameColor`: "" (Astra no trackea el color de nick por separado).
