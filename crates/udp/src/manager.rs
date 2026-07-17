@@ -51,6 +51,12 @@ pub struct UdpNodeManager {
     firewall_cookies: parking_lot::Mutex<std::collections::HashMap<u32, (IpAddr, i64)>>,
     /// Cantidad de TCP probes de firewall check en curso.
     pub probes_in_flight: std::sync::atomic::AtomicUsize,
+    /// IP externa del server, tal como la reportó un peer en el handshake
+    /// READYTOCHECKFIREWALL (paridad sb0t `Settings.ExternalIP`). Solo se
+    /// acepta el PRIMER reporte (sb0t `udp.ServerAddressReceived`).
+    external_ip: RwLock<Option<IpAddr>>,
+    /// Callback opcional al recibir la IP externa (sincroniza AppContext).
+    on_external_ip: RwLock<Option<Arc<dyn Fn(IpAddr) + Send + Sync>>>,
 }
 
 impl UdpNodeManager {
@@ -91,6 +97,35 @@ impl UdpNodeManager {
             on_change,
             firewall_cookies: parking_lot::Mutex::new(std::collections::HashMap::new()),
             probes_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            external_ip: RwLock::new(None),
+            on_external_ip: RwLock::new(None),
+        }
+    }
+
+    /// Registra el callback a invocar cuando un peer reporte nuestra IP externa.
+    pub fn set_on_external_ip(&self, cb: Arc<dyn Fn(IpAddr) + Send + Sync>) {
+        *self.on_external_ip.write() = Some(cb);
+    }
+
+    /// IP externa reportada (si ya llegó).
+    pub fn external_ip(&self) -> Option<IpAddr> {
+        *self.external_ip.read()
+    }
+
+    /// Registra la IP externa que un peer nos reportó en el handshake
+    /// READYTOCHECKFIREWALL. Solo el PRIMER reporte cuenta (paridad sb0t:
+    /// `if (!udp.ServerAddressReceived) Settings.ExternalIP = packet`).
+    pub fn report_external_ip(&self, ip: IpAddr) {
+        {
+            let mut cur = self.external_ip.write();
+            if cur.is_some() {
+                return;
+            }
+            *cur = Some(ip);
+        }
+        tracing::info!("room-search: server address reported as {}", ip);
+        if let Some(cb) = self.on_external_ip.read().as_ref() {
+            cb(ip);
         }
     }
 

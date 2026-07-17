@@ -32,6 +32,46 @@ use crate::crypto::{self, LinkCrypto};
 const UNSPECIFIED_IPV4: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 const LINK_PACKET_HEADER_LEN: usize = 3;
 
+/// Idents de leaf (paridad sb0t `Leaf.Ident`): únicos por proceso.
+static NEXT_LEAF_IDENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// Guard RAII: al cerrarse la conexión de un leaf, lo saca del registro y
+/// anuncia la desconexión a los demás leaves.
+struct LeafUnregister {
+    app: Arc<AppContext>,
+    ident: u32,
+    name: String,
+    ip: IpAddr,
+    port: u16,
+}
+
+impl Drop for LeafUnregister {
+    fn drop(&mut self) {
+        self.app.link_leaves.write().retain(|l| l.ident != self.ident);
+        self.app.publish_link_event(LinkEvent::LeafAnnounce {
+            ident: self.ident,
+            name: self.name.clone(),
+            ip: self.ip,
+            port: self.port,
+            connected: false,
+        });
+    }
+}
+
+/// Payload de `HubLeafConnected` (paridad HubOutbound.HubLeafConnected):
+/// `u32 ident, str name, ip, u16 port`.
+fn build_leaf_connected_payload(
+    info: &server_core::LinkLeafInfo,
+    crypto: Option<LinkCrypto>,
+) -> Vec<u8> {
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
+    b.write_u32(info.ident);
+    b.write_string(&info.name);
+    b.write_ip(info.ip);
+    b.write_u16(info.port);
+    b.build_link_packet(LinkMsg::HubLeafConnected)[LINK_PACKET_HEADER_LEN..].to_vec()
+}
+
 /// Estado del LinkServer.
 pub struct LinkServer {
     /// Contexto de la app
@@ -217,6 +257,46 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
         users.len()
     );
 
+    // 4.5. Registrar el leaf con un ident (paridad sb0t Leaf.Ident) y
+    // anunciar: al leaf nuevo le mandamos los leaves YA conectados
+    // (HubLeafConnected por cada uno) y a los demás les anunciamos este.
+    let my_ident = NEXT_LEAF_IDENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let peer_ip = stream
+        .peer_addr()
+        .map(|a| a.ip())
+        .unwrap_or(std::net::IpAddr::V4(UNSPECIFIED_IPV4));
+    let existing: Vec<server_core::LinkLeafInfo> = app.link_leaves.read().clone();
+    for info in &existing {
+        let payload = build_leaf_connected_payload(info, crypto);
+        if write_link_to_stream(&mut stream, LinkMsg::HubLeafConnected, &payload)
+            .await
+            .is_err()
+        {
+            return Err("error anunciando leaves existentes".into());
+        }
+    }
+    app.link_leaves.write().push(server_core::LinkLeafInfo {
+        ident: my_ident,
+        name: leaf_name.clone(),
+        ip: peer_ip,
+        port: leaf_port,
+    });
+    app.publish_link_event(LinkEvent::LeafAnnounce {
+        ident: my_ident,
+        name: leaf_name.clone(),
+        ip: peer_ip,
+        port: leaf_port,
+        connected: true,
+    });
+    // Guard: al salir de esta función (disconnect), des-registrar y anunciar.
+    let _unregister = LeafUnregister {
+        app: app.clone(),
+        ident: my_ident,
+        name: leaf_name.clone(),
+        ip: peer_ip,
+        port: leaf_port,
+    };
+
     // 5. Loop de keep-alive: enviar HubPong cada 30s
     let mut ping_timer = interval(Duration::from_secs(30));
     ping_timer.tick().await; // skip primer tick inmediato
@@ -239,7 +319,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
             event = link_events.recv() => {
                 match event {
                     Ok(event) => {
-                        if should_forward_event_to_leaf(&event, &leaf_name) {
+                        if should_forward_event_to_leaf(&event, &leaf_name, my_ident) {
                             if send_link_event(&mut stream, &event, crypto).await.is_err() {
                                 info!("link server: leaf '{}' desconectado", leaf_name);
                                 return Ok(());
@@ -330,6 +410,26 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                             info!("link server: UserUpdated recibido: {}", user.name);
                         } else {
                             warn!("link server: UserUpdated malformado");
+                        }
+                    }
+                    // Envíos dirigidos a OTRO leaf (paridad HubProcessor
+                    // LeafPrint*/LeafPublicToLeaf/...): parsear ident destino
+                    // + payload y publicar; lo entrega la conexión destino.
+                    LinkMsg::PrintAll
+                    | LinkMsg::PrintVroom
+                    | LinkMsg::PrintLevel
+                    | LinkMsg::PublicToLeaf
+                    | LinkMsg::EmoteToLeaf
+                    | LinkMsg::ScribbleLeaf => {
+                        match parse_leaf_directed(op, &payload, crypto) {
+                            Some((target_ident, directed)) => {
+                                app.publish_link_event(LinkEvent::ToLeaf {
+                                    origin: Some(leaf_name.clone()),
+                                    target_ident,
+                                    payload: directed,
+                                });
+                            }
+                            None => warn!("link server: {:?} malformado de '{}'", op, leaf_name),
                         }
                     }
                     LinkMsg::PublicText => {
@@ -619,7 +719,7 @@ fn snapshot_from_link_user(user: &LinkUser) -> LinkUserSnapshot {
     }
 }
 
-fn should_forward_event_to_leaf(event: &LinkEvent, leaf_name: &str) -> bool {
+fn should_forward_event_to_leaf(event: &LinkEvent, leaf_name: &str, my_ident: u32) -> bool {
     match event {
         LinkEvent::Join { origin, .. }
         | LinkEvent::UserUpdated { origin, .. }
@@ -636,7 +736,92 @@ fn should_forward_event_to_leaf(event: &LinkEvent, leaf_name: &str) -> bool {
         | LinkEvent::PersonalMessage { origin, .. }
         | LinkEvent::AdminAction { origin, .. }
         | LinkEvent::Raw { origin, .. } => origin.as_deref() != Some(leaf_name),
+        // Dirigido: SOLO la conexión cuyo ident coincide.
+        LinkEvent::ToLeaf { target_ident, .. } => *target_ident == my_ident,
+        // Anuncio de leaf: a todos menos al anunciado.
+        LinkEvent::LeafAnnounce { ident, .. } => *ident != my_ident,
     }
+}
+
+/// Parsea un mensaje dirigido leaf→hub (`u32 target_ident` + payload según
+/// el opcode; paridad HubProcessor).
+fn parse_leaf_directed(
+    op: LinkMsg,
+    payload: &[u8],
+    crypto: Option<LinkCrypto>,
+) -> Option<(u32, server_core::LeafDirected)> {
+    use server_core::LeafDirected;
+    let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
+    let ident = r.read_u32().ok()?;
+    let directed = match op {
+        LinkMsg::PrintAll => LeafDirected::PrintAll { text: r.read_string_no_null().ok()? },
+        LinkMsg::PrintVroom => LeafDirected::PrintVroom {
+            vroom: r.read_u16().ok()?,
+            text: r.read_string_no_null().ok()?,
+        },
+        LinkMsg::PrintLevel => LeafDirected::PrintLevel {
+            level: r.read_u8().ok()?,
+            text: r.read_string_no_null().ok()?,
+        },
+        LinkMsg::PublicToLeaf => LeafDirected::Public {
+            from: r.read_string().ok()?,
+            text: r.read_string_no_null().ok()?,
+        },
+        LinkMsg::EmoteToLeaf => LeafDirected::Emote {
+            from: r.read_string().ok()?,
+            text: r.read_string_no_null().ok()?,
+        },
+        LinkMsg::ScribbleLeaf => LeafDirected::Scribble {
+            from: r.read_string().ok()?,
+            height: r.read_u32().ok()?,
+            data: r.read_bytes(r.remaining()).unwrap_or_default(),
+        },
+        _ => return None,
+    };
+    Some((ident, directed))
+}
+
+/// Construye el payload hub→leaf de un [`LeafDirected`] (SIN el ident, que
+/// solo viaja leaf→hub — paridad HubOutbound.HubPrint*/HubPublicToLeaf/...).
+fn build_leaf_directed_payload(
+    directed: &server_core::LeafDirected,
+    crypto: Option<LinkCrypto>,
+) -> (LinkMsg, Vec<u8>) {
+    use server_core::LeafDirected;
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
+    let msg = match directed {
+        LeafDirected::PrintAll { text } => {
+            b.write_string_no_null(text);
+            LinkMsg::PrintAll
+        }
+        LeafDirected::PrintVroom { vroom, text } => {
+            b.write_u16(*vroom);
+            b.write_string_no_null(text);
+            LinkMsg::PrintVroom
+        }
+        LeafDirected::PrintLevel { level, text } => {
+            b.write_u8(*level);
+            b.write_string_no_null(text);
+            LinkMsg::PrintLevel
+        }
+        LeafDirected::Public { from, text } => {
+            b.write_string(from);
+            b.write_string_no_null(text);
+            LinkMsg::PublicToLeaf
+        }
+        LeafDirected::Emote { from, text } => {
+            b.write_string(from);
+            b.write_string_no_null(text);
+            LinkMsg::EmoteToLeaf
+        }
+        LeafDirected::Scribble { from, height, data } => {
+            b.write_string(from);
+            b.write_u32(*height);
+            b.write_bytes(data);
+            LinkMsg::ScribbleLeaf
+        }
+    };
+    (msg, b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec())
 }
 
 async fn send_link_event(
@@ -669,6 +854,21 @@ async fn send_link_event(
             };
             info!("link server: reenviando passthrough {:?}", link_msg);
             (link_msg, payload.clone())
+        }
+        // Dirigido a ESTE leaf (el filtro por ident ya pasó): va sin ident.
+        LinkEvent::ToLeaf { payload, .. } => build_leaf_directed_payload(payload, crypto),
+        LinkEvent::LeafAnnounce { ident, name, ip, port, connected } => {
+            if *connected {
+                let info = server_core::LinkLeafInfo {
+                    ident: *ident, name: name.clone(), ip: *ip, port: *port,
+                };
+                (LinkMsg::HubLeafConnected, build_leaf_connected_payload(&info, crypto))
+            } else {
+                let mut b = LinkPacketBuilder::new_with_crypto(crypto);
+                b.write_u32(*ident);
+                (LinkMsg::HubLeafDisconnected,
+                 b.build_link_packet(LinkMsg::HubLeafDisconnected)[LINK_PACKET_HEADER_LEN..].to_vec())
+            }
         }
     };
     write_link_to_stream(stream, msg, &payload).await.map_err(|e| e.to_string())

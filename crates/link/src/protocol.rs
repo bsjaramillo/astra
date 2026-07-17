@@ -109,8 +109,16 @@ pub enum LinkMsg {
     Nudge = 32,
     /// Scribble a un usuario
     ScribbleUser = 33,
-    /// Scribble a un leaf
+    /// Scribble a un leaf (sb0t MSG_LINK_LEAF/HUB_SCRIBBLE_LEAF).
+    /// Leaf→Hub: `u32 target_ident, str sender, u32 height, bytes img`;
+    /// Hub→Leaf: `str sender, u32 height, bytes img`.
     ScribbleLeaf = 34,
+
+    /// Texto público como `sender` en un leaf (sb0t PUBLIC_TO_LEAF).
+    /// Leaf→Hub: `u32 target_ident, str sender, str text`; Hub→Leaf: sin ident.
+    PublicToLeaf = 90,
+    /// Emote como `sender` en un leaf (sb0t EMOTE_TO_LEAF).
+    EmoteToLeaf = 91,
 
     /// Cambio de nick
     NickChanged = 40,
@@ -130,11 +138,14 @@ pub enum LinkMsg {
     /// File browse data
     BrowseData = 51,
 
-    /// Print a todos
+    /// Print a todos los usuarios de un leaf (sb0t PRINT_ALL).
+    /// Leaf→Hub: `u32 target_ident, str text`; Hub→Leaf: `str text`.
     PrintAll = 60,
-    /// Print a un vroom
+    /// Print a un vroom de un leaf (sb0t PRINT_VROOM).
+    /// Leaf→Hub: `u32 target_ident, u16 vroom, str text`; Hub→Leaf: sin ident.
     PrintVroom = 61,
-    /// Print a un nivel
+    /// Print a usuarios con nivel > N de un leaf (sb0t PRINT_LEVEL).
+    /// Leaf→Hub: `u32 target_ident, u8 level, str text`; Hub→Leaf: sin ident.
     PrintLevel = 62,
 }
 
@@ -178,6 +189,8 @@ impl LinkMsg {
             60 => Some(Self::PrintAll),
             61 => Some(Self::PrintVroom),
             62 => Some(Self::PrintLevel),
+            90 => Some(Self::PublicToLeaf),
+            91 => Some(Self::EmoteToLeaf),
             _ => None,
         }
     }

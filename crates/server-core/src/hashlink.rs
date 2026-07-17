@@ -24,7 +24,13 @@ const SEED: u32 = 28435;
 /// Cifra (variante `e67` de sb0t): XOR con keystream realimentado por el
 /// byte CIFRADO.
 fn e67(data: &[u8]) -> Vec<u8> {
-    let mut b: u32 = SEED;
+    e67_seed(data, SEED)
+}
+
+/// `e67` con seed arbitrario. Además del hashlink (seed 28435), sb0t lo usa
+/// con **seed 1488** para el payload del nudge cb0t (`AresClient.Nudge`).
+pub fn e67_seed(data: &[u8], seed: u32) -> Vec<u8> {
+    let mut b: u32 = seed;
     let mut out = Vec::with_capacity(data.len());
     for &d in data {
         let c = (d as u32 ^ (b >> 8)) as u8;

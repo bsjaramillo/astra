@@ -337,6 +337,10 @@ async fn main() -> anyhow::Result<()> {
                                     links.retain(|(n, _, _)| n != &name);
                                     links.push((name.clone(), port, true));
                                 }
+                                // Hub activo (paridad sb0t Server.Link: el leaf
+                                // conoce el hub por el request de conexión).
+                                *link_request_ctx.link_hub.write() =
+                                    Some((name.clone(), addr.ip(), port));
                                 tokio::spawn(async move {
                                     client.run(addr).await;
                                 });
@@ -357,6 +361,12 @@ async fn main() -> anyhow::Result<()> {
                                 entry.2 = false;
                             }
                         }
+                        {
+                            let mut hub = link_request_ctx.link_hub.write();
+                            if hub.as_ref().is_some_and(|(n, _, _)| n == &name) {
+                                *hub = None;
+                            }
+                        }
                         info!("Link_disconnect: {}", name);
                     }
                     Ok(LinkRequest::KickHub { name }) => {
@@ -364,6 +374,12 @@ async fn main() -> anyhow::Result<()> {
                         links.retain(|(n, _p, _c)| n != &name);
                         let mut users = link_request_ctx.link_users.write();
                         users.retain(|(link, _)| link != &name);
+                        {
+                            let mut hub = link_request_ctx.link_hub.write();
+                            if hub.as_ref().is_some_and(|(n, _, _)| n == &name) {
+                                *hub = None;
+                            }
+                        }
                         info!("Link_kickHub: {}", name);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -436,6 +452,14 @@ async fn main() -> anyhow::Result<()> {
                 .collect();
         }));
 
+        // IP externa reportada por la red Ares → AppContext (para
+        // `Room.externalIp`/`Room.hashlink` del scripting, paridad
+        // sb0t Settings.ExternalIP).
+        let ext_ip_ctx = ctx.clone();
+        mgr.set_on_external_ip(std::sync::Arc::new(move |ip| {
+            *ext_ip_ctx.external_ip.write() = Some(ip);
+        }));
+
         // El UDP listener comparte el socket con el prober
         let udp_bind = format!("0.0.0.0:{}", settings.port);
         let udp_socket = UdpSocket::bind(udp_bind.parse::<SocketAddr>()?).await?;
@@ -496,6 +520,10 @@ async fn main() -> anyhow::Result<()> {
         let link_ctx = ctx.clone();
         match link_addr.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
+                // Hub activo para Server.Link/scripting (nombre = addr, ya
+                // que --link-client no lleva nombre de sala del hub).
+                *link_ctx.link_hub.write() =
+                    Some((link_addr.clone(), addr.ip(), addr.port()));
                 let client = std::sync::Arc::new(astra_link::LinkClient::new(link_ctx));
                 tokio::spawn(async move {
                     client.run(addr).await;
@@ -694,7 +722,10 @@ async fn main() -> anyhow::Result<()> {
                 let ctx = ctx.clone();
                 let scripting = scripting.clone();
                 let web_enabled = web_enabled;
-                let link_enabled = cli.link_server;
+                // Hub habilitado por CLI (--link-server) O por config
+                // (link_hub_enabled): antes solo el flag CLI contaba y el
+                // setting del toml se ignoraba en silencio.
+                let link_enabled = cli.link_server || ctx.settings.link_hub_enabled;
                 tokio::spawn(async move {
                     if let Err(e) = handle_muxed_connection(ctx, stream, peer, scripting, web_enabled, link_enabled).await {
                         warn!("cliente {} error: {}", peer, e);

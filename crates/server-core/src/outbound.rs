@@ -301,6 +301,18 @@ pub fn build_topic_c(text: &str, crypto: Crypto) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+/// Custom data a un cliente custom (`MSG_CHAT_SERVER_CUSTOM_DATA`, op 200).
+/// Formato sb0t `TCPOutbound.CustomData`: `str ident, str sender, bytes`.
+/// Lo usan el nudge (`cb0t_nudge`) y el scribble dirigido
+/// (`cb0t_scribble_once/first/chunk/last`).
+pub fn build_custom_data_c(ident: &str, sender: &str, data: &[u8], crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::CustomData, crypto);
+    w.write_string_nt(ident).ok();
+    w.write_string_nt(sender).ok();
+    w.write_bytes(data).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
 /// Error fatal del server (`ServerError`) — aviso antes de expulsar.
 pub fn build_server_error_c(text: &str, crypto: Crypto) -> Bytes {
     let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerError, crypto);

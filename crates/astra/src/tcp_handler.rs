@@ -754,6 +754,8 @@ async fn dispatch_message(
             let png = pkt.data[1..].to_vec();
             let cleared = png.len() < 10;
             *user.avatar.lock() = if cleared { None } else { Some(png.clone()) };
+            // Avatar propio del cliente → stash para user.restoreAvatar().
+            *user.org_avatar.lock() = if cleared { None } else { Some(png.clone()) };
             *user.full_avatar.lock() = None;
             user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
             scripting.dispatch(astra_scripting::ScriptEvent::Avatar {
@@ -894,6 +896,13 @@ fn handle_advanced_features(
         Err(_) => return,
     };
     let inner = &payload[r.position()..];
+    // CustomFont (204): fuente custom del cliente (paridad sb0t
+    // `TCPAdvancedProcessor.Font`). Va ANTES del gate de muzzle: la fuente
+    // no es transmisión de voz y sb0t no la gatea por muzzle.
+    if TcpMsg::from_u8(inner_op) == Some(TcpMsg::CustomFont) {
+        handle_custom_font(ctx, user, inner);
+        return;
+    }
     // Voice chat: el emisor muzzled no transmite (paridad sb0t).
     if user.is_muzzled() {
         return;
@@ -911,6 +920,155 @@ fn handle_advanced_features(
         }
         _ => {} // VcSupported/VcIgnore/etc: no-op por ahora.
     }
+}
+
+/// Tabla clásica de colores de Ares por índice → HTML "#rrggbb" (paridad
+/// `Helpers.AresColorToHTMLColor`/`acols` de sb0t, mismos 40 colores .NET).
+const ARES_COLORS: &[&str] = &[
+    "#ffffff", "#000000", "#000080", "#008000", "#ff0000", "#800000", "#800080", "#ffa500",
+    "#ffff00", "#00ff00", "#008080", "#00ffff", "#0000ff", "#ff00ff", "#808080", "#c0c0c0",
+    "#ff4500", "#8b4513", "#008b8b", "#4b0082", "#dc143c", "#228b22", "#9932cc", "#ff69b4",
+    "#2f4f4f", "#b0c4de", "#7cfc00", "#20b2aa", "#deb887", "#7fff00", "#b8860b", "#8b008b",
+    "#00bfff", "#ffd700", "#f08080", "#9370db", "#808000", "#db7093", "#bc8f8f", "#2e8b57",
+    "#6a5acd", "#00ff7f", "#ff6347", "#ee82ee", "#f5deb3", "#9acd32",
+];
+
+fn ares_color_to_html(index: u8) -> String {
+    ARES_COLORS
+        .get(index as usize)
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// Procesa el paquete CustomFont (204) de un cliente Ares. Formato sb0t:
+/// `size u8, fontname str, oldN u8, oldT u8, [nameColor str], [textColor str]`
+/// donde los strings de colores son opcionales y caen a la tabla clásica de
+/// Ares por índice. Guarda la fuente en el user y la retransmite a los
+/// custom clients del vroom (binario) y a los clientes web (`FONT:`), igual
+/// que sb0t. Con <2 bytes, resetea la fuente (paridad exacta).
+fn handle_custom_font(
+    ctx: &AppContext,
+    user: &Arc<server_core::user_pool::AresUser>,
+    payload: &[u8],
+) {
+    use server_core::types::IFont;
+
+    if payload.len() < 2 {
+        *user.font.write() = IFont::default();
+        return;
+    }
+    let mut r = PacketReader::new_crypto(payload, user.ares_crypto);
+    let size = match r.read_u8() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let face = r.read_string_nt().unwrap_or_default();
+    let old_n = r.read_u8().unwrap_or(0);
+    let old_t = r.read_u8().unwrap_or(0);
+    let mut name_color = if r.remaining() > 0 {
+        r.read_string_nt().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mut text_color = if r.remaining() > 0 {
+        r.read_string_nt().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if name_color.is_empty() {
+        name_color = ares_color_to_html(old_n);
+    }
+    if text_color.is_empty() {
+        text_color = ares_color_to_html(old_t);
+    }
+
+    // Flag de sala `fonts` (sb0t `Settings.Get<bool>("fonts_enabled")`).
+    if !ctx.room_flags.get("fonts") {
+        return;
+    }
+
+    let font = IFont {
+        face: face.clone(),
+        color: 0,
+        size: size.min(18), // sb0t: "fonts cannot be bigger than 18"
+        bold: false,
+        italic: false,
+        underline: false,
+        name_color: name_color.clone(),
+        text_color: text_color.clone(),
+        old_name_color: old_n,
+        old_text_color: old_t,
+        enabled: true,
+    };
+    *user.font.write() = font;
+
+    if user.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // Relay (paridad sb0t): binario a custom clients del vroom, `FONT:` a web.
+    let sender_name = user.name.read().clone();
+    let vroom = *user.vroom.read();
+    let ws_msg = format!(
+        "FONT:{},{},{}:{}{}{}",
+        sender_name.encode_utf16().count(),
+        old_n.to_string().len(),
+        old_t.to_string().len(),
+        sender_name,
+        old_n,
+        old_t
+    );
+    for other in ctx.user_pool.users() {
+        if !other.logged_in
+            || *other.vroom.read() != vroom
+            || other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        if let Some(tx) = &other.ws_text_sender {
+            let _ = tx.send(ws_msg.clone());
+        } else if other.cbot && other.id != user.id {
+            let _ = other.send(build_custom_font_wrapped(
+                &sender_name,
+                size.min(18),
+                &face,
+                old_n,
+                old_t,
+                &name_color,
+                &text_color,
+                other.ares_crypto,
+            ));
+        }
+    }
+}
+
+/// Construye el `MSG_CHAT_SERVER_CUSTOM_FONT` (204) envuelto en
+/// ADVANCED_FEATURES (250), cifrando los strings para el destinatario
+/// (paridad `TCPOutbound.CustomFont`).
+#[allow(clippy::too_many_arguments)]
+fn build_custom_font_wrapped(
+    name: &str,
+    size: u8,
+    face: &str,
+    old_n: u8,
+    old_t: u8,
+    name_color: &str,
+    text_color: &str,
+    crypto: Option<proto_ares::AresCrypto>,
+) -> Bytes {
+    let mut inner = PacketWriter::with_msg_crypto(TcpMsg::CustomFont, crypto);
+    inner.write_string_nt(name).ok();
+    inner.write_u8(size).ok();
+    inner.write_string_nt(face).ok();
+    inner.write_u8(old_n).ok();
+    inner.write_u8(old_t).ok();
+    inner.write_string_nt(name_color).ok();
+    inner.write_string_nt(text_color).ok();
+    let inner_bytes = inner.into_bytes();
+    let inner_size = (inner_bytes.len() - 1) as u16;
+    let mut outer = PacketWriter::with_msg(TcpMsg::AdvancedFeatures);
+    outer.write_u16_le(inner_size).ok();
+    outer.write_bytes(&inner_bytes).ok();
+    Bytes::copy_from_slice(outer.as_bytes())
 }
 
 /// Construye un paquete de voice chat envuelto en ADVANCED_FEATURES:

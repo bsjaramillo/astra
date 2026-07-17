@@ -121,8 +121,12 @@ async fn handle_packet(
             handle_want_check_firewall(socket, manager, peer, now).await;
         }
         UdpMsg::ServerListReadyToCheckFirewall => {
-            if let Some((cookie, their_ip)) = protocol::parse_ready_check_firewall(payload) {
-                debug!("READYTOCHECKFIREWALL cookie={:x} their_ip={}", cookie, their_ip);
+            if let Some((cookie, reported_ip)) = protocol::parse_ready_check_firewall(payload) {
+                debug!("READYTOCHECKFIREWALL cookie={:x} reported_ip={}", cookie, reported_ip);
+                // La IP del paquete es NUESTRA IP externa vista por el peer
+                // (paridad sb0t `UdpProcessor.ReadyToCheckFirewall`:
+                // `Settings.ExternalIP = packet`). Se acepta el primer reporte.
+                manager.report_external_ip(reported_ip);
                 let reply = protocol::build_proceed_check_firewall(manager.my_port, cookie);
                 let _ = socket.send_to(&reply, peer).await;
                 // Actualizar nodo (si lo conocemos)

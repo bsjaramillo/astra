@@ -40,6 +40,19 @@ pub struct IFont {
     pub italic: bool,
     /// ¿Es underline?
     pub underline: bool,
+    /// Color del NICK como string HTML "#rrggbb" (sb0t `IFont.NameColor`).
+    /// Viene del paquete CustomFont (204): string opcional, con fallback a la
+    /// tabla de colores clásica de Ares por índice. Vacío = sin fuente custom.
+    pub name_color: String,
+    /// Color del TEXTO como string HTML "#rrggbb" (sb0t `IFont.TextColor`).
+    pub text_color: String,
+    /// Índice de color Ares clásico del nick (sb0t `oldN`), para clientes
+    /// que no soportan colores HTML y para el ident `FONT:` del protocolo web.
+    pub old_name_color: u8,
+    /// Índice de color Ares clásico del texto (sb0t `oldT`).
+    pub old_text_color: u8,
+    /// ¿El usuario mandó una fuente custom? (sb0t `AresFont.Enabled`).
+    pub enabled: bool,
 }
 
 /// Estado de link de un usuario (equivalente a `ILink` en sb0t).

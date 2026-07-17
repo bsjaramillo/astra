@@ -291,8 +291,89 @@ Tests: `sb0t_surface_audit_regressions` (api.rs) cubre todo lo anterior;
 (manager.rs) cubren los disparadores. E2E verde con script de superficie por
 WebSocket.
 
-Divergencias honestas que quedan (documentadas, no silenciosas):
-- `Room.externalIp`/`Room.hashlink`/`Link.name/externalIp/port/hashlink`: ""
-  (Astra no autodetecta su IP externa ni corre link multi-servidor completo).
-- `Channels.enabled`: true fijo (no hay off-switch para el room-search local).
-- `user.font.nameColor`: "" (Astra no trackea el color de nick por separado).
+### Divergencias cerradas (2026-07-16, misma sesión)
+
+Las 4 divergencias que quedaban se implementaron con la MISMA fuente de datos
+que sb0t:
+
+1. **`Room.externalIp` / `Room.hashlink`**: la IP externa se aprende del
+   handshake UDP del room-search — un peer la reporta en
+   `READYTOCHECKFIREWALL` (paridad exacta de `UdpProcessor.ReadyToCheckFirewall`
+   → `Settings.ExternalIP`; solo el primer reporte, log "server address
+   reported as X"). `UdpNodeManager::report_external_ip` → callback →
+   `AppContext.external_ip`. `Room.hashlink` = `arlnk://` + hashlink(ip
+   externa, port, room_name). Vacíos hasta que llegue el reporte (= sb0t
+   antes de su primer handshake).
+2. **`Channels.enabled`**: `settings.roomsearch && flag de sala roomsearch`
+   (sb0t: `Settings.Get<bool>("roomsearch")`). Ya no es true fijo.
+3. **`Link.linked/name/externalIp/port/hashlink`**: estado REAL del hub
+   (`AppContext.link_hub`, seteado por `Link_createLink`/`--link-client`,
+   limpiado por disconnect/kickHub — sb0t: el leaf conoce el hub por el
+   request de conexión, `LinkClient.HubName/ExternalIP/Port`). Semántica
+   sb0t exacta: no linkeado → name/externalIp/hashlink = null, port = -1.
+4. **`user.font.nameColor/textColor`**: se implementó el paquete
+   **CustomFont (204)** completo, que Astra ni siquiera parseaba (la fuente
+   era siempre default): parse sb0t (`size u8, fontname, oldN u8, oldT u8,
+   [nameColor], [textColor]`, fallback a la tabla clásica de 46 colores Ares
+   → HTML, cap size 18), guardado en `AresUser.font` (ahora `RwLock<IFont>`
+   con name_color/text_color/old_*/enabled) y **relay** a custom clients del
+   vroom (binario 204-en-250) y a clientes web (`FONT:name,oldN,oldT`) —
+   paridad `TCPAdvancedProcessor.Font` + `WebOutbound.FontTo`. Gate por flag
+   de sala `fonts` (default on; sb0t `fonts_enabled` del Registry/UI).
+
+Tests: `former_divergences_now_real_data` / `former_divergences_defaults_match_sb0t`
+(api.rs). E2E verificado: paquete UDP crafteado → log "server address reported
+as 200.50.232.221" → script reporta `Room.externalIp` y `Room.hashlink`
+(arlnk real) en vivo.
+
+`#roomsearch <texto>` (2026-07-16, misma sesión): implementado REAL — en sb0t
+NO es un toggle, es una búsqueda en la channel list (`Eval.RoomSearch`):
+top-5 por usuarios, broadcast a toda la sala con Name/Topic/Language|Server|
+Users/Hashlink (templates roomsearch.* con los textos exactos de
+Category.RoomSearch#0-7, tabla de idiomas de `Helpers.LanguageCodeToString`
+portada). Gate Admin por tabla de niveles; "not enabled" si roomsearch está
+off; "database is empty" sin rooms. Fuente de datos: la tabla `rooms` del
+room-search UDP (la misma de `Channels.search`). Test
+`builtin_roomsearch_searches_channel_list_like_sb0t`; E2E verificado con DB
+pre-seedeada (orden por usuarios, idiomas, hashlinks reales).
+
+---
+
+## Cierre de stubs restantes (2026-07-17) — "100% menos ASN"
+
+A pedido explícito, se implementaron TODOS los stubs restantes con la
+semántica exacta de sb0t (única excepción acordada: `user.getASN()`):
+
+- **`user.nudge([sender])`**: CustomData `cb0t_nudge` con payload
+  `base64(e67("0"+sender, seed 1488))` (paridad `AresClient.Nudge`; nuevo
+  `hashlink::e67_seed`). Gate CustomClient como `JSUser.Nudge`.
+- **`user.setUrl(addr, text)`**: paquete URL SOLO a ese usuario (binario
+  `build_url_c` / ident `URL:` web). Sin args = clear (sb0t `URL("","")`).
+- **`user.restoreAvatar()`**: nuevo stash `AresUser::org_avatar` (el avatar
+  que EL CLIENTE mandó en login/AVATAR — `set:avatar` de scripts no lo pisa);
+  restaura y difunde a la sala (`broadcast_avatar_change`, web-aware).
+- **`user.scribble(img)` / `scribble(sender, img)`**: CustomData
+  `cb0t_scribble_once|first|chunk|last` (chunks de 4000) al usuario, gate
+  CustomClient — paridad `JSScribbleImage.SendScribble`/`AresClient.Scribble`.
+- **`Leaf` REAL sobre el link**: el hub asigna idents (`Leaf.Ident` sb0t),
+  anuncia leaves con `HubLeafConnected/Disconnected` (wire sb0t: u32 ident,
+  name, ip, port) y rutea los envíos dirigidos; `Link.leaves()`/`Link.leaf(n)`
+  devuelven objetos Leaf con ident/name/externalIp/port/hashlink y métodos
+  `print(texto|vroom,texto)`, `printAdmins([nivel,]texto)` (nivel>N estricto,
+  clamp 1-3), `sendText/sendEmote(sender, texto)`, `scribble([sender,]img)`,
+  `users()`/`user(n)` (por atribución de link_users). Wire con los opcodes
+  sb0t: PRINT_ALL=60, PRINT_VROOM=61, PRINT_LEVEL=62, PUBLIC_TO_LEAF=90,
+  EMOTE_TO_LEAF=91, SCRIBBLE_LEAF=34 (leaf→hub con ident; hub→leaf sin).
+  Nuevos LinkEvent::ToLeaf/LeafAnnounce + AppContext.link_leaves.
+
+Bugs encontrados/corregidos de paso:
+- `link_hub_enabled = true` del toml se IGNORABA (solo contaba `--link-server`
+  CLI) — el hub por config nunca aceptaba leaves.
+- El texto público/emote que llegaba por link se aplicaba con paquetes
+  binarios crudos → INVISIBLE para los usuarios web del receptor (misma clase
+  del bug de print()); ahora send_public/send_emote per-usuario.
+
+Tests: `user_nudge_scribble_seturl_restoreavatar_real`,
+`leaf_objects_route_directed_sends` (api.rs). E2E real con DOS instancias
+linkeadas (hub + leaf): script en el hub hizo `leaf.print(...)` y
+`leaf.sendText(...)` y el cliente web del leaf recibió `NOSUCH:` y `PUBLIC:`.

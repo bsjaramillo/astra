@@ -288,6 +288,67 @@ pub enum LinkEvent {
         /// Payload crudo del mensaje.
         payload: Vec<u8>,
     },
+    /// Envío dirigido a UN leaf (paridad ILeaf de sb0t: leaf.print/sendText/
+    /// sendEmote/scribble). En el leaf lo emite el scripting (origin=None) y
+    /// el LinkClient lo manda al hub; en el hub lo emite el reader de la
+    /// conexión origen (origin=Some) y lo consume SOLO la conexión cuyo
+    /// ident coincide.
+    ToLeaf {
+        /// Nombre del leaf origen si vino desde Link.
+        origin: Option<String>,
+        /// Ident del leaf destino (asignado por el hub).
+        target_ident: u32,
+        /// Qué mandar.
+        payload: LeafDirected,
+    },
+    /// Un leaf se conectó/desconectó del hub (para que los demás leaves
+    /// mantengan su lista de peers — paridad HubLeafConnected/Disconnected).
+    LeafAnnounce {
+        /// Ident del leaf anunciado.
+        ident: u32,
+        /// Nombre.
+        name: String,
+        /// IP externa.
+        ip: std::net::IpAddr,
+        /// Puerto.
+        port: u16,
+        /// true = conectado, false = desconectado.
+        connected: bool,
+    },
+}
+
+/// Payload de un envío dirigido a un leaf (paridad de los MSG_LINK_LEAF_*
+/// de sb0t: PRINT_ALL/PRINT_VROOM/PRINT_LEVEL/PUBLIC_TO_LEAF/EMOTE_TO_LEAF/
+/// SCRIBBLE_LEAF).
+#[derive(Debug, Clone)]
+pub enum LeafDirected {
+    /// Línea de sistema a todos los usuarios del leaf (op 60).
+    PrintAll { text: String },
+    /// Línea de sistema a un vroom del leaf (op 61).
+    PrintVroom { vroom: u16, text: String },
+    /// Línea de sistema a usuarios con nivel > `level` (op 62).
+    PrintLevel { level: u8, text: String },
+    /// Texto público como `from` en el leaf (op 90).
+    Public { from: String, text: String },
+    /// Emote como `from` en el leaf (op 91).
+    Emote { from: String, text: String },
+    /// Scribble a los custom clients del leaf (op 34).
+    Scribble { from: String, height: u32, data: Vec<u8> },
+}
+
+/// Un leaf conocido vía link: en el hub, sus leaves conectados; en un leaf,
+/// los OTROS leaves del hub (aprendidos por LeafAnnounce). Es lo que expone
+/// `Link.leaves()` al scripting (paridad JSLeaf).
+#[derive(Debug, Clone)]
+pub struct LinkLeafInfo {
+    /// Ident asignado por el hub.
+    pub ident: u32,
+    /// Nombre de la sala del leaf.
+    pub name: String,
+    /// IP externa.
+    pub ip: std::net::IpAddr,
+    /// Puerto.
+    pub port: u16,
 }
 
 /// Tipos de acción admin de red para [`LinkEvent::AdminAction`].
@@ -402,6 +463,19 @@ pub struct AppContext {
     /// Snapshot de nodos UDP conocidos (name, port, user_count).
     /// Actualizado por `UdpNodeManager` cuando se agregan/actualizan nodos.
     pub udp_nodes: parking_lot::RwLock<Vec<(String, u16, u32)>>,
+    /// IP externa del server, reportada por un peer de la red Ares en el
+    /// handshake `READYTOCHECKFIREWALL` del room-search UDP (paridad sb0t
+    /// `Settings.ExternalIP`, `UdpProcessor.ReadyToCheckFirewall`). `None`
+    /// hasta que llegue el primer reporte (o si el room-search está apagado).
+    pub external_ip: parking_lot::RwLock<Option<std::net::IpAddr>>,
+    /// Hub al que este server está conectado como leaf: (name, ip, port).
+    /// Seteado por el consumer de `LinkRequest::CreateLink` / `--link-client`
+    /// (paridad sb0t `Server.Link`: el leaf conoce el hub por el request de
+    /// conexión, no por el protocolo). `None` = no linkeado.
+    pub link_hub: parking_lot::RwLock<Option<(String, std::net::IpAddr, u16)>>,
+    /// Leaves conocidos vía link (ver [`LinkLeafInfo`]). En el hub los
+    /// registra cada conexión; en un leaf los llena LeafAnnounce.
+    pub link_leaves: parking_lot::RwLock<Vec<LinkLeafInfo>>,
     /// Snapshot de links activos: (name, port, is_connected, users_count).
     /// Actualizado por `LinkClient`/`LinkServer` cuando cambian.
     pub link_servers: parking_lot::RwLock<Vec<(String, u16, bool)>>,
@@ -530,6 +604,9 @@ impl AppContext {
             admins_disabled: std::sync::atomic::AtomicBool::new(false),
             config_path: RwLock::new(None),
             udp_nodes: parking_lot::RwLock::new(Vec::new()),
+            external_ip: parking_lot::RwLock::new(None),
+            link_hub: parking_lot::RwLock::new(None),
+            link_leaves: parking_lot::RwLock::new(Vec::new()),
             link_servers: parking_lot::RwLock::new(Vec::new()),
             link_users: parking_lot::RwLock::new(Vec::new()),
             link_requests: broadcast::channel(256).0,

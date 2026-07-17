@@ -113,7 +113,7 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/anon [on|off] - monitor anonymous users",
     "/general [on|off] - general chat toggle",
     "/sharefiles [on|off] - monitor file sharing",
-    "/roomsearch [on|off] - list room in UDP search",
+    "/roomsearch <text> - search the Ares channel list (top 5)",
     "/stealth [on|off] - hide admin identity in actions",
     "/disableavatar [on|off] - disable avatars",
     "/cloak [on|off] - cloak yourself in admin actions",
@@ -680,10 +680,10 @@ pub fn dispatch_builtin(
             handle_room_flag(ctx, user, &cmd, args);
             (true, vec![])
         }
-        // En sb0t `roomsearch <texto>` BUSCA en la lista de canales Ares
-        // (Eval.cs:1300, imprime top-5 con hashlinks) — no es un toggle.
+        // `roomsearch <texto>` BUSCA en la channel list de Ares (paridad
+        // Eval.cs:1300): top-5 por usuarios, broadcast a toda la sala.
         "roomsearch" => {
-            handle_unavailable(ctx, user, "roomsearch");
+            handle_roomsearch(ctx, user, args);
             (true, vec![])
         }
         "disableavatar" => {
@@ -4557,6 +4557,88 @@ fn handle_trace(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 
 /// Comandos reconocidos pero cuya funcionalidad requiere infraestructura
 /// externa que Astra no incluye (ver comentario en el dispatcher).
+/// Código de idioma Ares → nombre (paridad `Helpers.LanguageCodeToString`
+/// de sb0t, tabla exacta; default "English").
+fn language_code_to_string(code: u8) -> &'static str {
+    match code {
+        11 => "Arabic",
+        12 => "Chinese",
+        14 => "Czech",
+        15 => "Danish",
+        16 => "Dutch",
+        10 => "English",
+        27 => "Finnish",
+        28 => "French",
+        29 => "German",
+        30 => "Italian",
+        17 => "Japanese",
+        19 => "Kirghiz",
+        20 => "Polish",
+        21 => "Portuguese",
+        31 => "Russian",
+        22 => "Slovak",
+        23 => "Spanish",
+        25 => "Swedish",
+        26 => "Turkish",
+        _ => "English",
+    }
+}
+
+/// `/roomsearch <texto>` — busca en la channel list de Ares (la tabla `rooms`
+/// del room-search UDP) y BROADCASTEA a toda la sala los 5 resultados con más
+/// usuarios, con topic, idioma, server y hashlink (paridad exacta
+/// `Eval.RoomSearch` de sb0t; el nivel Admin lo gatea la tabla de niveles).
+fn handle_roomsearch(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    let _ = user;
+    let enabled = ctx.settings.roomsearch && ctx.room_flags.get("roomsearch");
+    if !enabled {
+        ctx.broadcast_print(&ctx.templates.get("roomsearch.disabled"));
+        return;
+    }
+    let rooms = ctx.db.list_rooms().unwrap_or_default();
+    if rooms.is_empty() {
+        ctx.broadcast_print(&ctx.templates.get("roomsearch.empty"));
+        return;
+    }
+    let needle = args.trim().to_uppercase();
+    let mut items: Vec<_> = rooms
+        .into_iter()
+        .filter(|r| r.name.to_uppercase().contains(&needle))
+        .collect();
+    items.sort_by(|a, b| b.users.cmp(&a.users));
+    items.truncate(5);
+
+    if items.is_empty() {
+        ctx.broadcast_print(&ctx.templates.render("roomsearch.notfound", &[("+n", args.trim())]));
+        return;
+    }
+    ctx.broadcast_print(&ctx.templates.render("roomsearch.header", &[("+n", args.trim())]));
+    for item in items {
+        ctx.broadcast_print("");
+        ctx.broadcast_print(&ctx.templates.render("roomsearch.name", &[("+n", &item.name)]));
+        ctx.broadcast_print(&ctx.templates.render("roomsearch.topic", &[("+t", &item.topic)]));
+        ctx.broadcast_print(&ctx.templates.render(
+            "roomsearch.info",
+            &[
+                ("+l", language_code_to_string(item.language)),
+                ("+s", item.version.as_str()),
+                ("+u", &item.users.to_string()),
+            ],
+        ));
+        if let Ok(ip) = item.ip.parse::<std::net::Ipv4Addr>() {
+            let encoded = server_core::hashlink::encode(&server_core::hashlink::HashlinkRoom {
+                ip,
+                port: item.port,
+                name: item.name.clone(),
+            });
+            if !encoded.is_empty() {
+                let link = format!("arlnk://{}", encoded);
+                ctx.broadcast_print(&ctx.templates.render("roomsearch.hashlink", &[("+h", &link)]));
+            }
+        }
+    }
+}
+
 fn handle_unavailable(ctx: &AppContext, user: &Arc<AresUser>, cmd: &str) {
     if !can_edit_topic(user) {
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
@@ -4564,7 +4646,6 @@ fn handle_unavailable(ctx: &AppContext, user: &Arc<AresUser>, cmd: &str) {
     }
     let why = match cmd {
         "define" | "urban" => "requires an external dictionary service",
-        "roomsearch" => "searches the Ares channel list, which is not available in this build",
         "ipsend" | "logsend" | "bansend" => "requires a connected link hub",
         "trace" | "vspy" => "requires packet-tracing support",
         "loadtemplate" => {
@@ -5723,6 +5804,50 @@ mod tests {
         // Substrings vetados (paridad sb0t): no se aplican.
         let _ = dispatch_builtin(&ctx, &carol, "customname", "visit www.spam.com");
         assert_eq!(carol.custom_name.read().clone(), Some("Cazadora".to_string()));
+    }
+
+    #[test]
+    fn builtin_roomsearch_searches_channel_list_like_sb0t() {
+        // Paridad Eval.RoomSearch: busca en la channel list (tabla rooms del
+        // room-search UDP), top-5 por usuarios, BROADCAST a toda la sala.
+        let ctx = make_test_ctx();
+        let (admin, mut a_rx) = make_test_user(1, "Admin");
+        *admin.level.write() = ILevel::Admin;
+        ctx.user_pool.add(admin.clone());
+
+        // DB vacía → "Channel database is empty".
+        let _ = dispatch_builtin(&ctx, &admin, "roomsearch", "chat");
+        assert_eq!(next_pvt_text(&mut a_rx), "Channel database is empty, try again later");
+
+        // Con rooms: matchea por substring case-insensitive, ordena por users.
+        ctx.db.upsert_room("1.2.3.4", 5100, "Mega Chat", "topic A", "Ares 2.1", 50, 23, 0).unwrap();
+        ctx.db.upsert_room("5.6.7.8", 5200, "chatty room", "topic B", "Ares 2.2", 90, 10, 0).unwrap();
+        ctx.db.upsert_room("9.9.9.9", 5300, "Other", "topic C", "Ares 2.3", 10, 10, 0).unwrap();
+        let _ = dispatch_builtin(&ctx, &admin, "roomsearch", "chat");
+        assert_eq!(next_pvt_text(&mut a_rx), "Results for chat as follows:");
+        let _blank = next_pvt_text(&mut a_rx);
+        // Primero el de MÁS usuarios (90): "chatty room".
+        assert_eq!(next_pvt_text(&mut a_rx), "Name: chatty room");
+        assert_eq!(next_pvt_text(&mut a_rx), "Topic: topic B");
+        assert_eq!(
+            next_pvt_text(&mut a_rx),
+            "Language: English | Server: Ares 2.2 | Users: 90"
+        );
+        let hl = next_pvt_text(&mut a_rx);
+        assert!(hl.starts_with("Hashlink: \\\\arlnk://"), "hashlink: {hl}");
+        let _blank = next_pvt_text(&mut a_rx);
+        assert_eq!(next_pvt_text(&mut a_rx), "Name: Mega Chat");
+
+        // Sin matches → "Unable to find...".
+        // (drenar lo que queda del resultado anterior primero)
+        while a_rx.try_recv().is_ok() {}
+        let _ = dispatch_builtin(&ctx, &admin, "roomsearch", "zzzz");
+        assert_eq!(next_pvt_text(&mut a_rx), "Unable to find any channels containing zzzz");
+
+        // Room search deshabilitado (flag off) → "not enabled".
+        ctx.room_flags.set("roomsearch", false);
+        let _ = dispatch_builtin(&ctx, &admin, "roomsearch", "chat");
+        assert_eq!(next_pvt_text(&mut a_rx), "Room search service is not enabled");
     }
 
     #[test]

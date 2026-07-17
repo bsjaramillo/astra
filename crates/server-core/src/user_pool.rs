@@ -130,13 +130,17 @@ pub struct AresUser {
     /// Se setea en el login antes de envolver en `Arc`; inmutable después.
     pub ares_crypto: Option<proto_ares::AresCrypto>,
     /// Fuente.
-    pub font: IFont,
+    pub font: parking_lot::RwLock<IFont>,
     /// Custom name.
     pub custom_name: parking_lot::RwLock<Option<String>>,
     /// Personal message (protegido para acceso concurrente).
     pub personal_message: parking_lot::Mutex<String>,
     /// Avatar. (protegido por Mutex para asignación thread-safe vía Arc)
     pub avatar: parking_lot::Mutex<Option<Vec<u8>>>,
+    /// Avatar ORIGINAL del cliente (el que él mismo mandó en login/AVATAR).
+    /// NO lo tocan los scripts (`set:avatar`): es lo que restaura
+    /// `user.restoreAvatar()` (paridad sb0t `OrgAvatar`/`RestoreAvatar`).
+    pub org_avatar: parking_lot::Mutex<Option<Vec<u8>>>,
     /// Full avatar.
     pub full_avatar: parking_lot::Mutex<Option<Vec<u8>>>,
     /// ¿Ya mandó su propio avatar (o se le asignó el default)? Paridad
@@ -228,10 +232,11 @@ impl AresUser {
             connected: true,
             encrypted: false,
             ares_crypto: None,
-            font: IFont::default(),
+            font: parking_lot::RwLock::new(IFont::default()),
             custom_name: parking_lot::RwLock::new(None),
             personal_message: parking_lot::Mutex::new(String::new()),
             avatar: parking_lot::Mutex::new(None),
+            org_avatar: parking_lot::Mutex::new(None),
             full_avatar: parking_lot::Mutex::new(None),
             avatar_received: AtomicBool::new(false),
             link: ILink::default(),

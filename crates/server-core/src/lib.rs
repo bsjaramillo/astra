@@ -118,8 +118,8 @@ pub mod flood_control;
 
 /// Re-exports comunes.
 pub use app::{
-    admin_action, AppContext, KillScriptFn, LinkEvent, LinkRequest, LinkUserSnapshot,
-    ListScriptsFn, LoadScriptFn, ScriptingHooks,
+    admin_action, AppContext, KillScriptFn, LeafDirected, LinkEvent, LinkLeafInfo, LinkRequest,
+    LinkUserSnapshot, ListScriptsFn, LoadScriptFn, ScriptingHooks,
 };
 pub use command_levels::CommandLevelManager;
 pub use proxy_trust::TrustedProxyManager;

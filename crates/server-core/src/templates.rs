@@ -65,6 +65,16 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     ("idle.return.d", "+n returned at +t - away time [+d days +h hours +m minutes +s seconds]"),
     // Info (paridad Category.Info#1 de sb0t: listado de usuarios de /info)
     ("info.user", "+n [vroom: +v] [id: +i]"),
+    // Room search (paridad Category.RoomSearch#0-7 de sb0t, textos exactos;
+    // el comando `#roomsearch <texto>` los BROADCASTEA a toda la sala).
+    ("roomsearch.disabled", "Room search service is not enabled"),
+    ("roomsearch.empty", "Channel database is empty, try again later"),
+    ("roomsearch.notfound", "Unable to find any channels containing +n"),
+    ("roomsearch.header", "Results for +n as follows:"),
+    ("roomsearch.name", "Name: +n"),
+    ("roomsearch.topic", "Topic: +t"),
+    ("roomsearch.info", "Language: +l | Server: +s | Users: +u"),
+    ("roomsearch.hashlink", "Hashlink: \\\\+h"),
     // Last seen al entrar (paridad Notification#6 de sb0t)
     ("lastseen.join", "+n was last seen as +o at +t from +ip"),
     // Anuncios públicos de acciones admin (Category.AdminAction de sb0t;

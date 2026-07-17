@@ -61,6 +61,10 @@ pub const FLAG_DEFAULTS: &[(&str, bool)] = &[
     // toggle `#customnames on|off` Host, expuesto a scripts como `Room.customNames`).
     // sb0t default: false (Settings.Get<bool> sin valor guardado).
     ("customnames", false),
+    // `fonts`: procesa/retransmite fuentes custom de clientes (sb0t
+    // `Settings.Get<bool>("fonts_enabled")`, checkbox de la UI — on en la
+    // práctica, por eso default true).
+    ("fonts", true),
 ];
 
 /// Manager de flags de sala: cache en memoria + persistencia SQLite.

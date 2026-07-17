@@ -266,6 +266,15 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("__channels_search"), 1, NativeFunction::from_fn_ptr(channels_search_fn))
         .expect("__channels_search should be registered");
     context
+        .register_global_builtin_callable(js_string!("__link_hub"), 0, NativeFunction::from_fn_ptr(link_hub_fn))
+        .expect("__link_hub should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__link_leaves"), 0, NativeFunction::from_fn_ptr(link_leaves_fn))
+        .expect("__link_leaves should be registered");
+    context
+        .register_global_builtin_callable(js_string!("__leaf_send"), 4, NativeFunction::from_fn_ptr(leaf_send_fn))
+        .expect("__leaf_send should be registered");
+    context
         .register_global_builtin_callable(js_string!("__stats_get"), 1, NativeFunction::from_fn_ptr(stats_get_fn))
         .expect("__stats_get should be registered");
     context
@@ -626,11 +635,13 @@ function __mkUser(name){
       try { f = JSON.parse(__user_get(u.__name, "fontJson")); } catch (e) { return null; }
       if (f == null) return null;
       // Props sb0t (IFont): enabled bool, family/nameColor/textColor strings.
-      f.enabled = !!(f.name && f.name.length);
+      // Vienen del paquete CustomFont (204) parseado por el server; fallback
+      // al color numérico crudo si no hay string (clientes viejos/web).
       f.family = f.name || "";
-      var c = (typeof f.color === "number") ? (f.color & 0xFFFFFF) : null;
-      f.textColor = c == null ? "" : '#' + ("00000" + c.toString(16)).slice(-6);
-      f.nameColor = "";
+      if (!f.textColor && typeof f.color === "number" && f.color !== 0) {
+        var c = f.color & 0xFFFFFF;
+        f.textColor = '#' + ("00000" + c.toString(16)).slice(-6);
+      }
       return f;
     },
     set: function(v){ /* no-op: fuente fijada por el cliente */ }
@@ -638,11 +649,24 @@ function __mkUser(name){
   // Métodos sb0t restantes
   u.redirect = function(link){ return __user_do(u.__name, "redirect", link == null ? "" : "" + link); };
   u.setTopic = function(t){ return __user_do(u.__name, "setTopic", t == null ? "" : "" + t); };
-  u.nudge = function(){ return __user_do(u.__name, "nudge", ""); };
-  u.setUrl = function(){ return false; };      // stub: URL por-usuario no soportada
-  u.scribble = function(){ return false; };    // stub: scribble dirigido no soportado
-  u.restoreAvatar = function(){ return false; };
-  u.getASN = function(){ return null; };       // stub: sin base ASN
+  // nudge([sender]) — buzz cb0t real (CustomData cb0t_nudge); default = bot.
+  u.nudge = function(sender){ return __user_do(u.__name, "nudge", sender == null ? "" : "" + sender); };
+  // setUrl(addr, text) — URL solo para ese usuario; sin args = clear (sb0t).
+  u.setUrl = function(a, t){
+    var addr = a == null ? "" : "" + a, text = t == null ? "" : "" + t;
+    return __user_do(u.__name, "setUrl", JSON.stringify({ a: addr, t: text }));
+  };
+  // scribble(img) o scribble(sender, img) — scribble dirigido (sb0t
+  // JSUser.Scribble). img = instancia Scribble (o Avatar via toScribble()).
+  u.scribble = function(a, b){
+    var sender = "", img = a;
+    if (b != null) { sender = a == null ? "" : "" + a; img = b; }
+    if (img == null || typeof img.__id !== "number" || img.__id < 0) return false;
+    return __user_do(u.__name, "scribble", JSON.stringify({ id: img.__id, s: sender }));
+  };
+  // restoreAvatar() — vuelve al avatar original del cliente (sb0t OrgAvatar).
+  u.restoreAvatar = function(){ return __user_do(u.__name, "restoreAvatar", ""); };
+  u.getASN = function(){ return null; };       // stub: sin base ASN (excepción acordada)
   u.ignores = function(){ try { return JSON.parse(__user_get(u.__name, "ignoresJson") || "[]"); } catch (e) { return []; } };
   // En contexto string el objeto se comporta como su nombre: mantiene
   // compat con handlers "nativos" de Astra que usaban el nombre (string)
@@ -714,7 +738,8 @@ var Channels = { create: Channels_create, "delete": Channels_delete,
                  // channel list de Ares; search(texto) = JSChannel[] con hashlink/
                  // language/etc (en Astra: tabla rooms del room-search UDP).
                  get available(){ try { return JSON.parse(__channels_search("")).length > 0; } catch (e) { return false; } },
-                 get enabled(){ return true; },
+                 // sb0t: Enabled = Settings.Get<bool>("roomsearch").
+                 get enabled(){ return __room_get("roomsearch") === true; },
                  search: function(text){ try { return JSON.parse(__channels_search(text == null ? "" : "" + text)); } catch (e) { return []; } } };
 var Base64 = { encode: Base64_encode, decode: Base64_decode };
 var Zip = { compress: Zip_compress, uncompress: Zip_decompress, decompress: Zip_decompress };
@@ -783,13 +808,25 @@ var Crypto = {
 var Link = { createLink: Link_createLink, connect: Link_createLink, disconnect: Link_disconnect,
              findHub: Link_findHub, findLeaf: Link_findLeaf, findUser: Link_findUser,
              getUserList: Link_getUserList, kickHub: Link_kickHub, list: Link_list,
-             // Funciones sb0t.
-             leaves: function(){ try { return JSON.parse(Link_list()); } catch (e) { return []; } },
-             leaf: function(){ return null; },
-             // sb0t JSLink: linked/name/externalIp/port/hashlink son PROPIEDADES.
-             get linked(){ try { return JSON.parse(Link_list()).length > 0; } catch (e) { return false; } },
-             get name(){ return ""; }, get externalIp(){ return ""; },
-             get port(){ return 0; }, get hashlink(){ return ""; } };
+             // Funciones sb0t: Leaf objects REALES (métodos ruteados por el link).
+             leaves: function(){
+               try { return JSON.parse(__link_leaves()).map(__mkLeaf); } catch (e) { return []; }
+             },
+             leaf: function(name){
+               if (name == null) return null;
+               var ls = Link.leaves();
+               for (var i = 0; i < ls.length; i++){ if (ls[i].name == ("" + name)) return ls[i]; }
+               return null;
+             },
+             // sb0t JSLink: linked/name/externalIp/port/hashlink son PROPIEDADES
+             // sobre el estado REAL del hub (Server.Link). Semántica sb0t: si no
+             // está linkeado, name/externalIp/hashlink = null y port = -1.
+             get linked(){ var h = __linkHub(); return h != null && h.linked === true; },
+             get name(){ var h = __linkHub(); return (h && h.linked) ? h.name : null; },
+             get externalIp(){ var h = __linkHub(); return (h && h.linked) ? h.ip : null; },
+             get port(){ var h = __linkHub(); return (h && h.linked) ? h.port : -1; },
+             get hashlink(){ var h = __linkHub(); return (h && h.linked) ? h.hashlink : null; } };
+function __linkHub(){ try { var j = __link_hub(); return j == null ? null : JSON.parse(j); } catch (e) { return null; } }
 var File = {
   exists: File_exists, load: File_read, read: File_read, save: File_write, write: File_write,
   append: File_append, appendLine: function(n, t){ return File_append(n, (t == null ? "" : t) + "\r\n"); },
@@ -1145,15 +1182,64 @@ function __mkPM(text){
   return s;
 }
 
-// ---- Leaf: hub linkeado (JSLeaf). Astra no linkea → stub con defaults seguros. ----
-function Leaf(){ this.externalIp = ""; this.port = 0; this.name = ""; this.hashlink = ""; }
-Leaf.prototype.print = function(){ return false; };
-Leaf.prototype.printAdmins = function(){ return false; };
-Leaf.prototype.users = function(){ return []; };
-Leaf.prototype.user = function(){ return null; };
-Leaf.prototype.sendText = function(){ return false; };
-Leaf.prototype.sendEmote = function(){ return false; };
-Leaf.prototype.scribble = function(){ return false; };
+// ---- Leaf (JSLeaf): un leaf conectado vía link. `new Leaf()` da un objeto
+// vacío (compat); los REALES salen de Link.leaves() vía __mkLeaf, con los
+// métodos ruteados por el link (opcodes sb0t PRINT_ALL/PRINT_LEVEL/
+// PUBLIC_TO_LEAF/EMOTE_TO_LEAF/SCRIBBLE_LEAF). ----
+function Leaf(){ this.ident = -1; this.externalIp = ""; this.port = 0; this.name = ""; this.hashlink = ""; }
+// print(texto) o print(vroom, texto) — línea de sistema en el leaf (sb0t JSLeaf.Print).
+Leaf.prototype.print = function(a, b){
+  if (this.ident < 0 || a == null) return false;
+  if (b == null) return __leaf_send(this.ident, "print", "" + a, "");
+  return __leaf_send(this.ident, "printVroom", "" + a, "" + b);
+};
+// printAdmins(texto) o printAdmins(nivel, texto) — a usuarios con nivel > N
+// (sb0t clampa el nivel a 1..3; sin nivel usa 1 = Moderator+).
+Leaf.prototype.printAdmins = function(a, b){
+  if (this.ident < 0 || a == null) return false;
+  if (b == null) return __leaf_send(this.ident, "printLevel", "1", "" + a);
+  return __leaf_send(this.ident, "printLevel", "" + a, "" + b);
+};
+// users() — usuarios conocidos de ese leaf (los que el link atribuye a él).
+Leaf.prototype.users = function(){
+  var self = this;
+  var all = Users.linked();
+  var out = [];
+  for (var i = 0; i < all.length; i++){
+    var entry = "" + all[i];
+    var sep = entry.indexOf(":");
+    if (sep > 0 && entry.substring(0, sep) === self.name) out.push(__mkUser(entry.substring(sep + 1)));
+  }
+  return out;
+};
+Leaf.prototype.user = function(name){
+  if (name == null) return null;
+  var us = this.users();
+  for (var i = 0; i < us.length; i++){ if (us[i].__name == ("" + name)) return us[i]; }
+  return null;
+};
+Leaf.prototype.sendText = function(sender, text){
+  if (this.ident < 0 || text == null) return false;
+  return __leaf_send(this.ident, "sendText", sender == null ? "" : "" + sender, "" + text);
+};
+Leaf.prototype.sendEmote = function(sender, text){
+  if (this.ident < 0 || text == null) return false;
+  return __leaf_send(this.ident, "sendEmote", sender == null ? "" : "" + sender, "" + text);
+};
+// scribble(img) o scribble(sender, img) — img = instancia Scribble.
+Leaf.prototype.scribble = function(a, b){
+  if (this.ident < 0) return false;
+  var sender = "", img = a;
+  if (b != null) { sender = a == null ? "" : "" + a; img = b; }
+  if (img == null || typeof img.__id !== "number" || img.__id < 0) return false;
+  return __leaf_send(this.ident, "scribble", sender, "" + img.__id);
+};
+function __mkLeaf(o){
+  var lf = new Leaf();
+  lf.ident = o.ident; lf.name = o.name; lf.externalIp = o.ip;
+  lf.port = o.port; lf.hashlink = o.hashlink;
+  return lf;
+}
 "#;
 
 // ============================================================================
@@ -1458,10 +1544,12 @@ fn user_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "linked" => JsValue::from(false),
         "leaf" => JsValue::null(),
         "fontJson" => {
-            let f = &u.font;
+            let f = u.font.read().clone();
             JsValue::from(js_string!(serde_json::json!({
                 "name": f.face, "size": f.size, "color": f.color,
                 "bold": f.bold, "italic": f.italic, "underline": f.underline,
+                "enabled": f.enabled, "nameColor": f.name_color,
+                "textColor": f.text_color,
             }).to_string()))
         }
         "ignoresJson" => {
@@ -1719,13 +1807,172 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
             true
         }
         "nudge" => {
-            // Sin opcode de nudge dedicado: se aproxima con un texto del
-            // server a ese usuario (los clientes web no soportan buzz).
-            u.print(&bot, "*** nudge ***")
+            // Paridad sb0t `AresClient.Nudge`: CustomData `cb0t_nudge` con
+            // payload base64(e67("0"+sender, seed 1488)). Solo custom clients
+            // (sb0t gatea en JSUser.Nudge con CustomClient).
+            if !u.custom_client {
+                false
+            } else {
+                let sender = if arg.trim().is_empty() { bot.clone() } else { arg.trim().to_string() };
+                let raw = format!("0{}", sender);
+                let enc = server_core::hashlink::e67_seed(raw.as_bytes(), 1488);
+                let b64 = base64_encode_bytes_to_string(&enc);
+                u.send(server_core::outbound::build_custom_data_c(
+                    "cb0t_nudge",
+                    &sender,
+                    b64.as_bytes(),
+                    u.ares_crypto,
+                ))
+            }
+        }
+        "setUrl" => {
+            // Paridad sb0t `IUser.URL(addr, text)`: manda el paquete de URL
+            // SOLO a ese usuario. arg = JSON {"a": addr, "t": text} (ambos
+            // vacíos = clear, como sb0t con SetUrl() sin args).
+            let (addr, text) = serde_json::from_str::<serde_json::Value>(&arg)
+                .ok()
+                .map(|v| {
+                    (
+                        v["a"].as_str().unwrap_or_default().to_string(),
+                        v["t"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .unwrap_or_default();
+            if let Some(tx) = &u.ws_text_sender {
+                let msg = format!(
+                    "URL:{},{}:{}{}",
+                    addr.encode_utf16().count(),
+                    text.encode_utf16().count(),
+                    addr,
+                    text
+                );
+                tx.send(msg).is_ok()
+            } else {
+                u.send(server_core::outbound::build_url_c(&addr, &text, u.ares_crypto))
+            }
+        }
+        "restoreAvatar" => {
+            // Paridad sb0t `IUser.RestoreAvatar`: vuelve al avatar ORIGINAL
+            // del cliente (el que él mandó; los scripts no lo pisan) y lo
+            // difunde a la sala.
+            let org = u.org_avatar.lock().clone();
+            *u.avatar.lock() = org.clone();
+            broadcast_avatar_change(&app, &u, org.as_deref());
+            true
+        }
+        "scribble" => {
+            // Paridad sb0t `JSUser.Scribble`/`AresClient.Scribble`: manda un
+            // scribble dirigido a ESE usuario como CustomData
+            // `cb0t_scribble_once|first|chunk|last` (chunks de 4000 bytes).
+            // Solo custom clients. arg = JSON {"id": scribble_store_id, "s": sender}.
+            if !u.custom_client {
+                false
+            } else {
+                let parsed = serde_json::from_str::<serde_json::Value>(&arg).ok();
+                let id = parsed
+                    .as_ref()
+                    .and_then(|v| v["id"].as_i64())
+                    .unwrap_or(-1);
+                let sender = parsed
+                    .as_ref()
+                    .and_then(|v| v["s"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| bot.clone());
+                let bytes = if id < 0 {
+                    None
+                } else {
+                    SCRIBBLE_STORE.with(|store| store.borrow().get(id as usize).cloned())
+                };
+                match bytes {
+                    Some(img) if !img.is_empty() => {
+                        send_scribble_to_user(&u, &sender, &img);
+                        true
+                    }
+                    _ => false,
+                }
+            }
         }
         _ => false,
     };
     Ok(JsValue::from(ok))
+}
+
+/// Difunde el cambio de avatar de `target` a la sala (Ares binario + ident
+/// `AVATAR:` web), paridad del setter `AresClient.Avatar` de sb0t.
+fn broadcast_avatar_change(
+    app: &AppContext,
+    target: &server_core::user_pool::AresUser,
+    avatar: Option<&[u8]>,
+) {
+    if target.cloaked.load(std::sync::atomic::Ordering::Relaxed)
+        || target.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    let name = target.name.read().clone();
+    let vroom = *target.vroom.read();
+    let ws_msg = match avatar {
+        Some(bytes) => {
+            let b64 = base64_encode_bytes_to_string(bytes);
+            format!(
+                "AVATAR:{},{}:{}{}",
+                name.encode_utf16().count(),
+                b64.encode_utf16().count(),
+                name,
+                b64
+            )
+        }
+        None => format!("AVATAR:{}:{}", name.encode_utf16().count(), name),
+    };
+    for other in app.user_pool.users() {
+        if !other.logged_in
+            || *other.vroom.read() != vroom
+            || other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        if let Some(tx) = &other.ws_text_sender {
+            let _ = tx.send(ws_msg.clone());
+        } else {
+            let pkt = match avatar {
+                Some(bytes) => server_core::outbound::build_avatar_c(&name, bytes, other.ares_crypto),
+                None => server_core::outbound::build_avatar_cleared_c(&name, other.ares_crypto),
+            };
+            let _ = other.send(pkt);
+        }
+    }
+}
+
+/// Manda un scribble dirigido como CustomData (paridad `AresClient.Scribble`):
+/// ≤4000 bytes → `cb0t_scribble_once`; si no, first/chunk/last de a 4000.
+fn send_scribble_to_user(u: &server_core::user_pool::AresUser, sender: &str, img: &[u8]) {
+    if img.len() <= 4000 {
+        let _ = u.send(server_core::outbound::build_custom_data_c(
+            "cb0t_scribble_once",
+            sender,
+            img,
+            u.ares_crypto,
+        ));
+        return;
+    }
+    let chunks: Vec<&[u8]> = img.chunks(4000).collect();
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let ident = if i == 0 {
+            "cb0t_scribble_first"
+        } else if i == last {
+            "cb0t_scribble_last"
+        } else {
+            "cb0t_scribble_chunk"
+        };
+        let _ = u.send(server_core::outbound::build_custom_data_c(
+            ident,
+            sender,
+            chunk,
+            u.ares_crypto,
+        ));
+    }
 }
 
 /// `__room_get(prop)` — propiedades de la sala (objeto `Room`).
@@ -1740,17 +1987,81 @@ fn room_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "topic" => JsValue::from(js_string!(app.current_room_topic())),
         "port" => JsValue::from(app.settings.port as f64),
         "version" => JsValue::from(js_string!(env!("CARGO_PKG_VERSION"))),
-        "externalIp" => JsValue::from(js_string!("")),
+        // IP externa real, reportada por la red Ares en el handshake UDP del
+        // room-search (paridad sb0t Settings.ExternalIP). "" hasta que llegue.
+        "externalIp" => JsValue::from(js_string!(app
+            .external_ip
+            .read()
+            .map(|ip| ip.to_string())
+            .unwrap_or_default())),
         "startTime" => JsValue::from(app.uptime_secs() as f64),
         // sb0t `Room.customNames` (Settings "customnames"): ¿se permiten
         // custom names en la sala? Getter; el setter va por __room_set.
         "customNames" => JsValue::from(app.room_flags.get("customnames")),
-        // sb0t `Room.hashlink`: requiere la IP externa del server, que Astra
-        // no autodetecta — string vacío honesto (mismo criterio que externalIp).
-        "hashlink" => JsValue::from(js_string!("")),
+        // sb0t `Room.hashlink` = "arlnk://" + hashlink(ExternalIP, name, port).
+        // "" hasta conocer la IP externa (o si no es IPv4).
+        "hashlink" => {
+            let link = match *app.external_ip.read() {
+                Some(std::net::IpAddr::V4(ip)) => {
+                    let encoded = server_core::hashlink::encode(&server_core::hashlink::HashlinkRoom {
+                        ip,
+                        port: app.settings.port,
+                        name: app.settings.room_name.clone(),
+                    });
+                    prefix_arlnk(&encoded)
+                }
+                _ => String::new(),
+            };
+            JsValue::from(js_string!(link))
+        }
+        // Para `Channels.enabled` (sb0t: Settings.Get<bool>("roomsearch")).
+        "roomsearch" => {
+            JsValue::from(app.settings.roomsearch && app.room_flags.get("roomsearch"))
+        }
         _ => JsValue::null(),
     };
     Ok(v)
+}
+
+/// Antepone `arlnk://` si el encode no lo trae ya.
+fn prefix_arlnk(encoded: &str) -> String {
+    if encoded.is_empty() {
+        String::new()
+    } else if encoded.starts_with("arlnk://") {
+        encoded.to_string()
+    } else {
+        format!("arlnk://{}", encoded)
+    }
+}
+
+/// `__link_hub()` — estado del link como leaf (paridad sb0t `Server.Link`):
+/// JSON `{name, ip, port, hashlink, linked}` o `null` si no hay hub.
+fn link_hub_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::null());
+    };
+    let hub = app.link_hub.read().clone();
+    let Some((name, ip, port)) = hub else {
+        return Ok(JsValue::null());
+    };
+    // linked = hay entry conectada en el snapshot (sb0t IsLinked=Busy).
+    let linked = app
+        .link_servers
+        .read()
+        .iter()
+        .any(|(n, _, connected)| *connected && (n == &name || name.is_empty()));
+    let hashlink = match ip {
+        std::net::IpAddr::V4(v4) => prefix_arlnk(&server_core::hashlink::encode(
+            &server_core::hashlink::HashlinkRoom { ip: v4, port, name: name.clone() },
+        )),
+        _ => String::new(),
+    };
+    let json = serde_json::json!({
+        "name": name, "ip": ip.to_string(), "port": port,
+        "hashlink": hashlink, "linked": linked,
+    })
+    .to_string();
+    Ok(JsValue::from(js_string!(json)))
 }
 
 /// `__room_set(prop, value)` — setters de `Room` para scripts. Hoy solo
@@ -3242,6 +3553,99 @@ fn sql_connected_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Re
     Ok(JsValue::from(connected))
 }
 
+/// `__link_leaves()` — JSON de los leaves conocidos vía link (paridad
+/// `Link.leaves()` de sb0t): [{ident, name, ip, port, hashlink}].
+fn link_leaves_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(js_string!("[]")));
+    };
+    let leaves = app.link_leaves.read().clone();
+    let out: Vec<serde_json::Value> = leaves
+        .iter()
+        .map(|l| {
+            let hashlink = match l.ip {
+                std::net::IpAddr::V4(v4) => prefix_arlnk(&server_core::hashlink::encode(
+                    &server_core::hashlink::HashlinkRoom {
+                        ip: v4,
+                        port: l.port,
+                        name: l.name.clone(),
+                    },
+                )),
+                _ => String::new(),
+            };
+            serde_json::json!({
+                "ident": l.ident, "name": l.name, "ip": l.ip.to_string(),
+                "port": l.port, "hashlink": hashlink,
+            })
+        })
+        .collect();
+    Ok(JsValue::from(js_string!(
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+    )))
+}
+
+/// `__leaf_send(ident, kind, a, b)` — envío dirigido a un leaf (paridad
+/// ILeaf de sb0t). kinds: "print"(texto) / "printVroom"(vroom, texto) /
+/// "printLevel"(nivel, texto) / "sendText"(sender, texto) /
+/// "sendEmote"(sender, texto) / "scribble"(sender, scribble_store_id).
+fn leaf_send_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    use server_core::LeafDirected;
+    let ident = args.get(0).and_then(|v| v.as_number()).unwrap_or(-1.0);
+    let kind = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+    let a = args.get(2).and_then(jsvalue_to_string).unwrap_or_default();
+    let b = args.get(3).and_then(jsvalue_to_string).unwrap_or_default();
+    if ident < 0.0 {
+        return Ok(JsValue::from(false));
+    }
+    let Some(app) = lookup_app(ctx) else {
+        return Ok(JsValue::from(false));
+    };
+    let bot = app.settings.bot_name.clone();
+    let directed = match kind.as_str() {
+        "print" => LeafDirected::PrintAll { text: a },
+        "printVroom" => match a.parse::<u16>() {
+            Ok(v) => LeafDirected::PrintVroom { vroom: v, text: b },
+            Err(_) => return Ok(JsValue::from(false)),
+        },
+        "printLevel" => match a.parse::<u8>() {
+            // sb0t JSLeaf.printAdmins: clamp 1..=3 (Moderator..Host).
+            Ok(l) => LeafDirected::PrintLevel { level: l.clamp(1, 3), text: b },
+            Err(_) => return Ok(JsValue::from(false)),
+        },
+        "sendText" => LeafDirected::Public {
+            from: if a.is_empty() { bot } else { a },
+            text: b,
+        },
+        "sendEmote" => LeafDirected::Emote {
+            from: if a.is_empty() { bot } else { a },
+            text: b,
+        },
+        "scribble" => {
+            let id = b.parse::<i64>().unwrap_or(-1);
+            let data = if id < 0 {
+                None
+            } else {
+                SCRIBBLE_STORE.with(|store| store.borrow().get(id as usize).cloned())
+            };
+            match data {
+                Some(img) if !img.is_empty() => LeafDirected::Scribble {
+                    from: if a.is_empty() { bot } else { a },
+                    height: 0,
+                    data: img,
+                },
+                _ => return Ok(JsValue::from(false)),
+            }
+        }
+        _ => return Ok(JsValue::from(false)),
+    };
+    app.publish_link_event(server_core::LinkEvent::ToLeaf {
+        origin: None,
+        target_ident: ident as u32,
+        payload: directed,
+    });
+    Ok(JsValue::from(true))
+}
+
 fn sql_query_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let h = sql_handle(args);
     let sql_raw = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
@@ -3964,6 +4368,195 @@ mod tests {
         assert!(result.is_ok(), "eval should succeed: {:?}", result);
     }
 
+    /// user.nudge/scribble/setUrl/restoreAvatar REALES (paridad JSUser de
+    /// sb0t) — nudge y scribble como CustomData a un custom client.
+    #[test]
+    fn user_nudge_scribble_seturl_restoreavatar_real() {
+        use server_core::user_pool::AresUser;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let app = make_app();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
+        let mut u = AresUser::new(1, IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), [3u8; 16]);
+        u.logged_in = true;
+        u.custom_client = true; // nudge/scribble gatean en CustomClient (sb0t)
+        u.sender = Some(tx);
+        *u.name.write() = "Cby".to_string();
+        *u.org_avatar.lock() = Some(vec![7u8; 32]);
+        *u.avatar.lock() = Some(vec![1u8; 5]); // un script lo pisó
+        app.user_pool.add(Arc::new(u));
+        let user_arc = app.user_pool.get_by_name("Cby").unwrap();
+
+        let mut ctx = make_context(app);
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            var u = user("Cby");
+            if (u.nudge() !== true) throw "nudge failed";
+            if (u.setUrl("http://a.example", "sitio") !== true) throw "setUrl failed";
+            if (u.restoreAvatar() !== true) throw "restoreAvatar failed";
+            var sc = new Scribble("aGVsbG8=");   // "hello" en base64
+            if (u.scribble(sc) !== true) throw "scribble failed";
+        "#,
+        );
+        assert!(result.is_ok(), "user methods: {:?}", result);
+
+        // El avatar volvió al original (org_avatar intacto).
+        assert_eq!(user_arc.avatar.lock().clone(), Some(vec![7u8; 32]));
+
+        // Paquetes en el wire: nudge (CustomData 204... op 200) con ident
+        // cb0t_nudge, URL, y scribble_once.
+        let mut idents = Vec::new();
+        while let Ok(pkt) = rx.try_recv() {
+            if pkt[0] == proto_ares::TcpMsg::CustomData as u8 {
+                // payload: ident\0 sender\0 data
+                let payload = &pkt[1..];
+                if let Some(z) = payload.iter().position(|&b| b == 0) {
+                    idents.push(String::from_utf8_lossy(&payload[..z]).to_string());
+                }
+            }
+        }
+        assert!(idents.contains(&"cb0t_nudge".to_string()), "falta cb0t_nudge: {:?}", idents);
+        assert!(
+            idents.contains(&"cb0t_scribble_once".to_string()),
+            "falta cb0t_scribble_once: {:?}",
+            idents
+        );
+        unregister_context(&ctx);
+    }
+
+    /// Leaf real: Link.leaves() mapea el registro del link y sus métodos
+    /// publican LinkEvent::ToLeaf con el ident correcto.
+    #[test]
+    fn leaf_objects_route_directed_sends() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let app = make_app();
+        app.link_leaves.write().push(server_core::LinkLeafInfo {
+            ident: 42,
+            name: "OtraSala".to_string(),
+            ip: IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1)),
+            port: 5555,
+        });
+        let mut events = app.subscribe_link_events();
+
+        let mut ctx = make_context(app);
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            var ls = Link.leaves();
+            if (ls.length !== 1) throw "leaves len: " + ls.length;
+            var lf = ls[0];
+            if (lf.name !== "OtraSala") throw "leaf name: " + lf.name;
+            if (lf.ident !== 42) throw "leaf ident: " + lf.ident;
+            if (lf.externalIp !== "10.1.1.1") throw "leaf ip: " + lf.externalIp;
+            if (lf.port !== 5555) throw "leaf port";
+            if (lf.hashlink.indexOf("arlnk://") !== 0) throw "leaf hashlink";
+            if (Link.leaf("OtraSala") == null) throw "Link.leaf by name";
+            if (Link.leaf("NoExiste") !== null) throw "Link.leaf missing";
+            if (lf.print("hola sala") !== true) throw "leaf.print";
+            if (lf.printAdmins("solo mods") !== true) throw "leaf.printAdmins";
+            if (lf.sendText("Bot", "texto") !== true) throw "leaf.sendText";
+            if (lf.sendEmote("Bot", "salta") !== true) throw "leaf.sendEmote";
+        "#,
+        );
+        assert!(result.is_ok(), "leaf methods: {:?}", result);
+
+        use server_core::{LeafDirected, LinkEvent};
+        let mut got = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let LinkEvent::ToLeaf { origin, target_ident, payload } = ev {
+                assert_eq!(origin, None);
+                assert_eq!(target_ident, 42);
+                got.push(payload);
+            }
+        }
+        assert_eq!(got.len(), 4, "esperaba 4 envíos dirigidos");
+        assert!(matches!(&got[0], LeafDirected::PrintAll { text } if text == "hola sala"));
+        assert!(
+            matches!(&got[1], LeafDirected::PrintLevel { level: 1, text } if text == "solo mods")
+        );
+        assert!(matches!(&got[2], LeafDirected::Public { from, text } if from == "Bot" && text == "texto"));
+        assert!(matches!(&got[3], LeafDirected::Emote { from, text } if from == "Bot" && text == "salta"));
+        unregister_context(&ctx);
+    }
+
+    /// Las 4 divergencias cerradas (2026-07-16): externalIp/hashlink reales,
+    /// Channels.enabled real, Link.* real, font.nameColor/textColor reales.
+    #[test]
+    fn former_divergences_now_real_data() {
+        use server_core::user_pool::AresUser;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let app = make_app();
+        // 1. IP externa reportada por la red Ares (UDP handshake).
+        *app.external_ip.write() = Some(IpAddr::V4(Ipv4Addr::new(200, 50, 1, 2)));
+        // 3. Hub linkeado.
+        *app.link_hub.write() =
+            Some(("HubRoom".to_string(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)), 2222));
+        app.link_servers.write().push(("HubRoom".to_string(), 2222, true));
+        // 4. Usuario con fuente custom (paquete 204 ya parseado).
+        let mut u = AresUser::new(1, IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), [7u8; 16]);
+        u.logged_in = true;
+        *u.name.write() = "Fonty".to_string();
+        {
+            let mut f = u.font.write();
+            f.face = "Comic Sans MS".to_string();
+            f.size = 12;
+            f.enabled = true;
+            f.name_color = "#ff0000".to_string();
+            f.text_color = "#0000ff".to_string();
+        }
+        app.user_pool.add(Arc::new(u));
+
+        let mut ctx = make_context(app);
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            if (Room.externalIp !== "200.50.1.2") throw "externalIp: " + Room.externalIp;
+            if (Room.hashlink.indexOf("arlnk://") !== 0) throw "hashlink: " + Room.hashlink;
+
+            // Channels.enabled = setting roomsearch (default true en Settings).
+            if (Channels.enabled !== true) throw "Channels.enabled";
+
+            if (Link.linked !== true) throw "Link.linked";
+            if (Link.name !== "HubRoom") throw "Link.name: " + Link.name;
+            if (Link.externalIp !== "10.0.0.9") throw "Link.externalIp: " + Link.externalIp;
+            if (Link.port !== 2222) throw "Link.port: " + Link.port;
+            if (Link.hashlink.indexOf("arlnk://") !== 0) throw "Link.hashlink";
+
+            var f = user("Fonty").font;
+            if (f == null) throw "font null";
+            if (f.enabled !== true) throw "font.enabled";
+            if (f.family !== "Comic Sans MS") throw "font.family: " + f.family;
+            if (f.nameColor !== '#ff0000') throw "font.nameColor: " + f.nameColor;
+            if (f.textColor !== '#0000ff') throw "font.textColor: " + f.textColor;
+        "#,
+        );
+        assert!(result.is_ok(), "divergences audit failed: {:?}", result);
+        unregister_context(&ctx);
+    }
+
+    /// Sin datos: semántica sb0t de "no linkeado" (null/-1) y sin IP externa.
+    #[test]
+    fn former_divergences_defaults_match_sb0t() {
+        let mut ctx = make_context(make_app());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            if (Room.externalIp !== "") throw "externalIp should be empty";
+            if (Room.hashlink !== "") throw "hashlink should be empty";
+            if (Link.linked !== false) throw "linked";
+            if (Link.name !== null) throw "name should be null";
+            if (Link.externalIp !== null) throw "externalIp should be null";
+            if (Link.port !== -1) throw "port should be -1";
+            if (Link.hashlink !== null) throw "hashlink should be null";
+        "#,
+        );
+        assert!(result.is_ok(), "defaults audit failed: {:?}", result);
+        unregister_context(&ctx);
+    }
+
     /// Auditoría 2026-07-16: superficie sb0t que faltaba (barrido exhaustivo
     /// de [JSProperty]/[JSFunction] contra el prelude). Cubre las 17 ausencias
     /// y la semántica propiedad-vs-función de los estáticos.
@@ -4604,9 +5197,12 @@ mod tests {
             if (u.level !== 50) throw "level setter bad: " + u.level;
             u.vroom = 3;
             if (u.vroom !== 3) throw "vroom setter bad: " + u.vroom;
-            // Métodos stub no revientan
+            // getASN sigue stub (excepción acordada); setUrl ahora es REAL:
+            // manda el paquete URL a ese usuario y retorna true.
             if (u.getASN() !== null) throw "getASN bad";
-            if (u.setUrl("x") !== false) throw "setUrl bad";
+            if (u.setUrl("http://x.example", "txt") !== true) throw "setUrl bad";
+            // restoreAvatar real: sin avatar original limpia y retorna true.
+            if (u.restoreAvatar() !== true) throw "restoreAvatar bad";
             var ig = u.ignores();
             if (!Array.isArray(ig)) throw "ignores bad";
         "#,

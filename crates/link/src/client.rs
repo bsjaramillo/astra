@@ -101,6 +101,7 @@ impl LinkClient {
         // del hub se vuelven a recibir completos en el handshake).
         self.peer_users.lock().clear();
         *self.peer_name.lock() = None;
+        self.app.link_leaves.write().clear();
 
         let stream = TcpStream::connect(addr)
             .await
@@ -419,7 +420,13 @@ fn handle_incoming_link_message(
         }
         LinkMsg::PublicText => {
             if let Some((from, text)) = parse_link_chat_payload(payload, crypto) {
-                broadcast_to_local_users(app, server_core::outbound::build_public(&from, &text));
+                // Web-aware: send_public elige el formato por cliente (los
+                // users web tienen sender binario = None y lo descartarían).
+                for u in app.user_pool.users() {
+                    if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = u.send_public(&from, &text);
+                    }
+                }
                 true
             } else {
                 false
@@ -427,10 +434,122 @@ fn handle_incoming_link_message(
         }
         LinkMsg::EmoteText => {
             if let Some((from, text)) = parse_link_chat_payload(payload, crypto) {
-                broadcast_to_local_users(app, server_core::outbound::build_emote(&from, &text));
+                for u in app.user_pool.users() {
+                    if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = u.send_emote(&from, &text);
+                    }
+                }
                 true
             } else {
                 false
+            }
+        }
+        // ---- Leaf peers (paridad LinkLeaf.LeafProcessor de sb0t) ----
+        LinkMsg::HubLeafConnected => {
+            let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
+            match (r.read_u32(), r.read_string(), r.read_ip(), r.read_u16()) {
+                (Ok(ident), Ok(name), Ok(ip), Ok(port)) => {
+                    let mut leaves = app.link_leaves.write();
+                    leaves.retain(|l| l.ident != ident);
+                    leaves.push(server_core::LinkLeafInfo { ident, name, ip, port });
+                    true
+                }
+                _ => false,
+            }
+        }
+        LinkMsg::HubLeafDisconnected => {
+            let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
+            match r.read_u32() {
+                Ok(ident) => {
+                    app.link_leaves.write().retain(|l| l.ident != ident);
+                    true
+                }
+                _ => false,
+            }
+        }
+        // ---- Dirigidos a ESTE leaf (paridad HubPrint*/HubPublicToLeaf/...) ----
+        LinkMsg::PrintAll => {
+            let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
+            match r.read_string_no_null() {
+                Ok(text) => {
+                    app.broadcast_print(&text);
+                    true
+                }
+                _ => false,
+            }
+        }
+        LinkMsg::PrintVroom => {
+            let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
+            match (r.read_u16(), r.read_string_no_null()) {
+                (Ok(vroom), Ok(text)) => {
+                    let bot = app.settings.bot_name.clone();
+                    for u in app.user_pool.users() {
+                        if u.logged_in
+                            && *u.vroom.read() == vroom
+                            && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            let _ = u.print(&bot, &text);
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            }
+        }
+        LinkMsg::PrintLevel => {
+            let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
+            match (r.read_u8(), r.read_string_no_null()) {
+                (Ok(level), Ok(text)) => {
+                    // sb0t HubPrintLevel: usuarios con Level > level (estricto).
+                    let bot = app.settings.bot_name.clone();
+                    for u in app.user_pool.users() {
+                        if u.logged_in
+                            && (*u.level.read() as u8) > level
+                            && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            let _ = u.print(&bot, &text);
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            }
+        }
+        LinkMsg::PublicToLeaf | LinkMsg::EmoteToLeaf => {
+            // Wire: `str from` (null-terminated) + `str text` (SIN null, es
+            // el último campo — mismo formato que arma el hub).
+            let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
+            match (r.read_string(), r.read_string_no_null()) {
+                (Ok(from), Ok(text)) => {
+                    let emote = op == LinkMsg::EmoteToLeaf;
+                    for u in app.user_pool.users() {
+                        if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+                            let _ = if emote { u.send_emote(&from, &text) } else { u.send_public(&from, &text) };
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            }
+        }
+        LinkMsg::ScribbleLeaf => {
+            let mut r = crate::protocol::LinkPacketReader::from_payload_with_crypto(payload, crypto);
+            match (r.read_string(), r.read_u32()) {
+                (Ok(sender), Ok(_height)) => {
+                    let img = r.read_bytes(r.remaining()).unwrap_or_default();
+                    // A los custom clients (paridad HubScribbleLeaf), como
+                    // CustomData cb0t_scribble_* chunked.
+                    for u in app.user_pool.users() {
+                        if u.logged_in
+                            && u.custom_client
+                            && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            send_scribble_custom_data(&u, &sender, &img);
+                        }
+                    }
+                    true
+                }
+                _ => false,
             }
         }
         LinkMsg::PrivateText => {
@@ -609,6 +728,14 @@ async fn send_link_event(stream: &mut TcpStream, event: &LinkEvent, crypto: Opti
             }
             (LinkMsg::Admin, crate::server::build_admin_payload(*kind, target, crypto))
         }
+        LinkEvent::ToLeaf { origin, target_ident, payload } => {
+            if origin.is_some() {
+                return Ok(());
+            }
+            // Leaf→Hub: el wire lleva el ident destino adelante.
+            build_leaf_directed_wire(*target_ident, payload, crypto)
+        }
+        LinkEvent::LeafAnnounce { .. } => return Ok(()),
         LinkEvent::Raw { origin, msg, payload } => {
             if origin.is_some() {
                 return Ok(());
@@ -786,6 +913,76 @@ fn write_ip(writer: &mut proto_ares::PacketWriter, ip: std::net::IpAddr) {
         std::net::IpAddr::V6(_) => {
             writer.write_ipv4(std::net::Ipv4Addr::new(0, 0, 0, 0)).ok();
         }
+    }
+}
+
+/// Construye el wire leaf→hub de un envío dirigido: `u32 target_ident` +
+/// payload del opcode (paridad LeafOutbound.LeafPrint*/LeafPublicTextToLeaf/
+/// LeafScribbleLeaf de sb0t).
+fn build_leaf_directed_wire(
+    target_ident: u32,
+    directed: &server_core::LeafDirected,
+    crypto: Option<LinkCrypto>,
+) -> (LinkMsg, Vec<u8>) {
+    use server_core::LeafDirected;
+    let mut b = LinkPacketBuilder::new_with_crypto(crypto);
+    b.write_u32(target_ident);
+    let msg = match directed {
+        LeafDirected::PrintAll { text } => {
+            b.write_string_no_null(text);
+            LinkMsg::PrintAll
+        }
+        LeafDirected::PrintVroom { vroom, text } => {
+            b.write_u16(*vroom);
+            b.write_string_no_null(text);
+            LinkMsg::PrintVroom
+        }
+        LeafDirected::PrintLevel { level, text } => {
+            b.write_u8(*level);
+            b.write_string_no_null(text);
+            LinkMsg::PrintLevel
+        }
+        LeafDirected::Public { from, text } => {
+            b.write_string(from);
+            b.write_string_no_null(text);
+            LinkMsg::PublicToLeaf
+        }
+        LeafDirected::Emote { from, text } => {
+            b.write_string(from);
+            b.write_string_no_null(text);
+            LinkMsg::EmoteToLeaf
+        }
+        LeafDirected::Scribble { from, height, data } => {
+            b.write_string(from);
+            b.write_u32(*height);
+            b.write_bytes(data);
+            LinkMsg::ScribbleLeaf
+        }
+    };
+    (msg, b.build_link_packet(msg)[LINK_PACKET_HEADER_LEN..].to_vec())
+}
+
+/// Manda un scribble entrante del link a un custom client local como
+/// CustomData `cb0t_scribble_*` (chunks de 4000, paridad AresClient.Scribble).
+fn send_scribble_custom_data(u: &server_core::user_pool::AresUser, sender: &str, img: &[u8]) {
+    if img.is_empty() {
+        return;
+    }
+    if img.len() <= 4000 {
+        let _ = u.send(server_core::outbound::build_custom_data_c(
+            "cb0t_scribble_once", sender, img, u.ares_crypto,
+        ));
+        return;
+    }
+    let chunks: Vec<&[u8]> = img.chunks(4000).collect();
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let ident = if i == 0 { "cb0t_scribble_first" }
+            else if i == last { "cb0t_scribble_last" }
+            else { "cb0t_scribble_chunk" };
+        let _ = u.send(server_core::outbound::build_custom_data_c(
+            ident, sender, chunk, u.ares_crypto,
+        ));
     }
 }
 

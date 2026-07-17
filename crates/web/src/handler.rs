@@ -459,7 +459,8 @@ async fn ws_handshake_login(
         use base64::Engine as _;
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&login.avatar_b64) {
             *user.full_avatar.lock() = Some(bytes.clone());
-            *user.avatar.lock() = Some(bytes);
+            *user.avatar.lock() = Some(bytes.clone());
+            *user.org_avatar.lock() = Some(bytes);
         }
     }
 
@@ -951,7 +952,8 @@ fn handle_ws_avatar(
         png: bytes.clone(),
     });
     *user.full_avatar.lock() = Some(bytes.clone());
-    *user.avatar.lock() = Some(bytes);
+    *user.avatar.lock() = Some(bytes.clone());
+    *user.org_avatar.lock() = Some(bytes);
     user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // Re-anunciar al resto de los inbizier de la vroom con el avatar nuevo.
