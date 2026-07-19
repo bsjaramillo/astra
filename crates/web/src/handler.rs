@@ -55,7 +55,18 @@ pub async fn handle_connection(
     // Termina cuando `ws_text_tx` se cierra (drop del user).
     let write_task = tokio::spawn(async move {
         while let Some(text) = ws_text_rx.recv().await {
-            if let Err(e) = write_text_frame(&mut write_half, &text).await {
+            // Sentinel interno: responder un Ping del cliente con Pong
+            // (RFC 6455 §5.5.2-3). El payload viaja hex-encodeado en el
+            // canal de texto (los frames de control llevan bytes crudos).
+            let write_result = if let Some(hex) = text.strip_prefix(PONG_SENTINEL) {
+                let payload: Vec<u8> = (0..hex.len() / 2)
+                    .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+                    .collect();
+                crate::ws::write_pong_frame(&mut write_half, &payload).await
+            } else {
+                write_text_frame(&mut write_half, &text).await
+            };
+            if let Err(e) = write_result {
                 debug!("ws write error: {}", e);
                 break;
             }
@@ -202,7 +213,15 @@ pub async fn handle_connection(
                     Err(e) => warn!("ws error dispatch de id={}: {}", user_id, e),
                 }
             }
-            WsOpcode::Ping => {}
+            WsOpcode::Ping => {
+                // RFC 6455: responder Pong con el mismo payload. Sin esto,
+                // los clientes WS de librería estándar (ping_interval) dan
+                // timeout y cierran la conexión a los ~40s.
+                let hex: String = payload.iter().map(|b| format!("{:02x}", b)).collect();
+                if let Some(tx) = &user.ws_text_sender {
+                    let _ = tx.send(format!("{}{}", PONG_SENTINEL, hex));
+                }
+            }
             WsOpcode::Close => {
                 debug!("ws close de id={}", user_id);
                 break;
@@ -213,6 +232,11 @@ pub async fn handle_connection(
 
     // Cleanup
     let part_name = user.name.read().clone();
+    // GHOST check (paridad sb0t Disconnect(true)): sesión ya hijackeada u
+    // otra sesión viva con el mismo nick (reconexión por cambio de red) →
+    // salida SILENCIOSA, sin PART (mataría la entrada del usuario NUEVO en
+    // las userlists, que los clientes indexan por nombre).
+    let ghost = ctx.is_ghost_departure(user_id, &part_name);
     ctx.record_departure(&user);
     ctx.user_pool.remove(user_id);
     ctx.stats.on_user_part();
@@ -220,12 +244,19 @@ pub async fn handle_connection(
 
     // Eventos de scripting de la salida (paridad con el path TCP nativo).
     scripting.dispatch(ScriptEvent::Part { name: part_name.clone() });
-    scripting.dispatch(ScriptEvent::Logout { name: part_name });
+    scripting.dispatch(ScriptEvent::Logout { name: part_name.clone() });
     scripting.dispatch(ScriptEvent::Disconnect { ip: user.external_ip.to_string() });
 
-    // Broadcast del PART
-    let part_pkt = outbound::build_part(&user);
-    broadcast_to_room(&ctx, &user, part_pkt);
+    if !ghost {
+        // Broadcast del PART
+        let part_pkt = outbound::build_part(&user);
+        broadcast_to_room(&ctx, &user, part_pkt);
+    } else {
+        info!(
+            "ghost departure: id={} '{}' (sesión nueva con ese nick o ya hijackeado) — sin PART",
+            user_id, part_name
+        );
+    }
 
     // Cerrar: drop del user (libera el clone de `ws_text_sender`) → drop de
     // `ws_text_tx` (el original) → el canal se cierra → `write_task` sale
@@ -237,6 +268,11 @@ pub async fn handle_connection(
     info!("ws desconectado: id={}", user_id);
     Ok(())
 }
+
+/// Prefijo interno del canal de texto WS para pedir un frame Pong (el resto
+/// del mensaje es el payload del Ping en hex). Nunca colisiona con el
+/// protocolo ib0t (ningún ident empieza con \u{1}).
+const PONG_SENTINEL: &str = "\u{1}PONG\u{1}";
 
 /// Tamaño máximo de un mensaje fragmentado reensamblado (1 MiB).
 const MAX_FRAGMENTED_MSG: usize = 1 << 20;
@@ -436,7 +472,8 @@ async fn ws_handshake_login(
                 "hijack (misma IP): peer={} nick='{}' reemplaza sesión vieja id={}",
                 peer, login.name, existing.id
             );
-            astra_commands::force_part_user(ctx, &existing);
+            // GHOST (paridad sb0t Disconnect(true)): sin PART ni anuncio.
+            ctx.ghost_part_user(&existing);
         } else {
             warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.name);
             let _ = ws_text_tx.send("ERROR:Nickname already in use".to_string());

@@ -697,6 +697,21 @@ pub async fn write_close_frame<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+/// Escribe un frame Pong (opcode 0xA) con el payload del Ping recibido
+/// (RFC 6455 §5.5.3: el Pong DEBE llevar el mismo application data que el
+/// Ping). Sin máscara (server→cliente). El payload de un frame de control
+/// es ≤125 bytes, así que el header corto alcanza.
+pub async fn write_pong_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    let len = payload.len().min(125);
+    let header = [0x8A, len as u8]; // FIN=1, opcode=pong
+    writer.write_all(&header).await?;
+    writer.write_all(&payload[..len]).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

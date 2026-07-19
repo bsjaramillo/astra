@@ -614,6 +614,24 @@ impl Database {
     /// Busca en el historial por nombre o IP (LIKE) para `/whowas`.
     /// Retorna `(name, version, externalip, last_seen)` de las coincidencias
     /// más recientes, hasta `limit`.
+    /// Último registro del historial para una IP ANTERIOR a `before_ms`
+    /// (excluye el join actual, que ya fue grabado con `last_seen` = ahora).
+    /// Retorna `(name, last_seen_ms)` del avistamiento más reciente previo.
+    /// Es la consulta de `Whowas.Last` de sb0t (order by jointime desc, 1ra).
+    pub fn last_seen_before(&self, ip: &str, before_ms: i64) -> DbResult<Option<(String, i64)>> {
+        let conn = self.conn.lock();
+        let row = conn
+            .query_row(
+                "SELECT name, last_seen FROM user_history \
+                 WHERE externalip = ?1 AND last_seen < ?2 \
+                 ORDER BY last_seen DESC LIMIT 1",
+                params![ip, before_ms],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn search_user_history(
         &self,
         query: &str,

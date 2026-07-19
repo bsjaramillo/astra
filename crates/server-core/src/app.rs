@@ -733,12 +733,22 @@ impl AppContext {
             return;
         }
         let ip = user.external_ip.to_string();
-        let Ok(results) = self.db.search_user_history(&ip, 1) else {
+        let name = user.name.read().clone();
+        // Último avistamiento ANTERIOR a este join (el join actual ya está
+        // grabado en el historial — sin el cutoff, el usuario "se encontraba
+        // a sí mismo": "X was last seen as X at <recién>").
+        let Ok(Some((old_name, last_seen))) =
+            self.db.last_seen_before(&ip, user.join_time as i64)
+        else {
             return;
         };
-        let Some((old_name, _, _, last_seen)) = results.first() else {
+        // Paridad sb0t `Whowas.Last` (Whowas.cs:72): SOLO se anuncia si el
+        // último registro usó OTRO nick. Mismo nick → silencio.
+        if old_name == name {
             return;
-        };
+        }
+        let old_name = &old_name;
+        let last_seen = &last_seen;
         // `last_seen` viene en milisegundos (ver user_history::add_user).
         let when = chrono::DateTime::from_timestamp(*last_seen / 1000, 0)
             .map(|t| {
@@ -747,7 +757,6 @@ impl AppContext {
                     .to_string()
             })
             .unwrap_or_default();
-        let name = user.name.read().clone();
         let text = self.templates.render(
             "lastseen.join",
             &[("+n", &name), ("+o", old_name), ("+t", &when), ("+ip", &ip)],
@@ -895,6 +904,32 @@ impl AppContext {
     /// toda la sala (clientes Ares y web). NO registra la salida en el
     /// historial — eso lo hace el cleanup del socket al cerrarse. Usado por
     /// `/kick`, el hijack de login, y `user.kick()/ban()` desde scripts.
+    /// Saca al usuario del pool SIN difundir PART ni anuncio — paridad
+    /// `AresClient.Disconnect(ghost: true)` de sb0t: es lo que usa el hijack
+    /// de login cuando el mismo usuario reconecta (misma IP, mismo nick). La
+    /// sala nunca ve "has parted" y el nombre no desaparece de la userlist:
+    /// la sesión nueva lo reemplaza sin parpadeo. El cleanup del socket viejo
+    /// tampoco va a anunciar nada (detecta que ya no está en el pool).
+    pub fn ghost_part_user(&self, target: &std::sync::Arc<crate::user_pool::AresUser>) {
+        self.user_pool.remove(target.id);
+        self.stats.on_user_part();
+    }
+
+    /// ¿La muerte de esta sesión debe ser SILENCIOSA (ghost)? Sí cuando la
+    /// sesión ya no está en el pool (un hijack de login la sacó antes) o
+    /// cuando OTRA sesión viva usa el mismo nick (el usuario ya reconectó —
+    /// p.ej. cambió de red — y difundir el PART borraría de las userlists a
+    /// la sesión nueva, que los clientes indexan por nombre).
+    pub fn is_ghost_departure(&self, id: u16, name: &str) -> bool {
+        if self.user_pool.get(id).is_none() {
+            return true;
+        }
+        self.user_pool
+            .users()
+            .iter()
+            .any(|u| u.id != id && u.logged_in && u.name.read().eq_ignore_ascii_case(name))
+    }
+
     pub fn force_part_user(&self, target: &std::sync::Arc<crate::user_pool::AresUser>) {
         let tname = target.name.read().clone();
         let ws_part = format!("PART:{}:{}", tname.encode_utf16().count(), tname);
@@ -964,4 +999,110 @@ impl AppContext {
 /// anuncios de idle).
 fn clock_hhmm() -> String {
     chrono::Local::now().format("%H:%M").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn make_ctx() -> AppContext {
+        let db = crate::db::Database::in_memory().unwrap();
+        AppContext::new(Settings::default(), db)
+    }
+
+    fn add_user(ctx: &AppContext, id: u16, name: &str) -> std::sync::Arc<crate::user_pool::AresUser> {
+        let mut u = crate::user_pool::AresUser::new(
+            id,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, id as u8)),
+            [id as u8; 16],
+        );
+        u.logged_in = true;
+        *u.name.write() = name.to_string();
+        ctx.user_pool.add(std::sync::Arc::new(u));
+        ctx.user_pool.get(id).unwrap()
+    }
+
+    /// Regresión del lastseen que "se encontraba a sí mismo": solo debe
+    /// anunciar si el ÚLTIMO registro previo de la IP usó OTRO nick
+    /// (paridad sb0t Whowas.Last, Whowas.cs:72).
+    #[test]
+    fn last_seen_only_announces_previous_different_nick() {
+        let ctx = make_ctx();
+        let ip = "10.0.0.1";
+
+        // Sin historial previo → None.
+        assert_eq!(ctx.db.last_seen_before(ip, 1_000_000).unwrap(), None);
+
+        // Sesión vieja con OTRO nick (last_seen = 500k), y el join ACTUAL ya
+        // grabado (last_seen = 1M, mismo instante que join_time).
+        ctx.db
+            .execute(
+                "INSERT INTO user_history (name, version, guid, externalip, localip, port, join_time, last_seen) \
+                 VALUES ('ViejoNick', 'v', 'g', ?1, 'l', 0, 400000, 500000)",
+                rusqlite::params![ip],
+            )
+            .unwrap();
+        ctx.db
+            .execute(
+                "INSERT INTO user_history (name, version, guid, externalip, localip, port, join_time, last_seen) \
+                 VALUES ('ElMago', 'v', 'g', ?1, 'l', 0, 1000000, 1000000)",
+                rusqlite::params![ip],
+            )
+            .unwrap();
+
+        // El cutoff excluye el join actual: encuentra al nick viejo.
+        let (name, ls) = ctx.db.last_seen_before(ip, 1_000_000).unwrap().unwrap();
+        assert_eq!(name, "ViejoNick");
+        assert_eq!(ls, 500_000);
+
+        // Si el registro previo más reciente es el MISMO nick, el anuncio
+        // debe callar (lo verifica announce_last_seen comparando nombres):
+        ctx.db
+            .execute(
+                "INSERT INTO user_history (name, version, guid, externalip, localip, port, join_time, last_seen) \
+                 VALUES ('ElMago', 'v', 'g', ?1, 'l', 0, 700000, 800000)",
+                rusqlite::params![ip],
+            )
+            .unwrap();
+        let (name, _) = ctx.db.last_seen_before(ip, 1_000_000).unwrap().unwrap();
+        assert_eq!(name, "ElMago", "el previo más reciente ahora es el mismo nick");
+        // announce_last_seen con name == "ElMago" → silencio (rama old_name == name).
+    }
+
+    /// Regresión del "User has parted" fantasma tras un cambio de red: la
+    /// muerte de una sesión debe ser SILENCIOSA (ghost) si otra sesión viva
+    /// usa el mismo nick, o si un hijack de login ya la sacó del pool.
+    #[test]
+    fn ghost_departure_detection() {
+        let ctx = make_ctx();
+        let old = add_user(&ctx, 1, "Nomada");
+
+        // Salida normal (única sesión con el nick): NO es ghost.
+        assert!(!ctx.is_ghost_departure(1, "Nomada"));
+
+        // El usuario reconectó (cambio de red): sesión nueva, mismo nick.
+        let _new = add_user(&ctx, 2, "Nomada");
+        assert!(
+            ctx.is_ghost_departure(1, "Nomada"),
+            "con una sesión nueva viva del mismo nick, la vieja debe salir en silencio"
+        );
+        // La sesión nueva, en cambio, saldría anunciando (la vieja no cuenta
+        // dos veces: sigue en el pool pero es OTRA id).
+        // (nota: en la práctica la vieja se va primero; esto documenta la simetría)
+        assert!(ctx.is_ghost_departure(2, "Nomada")); // la vieja aún está → silencio
+
+        // Hijack: ghost_part_user saca a la vieja SIN anunciar; su cleanup
+        // posterior la ve fuera del pool → ghost.
+        ctx.ghost_part_user(&old);
+        assert!(ctx.user_pool.get(1).is_none());
+        assert!(ctx.is_ghost_departure(1, "Nomada"));
+
+        // Ahora solo queda la nueva: su salida es normal.
+        assert!(!ctx.is_ghost_departure(2, "Nomada"));
+
+        // Case-insensitive (los nicks de Ares no distinguen mayúsculas).
+        let _third = add_user(&ctx, 3, "NOMADA");
+        assert!(ctx.is_ghost_departure(2, "Nomada"));
+    }
 }

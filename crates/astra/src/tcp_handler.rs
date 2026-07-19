@@ -260,18 +260,33 @@ pub async fn handle_tcp_client(
     // Cleanup
     // ============================================================
     let user_name = user_arc.name.read().clone();
+    // GHOST check (paridad sb0t Disconnect(true)): si esta sesión ya fue
+    // sacada del pool por un hijack de login, o si hay OTRA sesión viva con
+    // el mismo nick (el usuario ya reconectó — p.ej. cambio de red), la
+    // salida es SILENCIOSA: sin PART a la sala (borraría de las userlists a
+    // la sesión NUEVA, que los clientes indexan por nombre) y sin Part al
+    // link. Los eventos de scripting se disparan igual (sb0t también los
+    // dispara en el ghost).
+    let ghost = ctx.is_ghost_departure(user_id, &user_name);
     ctx.record_departure(&user_arc);
     ctx.user_pool.remove(user_id);
     ctx.stats.on_user_part();
     // Forget idle tracking
     ctx.idle.forget(user_id);
 
-    // Broadcast del PART
-    broadcast_to_room(&ctx, &user_arc, |c| outbound::build_part_c(&user_arc, c));
-    ctx.publish_link_event(LinkEvent::Part {
-        origin: None,
-        name: user_name.clone(),
-    });
+    if !ghost {
+        // Broadcast del PART
+        broadcast_to_room(&ctx, &user_arc, |c| outbound::build_part_c(&user_arc, c));
+        ctx.publish_link_event(LinkEvent::Part {
+            origin: None,
+            name: user_name.clone(),
+        });
+    } else {
+        info!(
+            "ghost departure: id={} '{}' (hay una sesión nueva con ese nick o ya fue hijackeado) — sin PART",
+            user_id, user_name
+        );
+    }
     // Disparar evento de scripting
     scripting.dispatch(astra_scripting::ScriptEvent::Part {
         name: user_name.clone(),
@@ -480,7 +495,10 @@ async fn process_handshake(
                                 "hijack (misma IP): peer={} nick='{}' reemplaza sesión vieja id={}",
                                 peer, login.org_name, existing.id
                             );
-                            astra_commands::force_part_user(ctx, &existing);
+                            // GHOST (paridad sb0t Disconnect(true)): sin PART
+                            // ni anuncio — la sesión nueva reemplaza el nombre
+                            // en las userlists sin que la sala vea "has parted".
+                            ctx.ghost_part_user(&existing);
                         } else {
                             warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.org_name);
                             let _ = tx.send(server_error_packet("Nickname already in use"));
