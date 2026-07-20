@@ -140,7 +140,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "astra"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -171,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "astra-captcha"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "image",
  "rand 0.8.7",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "astra-commands"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "anyhow",
  "astra-scripting",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "astra-link"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "aes",
  "anyhow",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "astra-scripting"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "astra-udp"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "anyhow",
  "bytes",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "astra-web"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "anyhow",
  "astra-commands",
@@ -315,7 +315,7 @@ checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.1",
 ]
 
 [[package]]
@@ -571,9 +571,9 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bytemuck"
-version = "1.25.1"
+version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6aedf8ae72766347502cf3cb4f41cf5e9cc37d28bee90f1fdaaae15f9cf9424"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 dependencies = [
  "bytemuck_derive",
 ]
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "proto-ares"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "aes",
  "byteorder",
@@ -2731,7 +2731,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.1",
 ]
 
 [[package]]
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.0.1-beta.33"
+version = "0.0.1-beta.34"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -2943,9 +2943,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2fac314a64dc9a36e61a9eb4261a5e9bbfbc922b27e518af97bc32b926cf967"
+checksum = "5edbec4ed188954a10c12c038215f8ce7606b2d5c973cd8dc43e8795065c5f2f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3021,7 +3021,7 @@ checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.1",
 ]
 
 [[package]]
