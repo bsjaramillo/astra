@@ -35,6 +35,11 @@ use crate::db::Database;
 /// Las claves son estables (se persisten los overrides por clave), así que no
 /// se renombran una vez publicadas.
 pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
+    // Aviso de nueva versión del server (+v = versión nueva, +c = corriendo)
+    (
+        "update.available",
+        "A new version of Astra is available: v+v (running v+c). Update from astra-creator with 'u' or pull the latest image.",
+    ),
     // Control de acceso / errores comunes
     ("error.access_moderator", "Access denied. Moderator+ required."),
     ("error.access_admin", "Access denied. Admin+ required."),

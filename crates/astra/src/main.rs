@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tracing::{debug, error, info, warn};
 
 mod tcp_handler;
+mod update_check;
 
 use tcp_handler::handle_tcp_client;
 
@@ -535,6 +536,12 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // Chequeo de nuevas versiones (cada 6h contra ghcr.io): avisa por PM a
+    // los admins/owners conectados y lo marca para `/admin`.
+    if ctx.settings.update_check {
+        tokio::spawn(update_check::check_loop(ctx.clone()));
+    }
+
     // Rotación de URLs de la sala (cada 60s): difunde el siguiente banner
     // clicable a todos los usuarios conectados (paridad con sb0t Urls.Tick).
     let url_ctx = ctx.clone();

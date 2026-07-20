@@ -3,10 +3,9 @@
 > Servidor de chat compatible con **Ares Galaxy**, escrito en **Rust**.
 
 Astra es un servidor de chat multiplataforma que implementa el protocolo binario
-de Ares Galaxy. Es una reescritura moderna de sb0t (C#/.NET Framework), con
-**paridad funcional completa** — mismo protocolo, misma seguridad, los mismos
-~125 comandos, y un panel de administración web que reemplaza la GUI Windows-only
-del original.
+de Ares Galaxy — heredero moderno de sb0t. Montá tu propia sala en minutos:
+protocolo completo, moderación avanzada, scripting y un panel de administración
+web, en cualquier plataforma.
 
 - **Compatibilidad de protocolo**: cualquier cliente Ares oficial se conecta sin cambios.
 - **Multiplataforma real**: Linux, Windows, macOS, FreeBSD, Raspberry Pi (ARM).
@@ -22,18 +21,41 @@ del original.
 - Login, UserPool, persistencia SQLite (bans, cuentas, historial).
 - 5 capas de defensa anti-DDoS + captcha para IPs nuevas.
 - Chat: público, emote, PM, join/part, topic, vrooms.
-- **~125 comandos** de moderación/administración (paridad con sb0t).
+- **Moderación completa**: ban, kick, muzzle, niveles de usuario y decenas de
+  comandos más, directamente en el chat.
 - Clientes web (WebSocket / ib0t / HTML5) en el mismo puerto.
 - **Panel de administración web** (`/admin`) con auth por owner password.
 - Motor de scripting JS (boa_engine) para plugins de sala.
-- Link Hub/Leaf entre servidores con **cifrado AES-256** (paridad sb0t).
+- Link Hub/Leaf entre servidores con **cifrado AES-256**.
 - GeoIP/ASN opcional (MaxMind GeoLite2 o DB-IP Lite) para `/trace` y `asnban`.
+- **Aviso de actualizaciones**: chequea el registry cada 6h y avisa por PM a
+  los admins/owners cuando hay versión nueva (badge en `/admin`; opt-out con
+  `update_check = false`).
 
 ---
 
 ## Inicio rápido
 
-### Opción A — Docker (lo más simple)
+### Opción A — astra-creator (recomendado)
+
+[astra-creator](https://github.com/bsjaramillo/astra-creator) es una TUI que
+crea y administra una o varias salas Astra sobre Docker: genera la config de
+cada una, las despliega y maneja su ciclo de vida (start/stop/logs/update)
+sin salir de la terminal.
+
+```bash
+# Instalar (necesita docker + docker compose):
+curl -sSL https://raw.githubusercontent.com/bsjaramillo/astra-creator/main/install.sh | sh
+
+# Abrir la TUI y crear tu sala:
+astra-creator /srv/astra-salas
+```
+
+En la TUI: `a` agrega una sala (nombre, puerto, owner password y — si querés
+HTTPS — un dominio), `D` la despliega. Cada sala es un contenedor independiente
+con su configuración y sus datos.
+
+### Opción B — Docker manual
 
 ```bash
 git clone <repo> && cd astra
@@ -43,7 +65,7 @@ docker compose up -d
 
 El server queda escuchando en el puerto **5009** (TCP + UDP).
 
-### Opción B — Binario nativo
+### Opción C — Binario nativo
 
 ```bash
 # Requiere Rust 1.75+
@@ -54,7 +76,10 @@ cp astra.toml.example astra.toml   # editá room_name y owner_password
 
 ---
 
-## Guía para crear tu sala
+## Guía para crear tu sala (manual, sin astra-creator)
+
+> Con astra-creator los pasos 1 y 2 los hace la TUI; esta guía es para el
+> despliegue manual con el binario o Docker a mano.
 
 1. **Configurá** `astra.toml` (copiado de `astra.toml.example`). Lo mínimo:
    ```toml
@@ -96,8 +121,13 @@ puerto**. Un reverse proxy con TLS solo puede cubrir la parte **web** (cliente
 navegador + panel `/admin`); los clientes **Ares** usan TCP binario plano y se
 conectan directo al `:5009` (el protocolo Ares no soporta TLS).
 
-Para dar **HTTPS al panel de admin y al cliente web** hay un setup con [Caddy](https://caddyserver.com)
-(certificados automáticos de Let's Encrypt) listo para usar:
+**Con astra-creator** (recomendado): poné un dominio en el campo
+"Dominio HTTPS" del formulario de la sala (con el DNS apuntando a tu servidor)
+y redesplegá con `D`. Se levanta automáticamente un [Caddy](https://caddyserver.com)
+como reverse proxy con certificados de Let's Encrypt; varias salas pueden tener
+cada una su dominio compartiendo el mismo Caddy.
+
+**Manual**: el repo trae el mismo setup listo para usar sin astra-creator:
 
 ```bash
 # 1. Editá el Caddyfile y poné tu dominio real (chat.midominio.com).
@@ -106,7 +136,7 @@ Para dar **HTTPS al panel de admin y al cliente web** hay un setup con [Caddy](h
 docker compose -f docker-compose.tls.yml up -d
 ```
 
-Con eso:
+En ambos casos:
 - `https://chat.midominio.com/`      → cliente web (TLS).
 - `https://chat.midominio.com/admin` → panel de administración (TLS).
 - `<tu-ip>:5009`                      → clientes Ares (directo, sin TLS).
@@ -176,7 +206,7 @@ astra/
 | Memoria | GC + posibles fugas | Memory-safe por construcción |
 | Motor JS | Jurassic (vendoreado) | boa_engine (puro Rust) |
 | Administración | GUI WPF (Windows) | Panel web multiplataforma (`/admin`) |
-| Link | AES + trusted leaves | AES-256 + trusted leaves (paridad) |
+| Link | AES + trusted leaves | AES-256 + trusted leaves |
 | Build | msbuild + Visual Studio | `cargo` |
 
 ## Licencia

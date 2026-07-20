@@ -575,7 +575,11 @@ async fn send_initial_state_ws(
     // 1) Bienvenida como PUBLIC del server (nombre vacío).
     let _ = tx.send(build_public(
         "",
-        &format!("{} — Astra {}", room_name, env!("CARGO_PKG_VERSION")),
+        &format!(
+            "{} — Astra {} — https://bsjaramillo.github.io/astra",
+            room_name,
+            env!("CARGO_PKG_VERSION")
+        ),
     ));
     // 2) ACK con el nick asignado.
     let _ = tx.send(build_ack(&user.name.read()));

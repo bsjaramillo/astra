@@ -358,6 +358,24 @@ impl AresUser {
         }
         self.send(crate::outbound::build_pvt_c(bot_name, text, self.ares_crypto))
     }
+
+    /// PM real desde el bot (u otro emisor): para clientes web abre la
+    /// ventana privada (`PM:`, mismo formato que `WebOutbound.build_pm`);
+    /// para clientes Ares es el mismo paquete `Pmt` que usa `print`.
+    pub fn send_pm(&self, from: &str, text: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx
+                .send(format!(
+                    "PM:{},{}:{}{}",
+                    ws_len(from),
+                    ws_len(text),
+                    from,
+                    text
+                ))
+                .is_ok();
+        }
+        self.send(crate::outbound::build_pvt_c(from, text, self.ares_crypto))
+    }
 }
 
 /// Largo en unidades UTF-16 (paridad `String.length` de JavaScript): el

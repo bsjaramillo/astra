@@ -31,6 +31,12 @@ allow_registration = true
 # Habilitar room search UDP (descubrimiento de otras salas).
 roomsearch = true
 
+# Chequeo periódico (cada 6h) de nuevas versiones de Astra contra el registry
+# de imágenes (ghcr.io). Cuando hay una versión más nueva, avisa por PM a los
+# admins/owners conectados y lo marca en el panel /admin. Poné false para que
+# el server no haga requests salientes.
+update_check = true
+
 # Idioma por defecto (0 = English).
 language = 0
 

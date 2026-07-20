@@ -67,6 +67,16 @@ pub struct Settings {
     /// seed a mano con `astra seed-refresh` o dejando `seed_rooms.json`).
     #[serde(default = "default_seed_url")]
     pub seed_url: String,
+    /// Chequeo periódico de nuevas versiones de Astra contra el registry de
+    /// imágenes (ghcr.io). Cuando aparece una versión más nueva, se avisa por
+    /// PM a los admins/owners conectados y se marca en el panel `/admin`.
+    /// Poné `false` para que el server no haga requests salientes.
+    #[serde(default = "default_update_check")]
+    pub update_check: bool,
+}
+
+fn default_update_check() -> bool {
+    true
 }
 
 fn default_live_scripts_endpoint() -> String {
@@ -213,6 +223,7 @@ impl Default for Settings {
             link_trusted_leaves: Vec::new(),
             live_scripts_endpoint: default_live_scripts_endpoint(),
             seed_url: default_seed_url(),
+            update_check: true,
         }
     }
 }

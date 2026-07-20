@@ -2236,11 +2236,13 @@ fn apply_level(
     new_level: ILevel,
     notice: &str,
 ) -> bool {
+    let prev_level;
     {
         let mut level = target.level.write();
         if *level == new_level {
             return false;
         }
+        prev_level = *level;
         *level = new_level;
     }
 
@@ -2253,6 +2255,15 @@ fn apply_level(
         new_level as u8 >= ILevel::Moderator as u8,
     ));
     send_system_line(ctx, target, notice);
+
+    // Si hay una versión nueva del server pendiente, avisarle al que recién
+    // se convierte en admin/owner (login, autologin o grant): los que ya
+    // estaban conectados recibieron el aviso cuando se detectó.
+    if new_level >= ILevel::Admin && prev_level < ILevel::Admin {
+        if let Some(v) = ctx.available_update() {
+            ctx.send_update_notice(target, &v);
+        }
+    }
 
     // Difunde el nuevo nivel a todos en la misma vroom: a los clientes web
     // como UPDATE (paridad ib0tClient.Level setter -> WebOutbound.UpdateTo,

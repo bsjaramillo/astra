@@ -179,7 +179,7 @@ pub fn state_json(ctx: &AppContext) -> String {
     let secs = ctx.uptime_secs();
     write!(
         s,
-        "\"server\":{{\"room\":\"{}\",\"bot\":\"{}\",\"uptime\":{},\"users\":{},\"peak\":{},\"total\":{},\"bans\":{},\"topic\":\"{}\",\"status\":\"{}\"}}",
+        "\"server\":{{\"room\":\"{}\",\"bot\":\"{}\",\"uptime\":{},\"users\":{},\"peak\":{},\"total\":{},\"bans\":{},\"topic\":\"{}\",\"status\":\"{}\",\"version\":\"{}\",\"update\":{}}}",
         esc(&ctx.settings.room_name),
         esc(&ctx.settings.bot_name),
         secs,
@@ -189,6 +189,11 @@ pub fn state_json(ctx: &AppContext) -> String {
         ctx.bans.len(),
         esc(&ctx.current_room_topic()),
         esc(&ctx.room_status()),
+        esc(server_core::VERSION),
+        match ctx.available_update() {
+            Some(v) => format!("\"{}\"", esc(&v)),
+            None => "null".to_string(),
+        },
     )
     .ok();
 

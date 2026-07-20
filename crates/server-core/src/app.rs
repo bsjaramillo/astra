@@ -424,6 +424,10 @@ pub struct AppContext {
     pub room_flags: Arc<RoomFlags>,
     /// Gate de cambio de vroom (onVroomJoinCheck), registrado por `main`.
     pub vroom_check: parking_lot::RwLock<Option<Box<dyn Fn(&str, u16) -> bool + Send + Sync>>>,
+    /// Versión más nueva de Astra disponible, detectada por el update check
+    /// periódico (`None` = al día). La consumen los avisos a admins/owners
+    /// y el estado del panel `/admin`.
+    pub available_update: parking_lot::RwLock<Option<String>>,
     /// Transferencias CUSTOM_DATA públicas en curso (imágenes/audio ib0t).
     pub custom_data: Arc<CustomDataStore>,
     /// Transferencias CUSTOM_DATA privadas (PM) en curso.
@@ -589,6 +593,7 @@ impl AppContext {
             asn_bans,
             room_flags,
             vroom_check: parking_lot::RwLock::new(None),
+            available_update: parking_lot::RwLock::new(None),
             custom_data,
             pm_custom_data,
             join_filters,
@@ -981,6 +986,25 @@ impl AppContext {
         match self.vroom_check.read().as_ref() {
             Some(f) => f(name, vroom),
             None => true,
+        }
+    }
+
+    /// Última versión nueva de Astra conocida (si hay una pendiente).
+    pub fn available_update(&self) -> Option<String> {
+        self.available_update.read().clone()
+    }
+
+    /// Avisa a un usuario que hay una versión nueva del server: PM real del
+    /// bot (ventana privada en clientes web) y, para web, también una línea
+    /// en la ventana principal. Para clientes Ares el PM del bot ya es la
+    /// única superficie (print == Pmt), así que no se duplica.
+    pub fn send_update_notice(&self, user: &crate::user_pool::AresUser, new_version: &str) {
+        let text = self
+            .templates
+            .render("update.available", &[("+v", new_version), ("+c", crate::VERSION)]);
+        let _ = user.send_pm(&self.settings.bot_name, &text);
+        if user.ws_text_sender.is_some() {
+            let _ = user.print(&self.settings.bot_name, &text);
         }
     }
 
