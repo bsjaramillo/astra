@@ -1785,7 +1785,11 @@ fn build_my_features(user: &server_core::user_pool::AresUser) -> Bytes {
     }
 
     let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerMyFeatures, user.ares_crypto);
-    w.write_string_nt(&format!("Astra {} - chat server", env!("CARGO_PKG_VERSION"))).ok();
+    w.write_string_nt(&format!(
+        "Astra {} - chat server - https://bsjaramillo.github.io/astra",
+        env!("CARGO_PKG_VERSION")
+    ))
+    .ok();
     w.write_u8(flag).ok();
     w.write_u8(63).ok();
     w.write_u8(0).ok();
