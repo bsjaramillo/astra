@@ -19,7 +19,7 @@ edition = "2021"
 rust-version = "1.75"
 license = "AGPL-3.0-or-later"
 authors = ["Astra Project"]
-repository = "https://github.com/yourusername/astra"
+repository = "https://github.com/bsjaramillo/astra"
 
 [workspace.dependencies]
 # Async runtime
