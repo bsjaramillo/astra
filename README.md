@@ -58,7 +58,7 @@ con su configuración y sus datos.
 ### Opción B — Docker manual
 
 ```bash
-git clone <repo> && cd astra
+git clone https://github.com/bsjaramillo/astra && cd astra
 cp astra.toml.example astra.toml   # editá room_name y owner_password
 docker compose up -d
 ```
