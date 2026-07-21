@@ -94,10 +94,15 @@ cp astra.toml.example astra.toml   # editá room_name y owner_password
    ./target/release/astra --config astra.toml
    ```
 
-3. **Abrí el puerto** 5009 (TCP y UDP) en tu router/firewall para que otros entren:
+3. **Abrí el puerto** 5009 (TCP **y** UDP) en el firewall del sistema:
    ```bash
    sudo ufw allow 5009/tcp && sudo ufw allow 5009/udp
    ```
+   Y **también en el firewall de tu VPS o router**: security groups en AWS,
+   reglas de ingreso en Oracle Cloud/GCP, el panel de Hetzner/Vultr/DigitalOcean,
+   o el port forwarding del router si lo corrés en casa. Es el paso que más se
+   olvida: si el proveedor bloquea el puerto, nadie entra aunque `ufw` lo permita.
+
    Tu IP pública (ej. `curl ifconfig.me`) es la que compartís.
 
 4. **Administrá**, de dos formas equivalentes:
