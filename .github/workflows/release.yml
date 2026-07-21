@@ -3,8 +3,8 @@
 # =============================================================================
 # Se ejecuta cuando se pushea un tag con formato v* (ej: v0.1.0).
 # Construye y publica:
-#   1. Imágenes Docker multi-arch (linux/amd64, linux/arm64) → ghcr.io
-#   2. Binarios estáticos para linux, windows, macos → GitHub Release
+#   1. La imagen Docker (linux/amd64) → ghcr.io
+#   2. El GitHub Release con las instrucciones de instalación
 #
 # Tags de pre-release (vX.Y.Z-alpha*, -beta*, -rc*):
 #   - La imagen Docker NO sobreescribe :latest
@@ -122,9 +122,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare dist directory
-        run: mkdir -p dist
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
@@ -134,13 +131,31 @@ jobs:
           prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
           generate_release_notes: true
           body: |
-            ## Astra Chat Server ${{ needs.prepare.outputs.version }}
+            ## Astra ${{ needs.prepare.outputs.version }}
 
-            ### Instalación (Docker)
+            Servidor de chat compatible con **Ares Galaxy**, escrito en Rust.
+            Documentación y guía completa: **https://bsjaramillo.github.io/astra**
+
+            ### Instalación (recomendada): astra-creator
+
+            [astra-creator](https://github.com/${{ github.repository_owner }}/astra-creator)
+            es una TUI que crea y administra tus salas sobre Docker.
 
             ```bash
-            docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
+            # 1. Instalar (necesita docker + docker compose):
+            curl -sSL https://raw.githubusercontent.com/${{ github.repository_owner }}/astra-creator/main/install.sh | sh
 
+            # 2. Abrir la TUI y crear tu sala:
+            astra-creator /srv/astra-salas
+            ```
+
+            En la TUI: `a` agrega una sala (nombre, puerto, owner password y —si
+            querés HTTPS— un dominio), `D` la despliega. Para actualizar una sala
+            ya desplegada a esta versión: `u` (o `U` para todas).
+
+            ### Alternativa: Docker manual
+
+            ```bash
             docker run -d \
               --name astra \
               -p 5009:5009 \
@@ -149,34 +164,23 @@ jobs:
               ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
             ```
 
-            O usando docker compose:
+            O con docker compose:
 
             ```bash
-            curl -O https://raw.githubusercontent.com/${{ github.repository_owner }}/astra/${{ needs.prepare.outputs.version }}/docker-compose.yml
+            curl -O https://raw.githubusercontent.com/${{ github.repository_owner }}/astra/v${{ needs.prepare.outputs.version }}/docker-compose.yml
             docker compose up -d
             ```
 
-            ### Verificar la imagen Docker
+            ### Administración
 
-            ```bash
-            docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
-            docker images --digests ghcr.io/${{ github.repository_owner }}/astra
+            - **Panel web**: `http://<tu-ip>:<puerto>/admin` con el owner password
+              (o `https://<tu-dominio>/admin` si configuraste HTTPS).
+            - **Comandos en el chat**: `/login <owner_password>` te hace Owner;
+              después `/topic`, `/ban`, `/grant <nick> moderator`, `/help`, etc.
+
+            ### Imagen Docker
+
+            ```
+            ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
             ```
 
-      - name: Generate Docker pull instructions
-        run: |
-          cat > dist/DOCKER.md << 'EOF'
-          # Pull la imagen
-
-          ```bash
-          docker pull ghcr.io/${{ github.repository_owner }}/astra:${{ needs.prepare.outputs.version }}
-          docker pull ghcr.io/${{ github.repository_owner }}/astra@${{ needs.prepare.outputs.version }}-amd64
-          ```
-
-          # Verificar
-
-          ```bash
-          docker images --digests ghcr.io/${{ github.repository_owner }}/astra
-          ```
-          EOF
-          cat dist/DOCKER.md >> dist/README.md || true
