@@ -620,7 +620,7 @@ fn handle_incoming_link_message(
         }
         LinkMsg::Admin => {
             // Acción host* propagada desde otro servidor de la red: aplicarla
-            // al pool local (ban/kick/muzzle/unmuzzle del target si está acá).
+            // al pool local (ban/kick/muzzle/unmuzzle del target si está aquí).
             if let Some((kind, target)) = crate::server::parse_admin_payload(payload, crypto) {
                 app.apply_admin_action(kind, &target);
                 true

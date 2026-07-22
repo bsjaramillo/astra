@@ -94,7 +94,7 @@ pub async fn handle_connection(
         Ok(Ok(Some(u))) => u,
         Ok(Ok(None)) => {
             // Drenar `ws_text_tx` antes de esperar la write task: si no se
-            // dropea acá, `write_task` queda esperando `recv()` para
+            // dropea aquí, `write_task` queda esperando `recv()` para
             // siempre (nadie más cierra el canal), filtrando una task por
             // cada conexión rechazada. Dropearlo ahora permite que
             // cualquier mensaje de error ya encolado (ban/join-flood/nick
@@ -1287,7 +1287,7 @@ fn apply_filter_action_ws(
             filter_remove_user_ws(ctx, user);
         }
         FilterAction::Announce => {
-            // No debería llegar acá: `check()` (censura) nunca devuelve
+            // No debería llegar aquí: `check()` (censura) nunca devuelve
             // Announce — ver `check_announce`, que no bloquea el mensaje.
         }
     }

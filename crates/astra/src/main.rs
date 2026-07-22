@@ -213,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
         // público si el config no lo trae). Vacío = error explícito.
         let url = url.clone().unwrap_or_else(|| settings.seed_url.clone());
         if url.trim().is_empty() {
-            anyhow::bail!("no hay URL de seed: pasá `--url <url>` o configurá `seed_url` en el astra.toml");
+            anyhow::bail!("no hay URL de seed: pasa `--url <url>` o configura `seed_url` en el astra.toml");
         }
         return seed_refresh(&settings, &url).await;
     }
@@ -401,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
         // nodos en la DB, así que no puede propagarse en la red UDP de Ares
         // (no aparecería en el buscador de salas de los clientes). Si el
         // room-search está activo y no hay ni seed ni nodos, se descarga el
-        // seed inicial acá — así "just works" sin correr `seed-refresh` a mano.
+        // seed inicial aquí — así "just works" sin correr `seed-refresh` a mano.
         let has_nodes = db.count_nodes().unwrap_or(0) > 0;
         let seed_url = settings.seed_url.trim();
         if !seed_path.exists() && !has_nodes && !seed_url.is_empty() {
@@ -801,13 +801,13 @@ async fn handle_muxed_connection(
     match route {
         ConnectionKind::Web if web_enabled => {
             // NOTA: el rate-limit de conexiones por IP para el path web NO se
-            // aplica acá, sino DENTRO de `astra_web` (en el handshake WS), y
+            // aplica aquí, sino DENTRO de `astra_web` (en el handshake WS), y
             // SOLO a los handshakes WebSocket de clientes de sala. Las
             // peticiones HTTP del panel (GET /, /admin, /favicon y el polling
             // `fetch` cada 5s del panel de admin) NO deben contar como
             // "conexiones nuevas" — si no, el propio administrador se
             // auto-banea por hacer polling. `counted` (exención de proxies)
-            // se resuelve allá con la misma regla.
+            // se resuelve allí con la misma regla.
             astra_web::handle_stream(ctx, stream, peer, scripting).await?;
         }
         ConnectionKind::Link if link_enabled => {

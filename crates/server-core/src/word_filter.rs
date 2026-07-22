@@ -160,7 +160,7 @@ impl WordFilterManager {
     }
 
     /// Evalúa un mensaje contra los filtros de censura (Block/Kick/Ban).
-    /// Las entradas `Announce` NUNCA se consideran acá — no bloquean el
+    /// Las entradas `Announce` NUNCA se consideran aquí — no bloquean el
     /// mensaje, ver [`Self::check_announce`]. Retorna la acción del primer
     /// patrón que matchee, o `None` si ninguno.
     pub fn check(&self, text: &str) -> Option<FilterAction> {
@@ -202,7 +202,7 @@ impl WordFilterManager {
     /// Agrega una línea de respuesta a un filtro `Announce` existente.
     /// Falla si el pattern no existe o no es de tipo `Announce` (paridad
     /// `WordFilter.AddLine` de sb0t, que no-opea silenciosamente en ese
-    /// caso — acá se prefiere devolver un error explícito al admin).
+    /// caso — aquí se prefiere devolver un error explícito al admin).
     pub fn add_line(&self, pattern: &str, text: &str) -> Result<(), String> {
         let pattern = pattern.trim().to_ascii_lowercase();
         let cache = self.cache.read();

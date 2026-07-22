@@ -281,7 +281,7 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
   <div class="logincard">
     <div class="logo"><svg viewBox="0 0 512 512"><use href="#astramark"/></svg></div>
     <h2 id="loginTitle">Panel de Astra</h2>
-    <p class="sub" id="loginSub">Ingresá la contraseña de dueño para administrar tu sala.</p>
+    <p class="sub" id="loginSub">Ingresa la contraseña de dueño para administrar tu sala.</p>
     <input id="pw" type="password" placeholder="Contraseña de dueño" autofocus>
     <div class="rowend" style="justify-content:center">
       <button class="btn primary" id="loginBtn" style="width:100%">Entrar</button>
@@ -321,7 +321,7 @@ let LANG = "es";
 const I18N = {
   es:{
     chrome_refresh:"Actualizar", chrome_logout:"Salir", chrome_menu:"Menú",
-    login_title:"Panel de Astra", login_sub:"Ingresá la contraseña de dueño para administrar tu sala.",
+    login_title:"Panel de Astra", login_sub:"Ingresa la contraseña de dueño para administrar tu sala.",
     login_pw:"Contraseña de dueño", login_btn:"Entrar", login_err:"Contraseña incorrecta.", login_switch:"English",
     hdr_online:"en línea", hdr_peak:"pico", hdr_bans:"baneos",
     g_principal:"Principal", g_moderacion:"Moderación", g_sala:"Sala", g_avanzado:"Avanzado",
@@ -333,7 +333,7 @@ const I18N = {
     common_save:"Guardar", common_save_changes:"Guardar cambios", common_add:"Agregar", common_remove:"Quitar",
     common_none:"Ninguno.", common_none_f:"Ninguna.", common_done:"Listo",
     restart_note:"⚠️ Estos cambios se guardan en el archivo de configuración y se aplican al <b>reiniciar el servidor</b>.",
-    saved_restart:"Guardado. Reiniciá el servidor para aplicar los cambios.",
+    saved_restart:"Guardado. Reinicia el servidor para aplicar los cambios.",
     err_prefix:"Error: ", err_save:"no se pudo guardar",
 
     inicio_h:"Inicio", inicio_sub:"Estado general de tu sala, en tiempo real.",
@@ -343,24 +343,24 @@ const I18N = {
     inicio_status_l:"Estado (mensaje corto)", inicio_status_ph:"ej. sala en mantenimiento",
     toast_topic:"Tema actualizado", toast_status:"Estado actualizado",
 
-    users_h:"Usuarios en línea", users_sub:"{0} conectado(s). Tocá una acción para moderar.",
+    users_h:"Usuarios en línea", users_sub:"{0} conectado(s). Toca una acción para moderar.",
     users_empty:"No hay nadie conectado en este momento.",
     u_muted:"silenciado", u_room:"sala", u_files:"archivos",
     u_info:"ℹ️ Info", u_kick:"👢 Expulsar", u_ban:"🚫 Banear", u_mute:"🔇 Silenciar", u_unmute:"🔊 Reactivar",
     u_changerank:"Cambiar rango…", u_to_voice:"→ Voz", u_to_mod:"→ Moderador", u_to_admin:"→ Administrador", u_remrank:"→ Quitar rango",
-    cf_ban:"¿Seguro que querés banear a {0}?",
+    cf_ban:"¿Seguro que quieres banear a {0}?",
     toast_kicked:"Expulsado: {0}", toast_banned:"Baneado: {0}", toast_muted:"Silenciado: {0}", toast_unmuted:"Reactivado: {0}",
     toast_rank_rem:"Rango quitado a {0}", toast_rank_upd:"Rango actualizado: {0}",
 
     accounts_h:"Cuentas registradas", accounts_sub:"{0} cuenta(s) guardada(s) con contraseña.",
-    accounts_note:"Para dar o quitar rangos usá la pestaña <b>Usuarios</b> (aplica al instante a quien esté conectado). El rango se recuerda cuando la persona vuelve a entrar con su contraseña.",
+    accounts_note:"Para dar o quitar rangos usa la pestaña <b>Usuarios</b> (aplica al instante a quien esté conectado). El rango se recuerda cuando la persona vuelve a entrar con su contraseña.",
     accounts_empty:"No hay cuentas registradas.", th_rank:"Rango", th_name:"Nombre",
 
     bans_h:"Baneos", bans_sub:"Personas y redes bloqueadas de tu sala.",
     bans_users_h:"🚫 Usuarios baneados", bans_users_empty:"No hay usuarios baneados.",
     bans_clear:"Vaciar todos los baneos", cf_clear:"¿Vaciar TODOS los baneos? No se puede deshacer.",
     toast_ban_rem:"Baneo quitado", toast_cleared:"Baneos vaciados",
-    bans_range_h:"📡 Baneos por rango de IP", bans_range_desc:"Bloquea un rango entero de direcciones. Escribí el prefijo, ej. <code>1.2.3.</code>",
+    bans_range_h:"📡 Baneos por rango de IP", bans_range_desc:"Bloquea un rango entero de direcciones. Escribe el prefijo, ej. <code>1.2.3.</code>",
     toast_range_ban:"Rango bloqueado", toast_range_unban:"Rango desbloqueado",
     bans_asn_h:"🌍 Baneos por red (ASN)", bans_asn_desc:"Bloquea una red/proveedor completo por su número ASN.",
     bans_asn_ph:"Número de ASN, ej. 12345", asn_pill:"Red AS{0}",
@@ -375,17 +375,17 @@ const I18N = {
 
     greets_h:"Mensajes de bienvenida", greets_sub:"Se muestran a quien entra a la sala. Estado actual: ",
     greets_on:"activados", greets_off:"desactivados",
-    greets_note:"Podés usar comodines: <code>+n</code> = nombre de quien entra · <code>+rn</code> = nombre de la sala.",
+    greets_note:"Puedes usar comodines: <code>+n</code> = nombre de quien entra · <code>+rn</code> = nombre de la sala.",
     th_message:"Mensaje", greets_empty:"No hay mensajes de bienvenida.",
     greets_ph:"¡Bienvenido/a +n a +rn!", greets_disable:"Desactivar todos", greets_enable:"Activar",
     toast_greet_add:"Bienvenida agregada", toast_greet_rem:"Bienvenida quitada", toast_toggled:"Actualizado",
 
-    sala_h:"Opciones de la sala", sala_sub:"Activá o desactivá funciones. Los cambios se aplican al instante.", sala_empty:"Sin opciones.",
+    sala_h:"Opciones de la sala", sala_sub:"Activa o desactiva funciones. Los cambios se aplican al instante.", sala_empty:"Sin opciones.",
 
     av_h:"Avatares", av_sub:"Imágenes que usa el servidor.",
     av_room_h:"🏠 Avatar de la sala", av_room_desc:"Se envía a cada cliente Ares al entrar y se actualiza en vivo para todos.",
     av_def_h:"👤 Avatar por defecto", av_def_desc:"Se asigna a los clientes Ares que no envían su propio avatar dentro de los primeros 10 segundos.",
-    av_upload:"Subir imagen", av_pick:"Elegí una imagen primero.", av_updated:"Imagen actualizada.", av_err:"no se pudo subir",
+    av_upload:"Subir imagen", av_pick:"Elige una imagen primero.", av_updated:"Imagen actualizada.", av_err:"no se pudo subir",
 
     srv_h:"Servidor", srv_sub:"Datos básicos de tu servidor.",
     srv_roomname:"Nombre de la sala", srv_topic:"Tema por defecto", srv_bot:"Nombre del bot",
@@ -402,7 +402,7 @@ const I18N = {
     th_guid:"GUID", link_leaf_name_ph:"nombre de la sala", link_leaf_guid_ph:"guid",
 
     sec_h:"Seguridad", sec_sub:"Protecciones anti-flood, anti-bot y captcha.",
-    sec_warn:"⚠️ Requiere <b>reiniciar el servidor</b>. Si no sabés qué hace un valor, es mejor dejarlo como está.",
+    sec_warn:"⚠️ Requiere <b>reiniciar el servidor</b>. Si no sabes qué hace un valor, es mejor dejarlo como está.",
     sec_conn_h:"🚪 Conexiones",
     sec_maxnew:"Máx. conexiones nuevas por IP", sec_window:"Ventana de conteo (seg)",
     sec_floodthr:"Umbral para banear por flood", sec_floodban:"Duración del ban por flood (seg)",
@@ -424,21 +424,21 @@ const I18N = {
     toast_perm_upd:"Permiso actualizado", toast_perm_reset:"Permiso restaurado",
 
     cfg_h:"Config avanzada", cfg_sub:"Editor del archivo <code>astra.toml</code> en crudo. Solo para usuarios avanzados.",
-    cfg_warn:"⚠️ Un error acá puede impedir que el servidor arranque. Para lo cotidiano (opciones de sala, bienvenidas, baneos) usá las otras pestañas. Requiere <b>reiniciar</b> para aplicar.",
+    cfg_warn:"⚠️ Un error aquí puede impedir que el servidor arranque. Para lo cotidiano (opciones de sala, bienvenidas, baneos) usa las otras pestañas. Requiere <b>reiniciar</b> para aplicar.",
     cfg_reload:"Recargar",
 
-    con_h:"Consola", con_sub:"Ejecutá cualquier comando como Dueño.",
+    con_h:"Consola", con_sub:"Ejecuta cualquier comando como Dueño.",
     con_note:"Ejemplos: <code>/ban Pedro</code> · <code>/announce hola a todos</code> · <code>/roomflags</code> · <code>/addline 0, texto</code>",
     con_ph:"/comando argumentos", con_run:"Ejecutar",
 
     motd_h:"Mensaje de entrada (MOTD)", motd_sub:"Se le muestra a cada persona cuando entra a la sala.",
-    motd_note:"Una línea por mensaje. Comodines: <code>+n</code> = nombre de quien entra · <code>+rn</code> = nombre de la sala · <code>+uc</code> = usuarios conectados · <code>+ip</code> = IP. Dejalo vacío para no mostrar nada.",
-    motd_ph:"¡Bienvenido/a +n a +rn!\nDisfrutá tu estadía :)",
+    motd_note:"Una línea por mensaje. Comodines: <code>+n</code> = nombre de quien entra · <code>+rn</code> = nombre de la sala · <code>+uc</code> = usuarios conectados · <code>+ip</code> = IP. Déjalo vacío para no mostrar nada.",
+    motd_ph:"¡Bienvenido/a +n a +rn!\nDisfruta tu estadía :)",
     motd_saved:"MOTD guardado.",
 
-    tpl_h:"Textos del sistema", tpl_sub:"Personalizá (o traducí) los mensajes de moderación que ve la gente.",
-    tpl_note:"Editá el texto después del <code>=</code> en cada línea (formato <code>clave = texto</code>). Comodines: <code>+n</code> = usuario · <code>+a</code> = admin · <code>+l</code> = nivel · <code>+i</code> = ident. Para restaurar un texto, dejalo igual al original.",
-    tpl_warn:"Están cargados todos los mensajes que el servidor le muestra a la gente por los comandos. Los que tienen comodines (como <code>+n</code>) insertan valores al vivo — mantené el comodín si querés que aparezca ese dato.",
+    tpl_h:"Textos del sistema", tpl_sub:"Personaliza (o traduce) los mensajes de moderación que ve la gente.",
+    tpl_note:"Edita el texto después del <code>=</code> en cada línea (formato <code>clave = texto</code>). Comodines: <code>+n</code> = usuario · <code>+a</code> = admin · <code>+l</code> = nivel · <code>+i</code> = ident. Para restaurar un texto, déjalo igual al original.",
+    tpl_warn:"Están cargados todos los mensajes que el servidor le muestra a la gente por los comandos. Los que tienen comodines (como <code>+n</code>) insertan valores al vivo — mantén el comodín si quieres que aparezca ese dato.",
     tpl_saved:"Textos guardados ({0} aplicados).",
   },
   en:{

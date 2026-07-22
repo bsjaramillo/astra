@@ -14,7 +14,7 @@
 //! A diferencia de sb0t, NO interpretamos tags de media (`[youtube=]`,
 //! `[image=]`, etc.): Astra manda el MOTD como texto plano por PM. Si en el
 //! futuro se quiere HTML para clientes que lo soporten, se puede extender
-//! acá sin tocar los call sites.
+//! aquí sin tocar los call sites.
 
 use std::sync::Arc;
 

@@ -63,7 +63,7 @@ pub fn build(ident: &str, args: &str) -> String {
 /// Los largos van en unidades UTF-16 (ver [`utf16_len`]), no en chars: el
 /// cliente real es JavaScript y calcula todos los largos con `String.length`,
 /// que cuenta code units UTF-16 (un emoji o char astral fuera del BMP cuenta
-/// 2, no 1). Si acá contáramos chars, un nick/mensaje con esos caracteres
+/// 2, no 1). Si aquí contáramos chars, un nick/mensaje con esos caracteres
 /// desalinearía el parseo del lado del cliente (o del nuestro, según la
 /// dirección) apenas apareciera uno.
 pub fn build_with_lens(ident: &str, args: &[&str]) -> String {

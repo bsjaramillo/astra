@@ -2,7 +2,7 @@
 //!
 //! La fuente de verdad es el registry de imágenes (ghcr.io), que es público:
 //! sus tags (`0.0.1-beta.NN`) son exactamente lo que las salas despliegan,
-//! así que "hay un tag más nuevo" significa "podés actualizar ya" (con
+//! así que "hay un tag más nuevo" significa "puedes actualizar ya" (con
 //! astra-creator `u` o `docker pull`). No se usa la API de releases de
 //! GitHub aunque el workflow los publique (betas como prerelease): el
 //! registry funciona sin importar la visibilidad del repo y el release se

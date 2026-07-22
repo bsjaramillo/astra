@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     # Corre como tu usuario del host para que los archivos de ./data queden
     # accesibles/editables desde el SO (no como root ni UID 65532).
-    # Cambiá el UID/GID con: PUID=$(id -u) PGID=$(id -g) docker compose up -d
+    # Cambia el UID/GID con: PUID=$(id -u) PGID=$(id -g) docker compose up -d
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "5009:5009" # TCP clientes Ares

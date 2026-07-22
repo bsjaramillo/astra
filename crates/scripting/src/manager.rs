@@ -444,7 +444,7 @@ impl ScriptManager {
         // SAFETY: el manager vive solo en este thread y se destruye
         // cuando el thread termina. En este punto `self.scripts` está
         // VACÍO (`load_all_inner` corre recién abajo, ya en el thread
-        // dedicado) — si se cargaran scripts ANTES de mover el manager acá
+        // dedicado) — si se cargaran scripts ANTES de mover el manager aquí
         // (como hacía una versión anterior de este código), sus
         // `boa_engine::Context` se crean en el thread llamante pero se
         // destruyen en este thread dedicado; `boa_engine` mantiene un
@@ -464,7 +464,7 @@ impl ScriptManager {
             info!("script manager: thread iniciado");
 
             // Cargar los scripts del directorio (ver nota de seguridad
-            // arriba: tiene que pasar acá, no antes de mover `self`).
+            // arriba: tiene que pasar aquí, no antes de mover `self`).
             let _ = manager.load_all_inner();
 
             // Loop principal: alterna entre events y requests.
@@ -1069,7 +1069,7 @@ fn call_handler_with_return(
 
 /// Notifica por PM del bot a todo usuario suscrito (`/errors on`, paridad
 /// `ErrorDispatcher.SendError` de sb0t) que un script tiró un error.
-/// A diferencia de sb0t (que llama esto desde ~90 call sites), acá alcanza
+/// A diferencia de sb0t (que llama esto desde ~90 call sites), aquí alcanza
 /// con los 2 puntos donde ya se captura un error de script
 /// (`load_source`/`dispatch`), porque son los únicos lugares donde Astra
 /// ejecuta código JS de scripts.
@@ -1429,7 +1429,7 @@ mod tests {
         )
         .unwrap();
         mgr.dispatch(&ScriptEvent::LoginGranted { name: "Alice".into() });
-        // Si llega hasta acá sin panic, ambos scripts manejaron el evento
+        // Si llega hasta aquí sin panic, ambos scripts manejaron el evento
     }
 
     /// Test de integración: dispatcha un evento y verifica que el handler JS

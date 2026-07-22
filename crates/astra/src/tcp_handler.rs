@@ -569,7 +569,7 @@ async fn process_handshake(
                     );
 
                     // Cliente cifrado: primero el CryptoKey (ofuscado con el
-                    // GUID); a partir de acá todos los strings van cifrados.
+                    // GUID); a partir de aquí todos los strings van cifrados.
                     if let Some(crypto) = user_arc.ares_crypto {
                         tx.send(build_crypto_key(&crypto, &user_arc.guid))?;
                     }
@@ -1680,7 +1680,7 @@ fn apply_filter_action(
             filter_remove_user(ctx, user);
         }
         FilterAction::Announce => {
-            // No debería llegar acá: `check()` (censura) nunca devuelve
+            // No debería llegar aquí: `check()` (censura) nunca devuelve
             // Announce — ver `check_announce` para ese path, que no
             // bloquea el mensaje.
             debug!("word filter: Announce inesperado en apply_filter_action de '{}'", name);

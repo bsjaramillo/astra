@@ -1,31 +1,31 @@
 // paridad.js — Script de VERIFICACIÓN MANUAL de la auditoría de scripting.
 //
-// Cargalo con `#loadscript paridad` y probá cada punto desde el chat. Cada
+// Cárgalo con `#loadscript paridad` y prueba cada punto desde el chat. Cada
 // bloque corresponde a un hallazgo de docs/AUDITORIA-SCRIPTING.md.
 //
 // Cuando termines de verificar, descargalo con `#killscript paridad`.
 
 function onLoad() {
-    print("paridad.js cargado — probá: 'feo', '#pruebas', '@print(1+1)'");
+    print("paridad.js cargado — prueba: 'feo', '#pruebas', '@print(1+1)'");
 }
 
 // ---------------------------------------------------------------- S-A
 // onTextBefore REESCRIBE el texto (antes solo podía cancelar).
-// Probá escribiendo "que feo dia" en público → debe salir "que *** dia".
-// Escribí "cancelame" → el mensaje no debe aparecer.
+// Prueba escribiendo "que feo dia" en público → debe salir "que *** dia".
+// Escribe "cancelame" → el mensaje no debe aparecer.
 function onTextBefore(user, text) {
     var t = "" + text;
     if (t.indexOf("cancelame") >= 0) return false;   // cancela
     return t.replace(/feo/g, "***");                 // reescribe
 }
 
-// Lo mismo para emotes: probá "/me se siente feo".
+// Lo mismo para emotes: prueba "/me se siente feo".
 function onEmoteBefore(user, text) {
     return ("" + text).replace(/feo/g, "***");
 }
 
 // ---------------------------------------------------------------- S-B
-// onVroomJoinCheck rechaza cambios de vroom. Probá "#vroom 9" → no pasa nada.
+// onVroomJoinCheck rechaza cambios de vroom. Prueba "#vroom 9" → no pasa nada.
 function onVroomJoinCheck(user, vroom) {
     if (("" + vroom) === "9") {
         user.sendPM("el vroom 9 esta cerrado (onVroomJoinCheck)");
@@ -55,7 +55,7 @@ function onCommand(user, command, target, args) {
     //   #pruebas kick <nick>
     if (sub === "kick") {
         if (target == null) { user.sendPM("uso: #pruebas kick <nick conectado>"); return; }
-        user.sendPM("kickeando a " + target.name + " — revisá que desaparezca de la userlist");
+        user.sendPM("kickeando a " + target.name + " — revisa que desaparezca de la userlist");
         target.kick();
         return;
     }
@@ -95,6 +95,6 @@ function onCommand(user, command, target, args) {
 
 // ---------------------------------------------------------------- S-G
 // El eval `@código` (solo Owner) corre en el primer script cargado, con
-// `userobj` = quien lo escribió. Probá en el chat, como Owner:
+// `userobj` = quien lo escribió. Prueba en el chat, como Owner:
 //   @print("hola desde eval, soy " + userobj.name)
 //   @userobj.sendPM("me hablo a mi mismo")

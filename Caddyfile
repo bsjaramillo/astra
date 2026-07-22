@@ -2,12 +2,12 @@
 # (cliente navegador en / y panel de administración en /admin).
 #
 # IMPORTANTE:
-#  - Reemplazá `chat.midominio.com` por tu dominio real y apuntá su DNS a este
+#  - Reemplaza `chat.midominio.com` por tu dominio real y apunta su DNS a este
 #    servidor. Caddy obtiene el certificado TLS de Let's Encrypt solo.
 #  - Esto NO cubre a los clientes Ares: ellos hablan TCP binario y se conectan
 #    directo al puerto 5009 (el protocolo Ares no soporta TLS).
 #
-# Para pruebas locales sin dominio, reemplazá la primera línea por:
+# Para pruebas locales sin dominio, reemplaza la primera línea por:
 #     localhost {
 # y Caddy usará un certificado interno autofirmado.
 

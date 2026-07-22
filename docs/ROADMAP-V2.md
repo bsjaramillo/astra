@@ -54,7 +54,7 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
   inválido rechazado)
 - [x] **(2026-07-10) Auto-publicación real hacia la red**: el prober mandaba
   `SENDINFO` (consulta: "¿sos una room?") a los nodos conocidos en vez de
-  `ADDIPS` (anuncio: "acá estoy, agregame"). SENDINFO no hace que nadie nos
+  `ADDIPS` (anuncio: "aquí estoy, agrégame"). SENDINFO no hace que nadie nos
   agregue a su lista de nodos — por eso la sala respondía bien si alguien la
   consultaba directo, pero nunca llegaba a aparecer en los clientes reales
   (nadie se enteraba de que existía). Fix en `crates/udp/src/prober.rs`

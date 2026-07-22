@@ -30,7 +30,7 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("help", ILevel::Regular),
     ("nick", ILevel::Regular),
     ("vroom", ILevel::Regular),
-    // customname/uncustomname NO se gatean acá: la forma self-service es
+    // customname/uncustomname NO se gatean aquí: la forma self-service es
     // para cualquier usuario (nivel > Regular o flag `general`); el gate
     // Moderator de la forma target-based vive en el handler.
     ("users", ILevel::Regular),
@@ -68,7 +68,7 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("oldname", ILevel::Admin),
     ("changemessage", ILevel::Moderator),
     ("announce", ILevel::Moderator),
-    // shout NO se gatea acá: sb0t lo permite a nivel > Regular o con el
+    // shout NO se gatea aquí: sb0t lo permite a nivel > Regular o con el
     // flag `general` (gate dentro del handler).
     ("opmsg", ILevel::Moderator),
     ("adminmsg", ILevel::Moderator),
@@ -79,7 +79,7 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("unkiddy", ILevel::Moderator),
     ("mtimeout", ILevel::Owner),
     ("clearscreen", ILevel::Moderator),
-    // locate NO se gatea acá: la lista de vrooms es para nivel > Regular o
+    // locate NO se gatea aquí: la lista de vrooms es para nivel > Regular o
     // flag `general` (sb0t); el gate Mod de la consulta geoip vive dentro.
     ("customnames", ILevel::Owner),
     ("roomflags", ILevel::Moderator),
@@ -167,7 +167,7 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     // `cmdlevel` es Owner-only: permite reconfigurar los demás gates, así
     // que un Admin no debe poder usarlo para auto-escalar sus privilegios.
     ("cmdlevel", ILevel::Owner),
-    // Host en sb0t: history (replay on-join). `idle` NO se gatea acá: sin
+    // Host en sb0t: history (replay on-join). `idle` NO se gatea aquí: sin
     // args es "marcarse ausente" (cualquier registrado, core/Events.cs:537);
     // el gate Host del toggle `idle on|off` vive dentro del handler.
     ("history", ILevel::Owner),

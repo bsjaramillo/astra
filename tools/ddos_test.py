@@ -2,7 +2,7 @@
 """
 Prueba de las capas anti-flood / anti-DDoS de Astra.
 
-⚠️  USO AUTORIZADO SOLAMENTE: corré esto contra TU PROPIO servidor Astra (o una
+⚠️  USO AUTORIZADO SOLAMENTE: corre esto contra TU PROPIO servidor Astra (o una
     instancia de prueba). Es una herramienta defensiva para verificar que las
     protecciones se disparan; genera tráfico de ataque simulado.
 
@@ -17,8 +17,8 @@ Capas que verifica (crates/server-core/src/security.rs):
 
 IMPORTANTE — el estado de seguridad vive EN MEMORIA (no en disco). Las capas 1 y 5
 banean la IP de origen (5 min y 1 hora por defecto). Para un run limpio:
-  • Reiniciá el servidor Astra entre tests destructivos (resetea el estado), o
-  • Corré un test a la vez con --test <nombre>.
+  • Reinicia el servidor Astra entre tests destructivos (resetea el estado), o
+  • Corre un test a la vez con --test <nombre>.
 El modo `all` corre primero los tests no-baneantes y deja los baneantes al final.
 
 Ejemplos:
@@ -255,7 +255,7 @@ def test_flood(host, port, cfg) -> Result:
     r.detail = f"{accepted} aceptadas, {flood} rechazos flood, {ban} auto-ban"
     print(f"\n  → {'✅ PROTECCIÓN ACTIVA' if r.ok else '❌ NO se activó el flood'}: {r.detail}")
     if ban:
-        print("  ⚠️  La IP quedó BANEADA temporalmente. Reiniciá el server para resetear.")
+        print("  ⚠️  La IP quedó BANEADA temporalmente. Reinicia el server para resetear.")
     return r
 
 
@@ -287,7 +287,7 @@ def test_failed(host, port, cfg) -> Result:
     r.detail = f"{unknown} fallos registrados, {banned} rechazos por ban"
     print(f"\n  → {'✅ PROTECCIÓN ACTIVA' if r.ok else '❌ NO se activó el ban'}: {r.detail}")
     if banned:
-        print("  ⚠️  La IP quedó BANEADA (1h por defecto). Reiniciá el server para resetear.")
+        print("  ⚠️  La IP quedó BANEADA (1h por defecto). Reinicia el server para resetear.")
     return r
 
 
@@ -298,8 +298,8 @@ def test_slowloris(host, port, cfg) -> Result:
     muchas conexiones mudas y verifica que el server las cierre tras el timeout.
 
     (El cap de conexiones crudas por IP —el otro fix— exime loopback/proxies,
-    así que desde localhost no se observa; corré desde una IP remota para verlo.
-    Acá se valida el timeout, que sí aplica a todas.)"""
+    así que desde localhost no se observa; corre desde una IP remota para verlo.
+    Aquí se valida el timeout, que sí aplica a todas.)"""
     r = Result("Slowloris · conexiones mudas (sin byte)")
     wait = cfg.handshake + 4
     hdr(r.name + f"  (deben cerrarse a ~{cfg.handshake}s por el timeout de clasificación)")
@@ -371,12 +371,12 @@ def main():
     destructive = {"flood", "failed"}
     if any(t in destructive for t in order) and not cfg.yes:
         print("\n⚠️  Los tests 'flood' y 'failed' BANEAN la IP de origen (en memoria).")
-        print("   Reiniciá el server Astra para resetear el estado entre corridas.")
+        print("   Reinicia el server Astra para resetear el estado entre corridas.")
         try:
             if input("   ¿Continuar? [s/N] ").strip().lower() not in ("s", "y", "si", "yes"):
                 print("Cancelado."); sys.exit(0)
         except EOFError:
-            print("   (sin TTY; usá --yes para confirmar). Cancelado."); sys.exit(0)
+            print("   (sin TTY; usa --yes para confirmar). Cancelado."); sys.exit(0)
 
     results = []
     for name in order:
@@ -387,7 +387,7 @@ def main():
             results.append(r)
         # tras un test que banea, avisar que lo demás puede salir "ya baneado"
         if name in destructive and name != order[-1]:
-            print("\n  (nota: la IP puede estar baneada ahora; reiniciá el server "
+            print("\n  (nota: la IP puede estar baneada ahora; reinicia el server "
                   "antes del próximo test destructivo para un resultado limpio.)")
 
     hdr("RESUMEN")
@@ -397,7 +397,7 @@ def main():
     fails = [r for r in results if r.ok is False]
     print()
     if fails:
-        print(f"❌ {len(fails)} capa(s) NO se activaron como se esperaba. Revisá la config/logs.")
+        print(f"❌ {len(fails)} capa(s) NO se activaron como se esperaba. Revisa la config/logs.")
         sys.exit(1)
     print("✅ Todas las capas probadas se activaron correctamente.")
 

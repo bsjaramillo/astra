@@ -618,7 +618,7 @@ function __mkUser(name){
     });
   });
   // avatar: sb0t devuelve un JSAvatarImage {arg, exists, toScribble(), save()}.
-  // Acá es un String OBJECT con el base64 (compat con scripts de Astra que lo
+  // Aquí es un String OBJECT con el base64 (compat con scripts de Astra que lo
   // usaban como string) MÁS esas props sb0t. set = base64 (vacío/null limpia).
   Object.defineProperty(u, "avatar", {
     enumerable: true, configurable: true,
@@ -680,7 +680,7 @@ function user(name){ return __mkUser(name); }
 // ---- Objetos estáticos (mapean funciones planas de Astra) ----
 // PARIDAD sb0t: en JSRoom/JSStats/JSChannels/JSLink los valores son
 // PROPIEDADES ([JSProperty]), no métodos — los scripts hacen `Room.name`,
-// `Stats.userCount`, `Channels.enabled` SIN paréntesis. Acá se definen como
+// `Stats.userCount`, `Channels.enabled` SIN paréntesis. Aquí se definen como
 // getters/setters de accessor. NO volver a exponerlos como funciones.
 var Room = {
   // Extras de Astra (sb0t setea el topic asignando `Room.topic = x`).
@@ -1012,7 +1012,7 @@ HttpRequest.prototype.download = function(arg){
   __httpCbs[key] = function(body, status, error){
     self.response = body; self.status = status; self.error = error;
     if (typeof self.oncomplete === "function"){
-      // sb0t: oncomplete recibe un JSHttpRequestResult {arg, page}. Acá es un
+      // sb0t: oncomplete recibe un JSHttpRequestResult {arg, page}. Aquí es un
       // String OBJECT del body (compat con scripts de Astra que lo usaban
       // como string) con page/arg/status/error encima. `arg` es el argumento
       // opcional de download(arg), como en sb0t.
@@ -4175,7 +4175,7 @@ fn format_js_value(v: &JsValue) -> String {
 /// propia key si negoció AES (`user.ares_crypto`).
 /// Broadcast de texto público a TODOS los usuarios logueados, web-aware:
 /// usa `AresUser::send_public`, que elige el formato por cliente (texto
-/// ib0t para WebSocket, binario Ares para nativos). Nunca mandar acá
+/// ib0t para WebSocket, binario Ares para nativos). Nunca mandar aquí
 /// paquetes binarios crudos: los users web tienen `sender = None` y el
 /// binario se descarta en silencio (bug histórico de `print()` en scripts).
 fn broadcast_public(app: &AppContext, from: &str, text: &str) {
@@ -4606,7 +4606,7 @@ mod tests {
             if (item.attributes["id"] !== "x") throw "attr index compat";
 
             // ProxyCheck result shape se construye en el prelude (query es
-            // async; acá solo verificamos que la clase existe y sus defaults).
+            // async; aquí solo verificamos que la clase existe y sus defaults).
             var pc = new ProxyCheck();
             if (pc.includeVPN !== true) throw "includeVPN";
             if (pc.useTLS !== false) throw "useTLS";

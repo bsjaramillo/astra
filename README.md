@@ -3,7 +3,7 @@
 > Servidor de chat compatible con **Ares Galaxy**, escrito en **Rust**.
 
 Astra es un servidor de chat multiplataforma que implementa el protocolo binario
-de Ares Galaxy — heredero moderno de sb0t. Montá tu propia sala en minutos:
+de Ares Galaxy — heredero moderno de sb0t. Monta tu propia sala en minutos:
 protocolo completo, moderación avanzada, scripting y un panel de administración
 web, en cualquier plataforma.
 
@@ -51,7 +51,7 @@ curl -sSL https://raw.githubusercontent.com/bsjaramillo/astra-creator/main/insta
 astra-creator /srv/astra-salas
 ```
 
-En la TUI: `a` agrega una sala (nombre, puerto, owner password y — si querés
+En la TUI: `a` agrega una sala (nombre, puerto, owner password y — si quieres
 HTTPS — un dominio), `D` la despliega. Cada sala es un contenedor independiente
 con su configuración y sus datos.
 
@@ -59,7 +59,7 @@ con su configuración y sus datos.
 
 ```bash
 git clone https://github.com/bsjaramillo/astra && cd astra
-cp astra.toml.example astra.toml   # editá room_name y owner_password
+cp astra.toml.example astra.toml   # edita room_name y owner_password
 docker compose up -d
 ```
 
@@ -70,7 +70,7 @@ El server queda escuchando en el puerto **5009** (TCP + UDP).
 ```bash
 # Requiere Rust 1.75+
 cargo build --release
-cp astra.toml.example astra.toml   # editá room_name y owner_password
+cp astra.toml.example astra.toml   # edita room_name y owner_password
 ./target/release/astra --config astra.toml
 ```
 
@@ -81,7 +81,7 @@ cp astra.toml.example astra.toml   # editá room_name y owner_password
 > Con astra-creator los pasos 1 y 2 los hace la TUI; esta guía es para el
 > despliegue manual con el binario o Docker a mano.
 
-1. **Configurá** `astra.toml` (copiado de `astra.toml.example`). Lo mínimo:
+1. **Configura** `astra.toml` (copiado de `astra.toml.example`). Lo mínimo:
    ```toml
    room_name = "Mi Sala"
    bot_name  = "MiBot"
@@ -89,24 +89,24 @@ cp astra.toml.example astra.toml   # editá room_name y owner_password
    ```
    > Si `owner_password` queda vacío, el panel de administración se deshabilita.
 
-2. **Arrancá** el server:
+2. **Arranca** el server:
    ```bash
    ./target/release/astra --config astra.toml
    ```
 
-3. **Abrí el puerto** 5009 (TCP **y** UDP) en el firewall del sistema:
+3. **Abre el puerto** 5009 (TCP **y** UDP) en el firewall del sistema:
    ```bash
    sudo ufw allow 5009/tcp && sudo ufw allow 5009/udp
    ```
    Y **también en el firewall de tu VPS o router**: security groups en AWS,
    reglas de ingreso en Oracle Cloud/GCP, el panel de Hetzner/Vultr/DigitalOcean,
-   o el port forwarding del router si lo corrés en casa. Es el paso que más se
+   o el port forwarding del router si lo corres en casa. Es el paso que más se
    olvida: si el proveedor bloquea el puerto, nadie entra aunque `ufw` lo permita.
 
-   Tu IP pública (ej. `curl ifconfig.me`) es la que compartís.
+   Tu IP pública (ej. `curl ifconfig.me`) es la que compartes.
 
-4. **Administrá**, de dos formas equivalentes:
-   - **Panel web**: `http://<tu-ip>:5009/admin` → ingresá el `owner_password`.
+4. **Administra**, de dos formas equivalentes:
+   - **Panel web**: `http://<tu-ip>:5009/admin` → ingresa el `owner_password`.
      Gestión de usuarios (ban/kick/muzzle/niveles), bans, flags de sala, greets,
      filtros, edición del config, y una consola de comandos.
    - **Comandos en el chat**: `/login <owner_password>` te hace Owner; después
@@ -115,7 +115,7 @@ cp astra.toml.example astra.toml   # editá room_name y owner_password
 5. **La gente entra**:
    - **Cliente Ares Galaxy**: agregar sala por dirección → `<tu-ip>:5009`.
    - **Navegador**: `http://<tu-ip>:5009/` (cliente de chat web básico).
-   - Si dejás `roomsearch = true`, la sala se anuncia en la red de descubrimiento UDP.
+   - Si dejas `roomsearch = true`, la sala se anuncia en la red de descubrimiento UDP.
 
 ---
 
@@ -126,18 +126,18 @@ puerto**. Un reverse proxy con TLS solo puede cubrir la parte **web** (cliente
 navegador + panel `/admin`); los clientes **Ares** usan TCP binario plano y se
 conectan directo al `:5009` (el protocolo Ares no soporta TLS).
 
-**Con astra-creator** (recomendado): poné un dominio en el campo
+**Con astra-creator** (recomendado): pon un dominio en el campo
 "Dominio HTTPS" del formulario de la sala (con el DNS apuntando a tu servidor)
-y redesplegá con `D`. Se levanta automáticamente un [Caddy](https://caddyserver.com)
+y redespliega con `D`. Se levanta automáticamente un [Caddy](https://caddyserver.com)
 como reverse proxy con certificados de Let's Encrypt; varias salas pueden tener
 cada una su dominio compartiendo el mismo Caddy.
 
 **Manual**: el repo trae el mismo setup listo para usar sin astra-creator:
 
 ```bash
-# 1. Editá el Caddyfile y poné tu dominio real (chat.midominio.com).
-# 2. Apuntá el DNS de ese dominio a tu servidor.
-# 3. Levantá todo:
+# 1. Edita el Caddyfile y pon tu dominio real (chat.midominio.com).
+# 2. Apunta el DNS de ese dominio a tu servidor.
+# 3. Levanta todo:
 docker compose -f docker-compose.tls.yml up -d
 ```
 

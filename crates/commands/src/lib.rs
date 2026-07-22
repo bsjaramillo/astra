@@ -2353,7 +2353,7 @@ fn access_denied_text(required: ILevel) -> &'static str {
 
 /// Propaga una acción `host*` a los servidores enlazados (si hay link activo).
 /// Cada servidor la aplica a su pool local vía `apply_admin_action`. Notifica
-/// al emisor que la acción viaja por la red (el target puede no estar acá).
+/// al emisor que la acción viaja por la red (el target puede no estar aquí).
 fn publish_host_action(ctx: &AppContext, user: &Arc<AresUser>, kind: u8, target: &str) {
     let target = target.trim();
     if target.is_empty() || ctx.link_receiver_count() == 0 {
@@ -2565,7 +2565,7 @@ fn handle_listfilters(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
     send_system_line(ctx, user, &format!("Word filters ({}):", filters.len()));
     for (i, (pattern, action)) in filters.iter().enumerate() {
-        // El índice acá es el que usan /addline, /remline y /viewfilter.
+        // El índice aquí es el que usan /addline, /remline y /viewfilter.
         send_system_line(ctx, user, &format!("{} - {} → {}", i, pattern, action.as_str()));
     }
 }
@@ -4382,7 +4382,7 @@ fn handle_livescripts(ctx: &AppContext, user: &Arc<AresUser>) {
 /// de GitHub, extrae el primer `.js` que encuentra, y lo carga (paridad
 /// `LiveScript.GetDownload`/`Download` de sb0t). Simplificación deliberada:
 /// sb0t renombra el directorio raíz extraído a `<filename>.js` (su modelo
-/// permite que un "script" sea una carpeta); acá se busca el primer
+/// permite que un "script" sea una carpeta); aquí se busca el primer
 /// archivo `.js` dentro del zip y se lo carga como script individual,
 /// consistente con el modelo de `ScriptManager` de Astra.
 fn handle_downloadscript(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {

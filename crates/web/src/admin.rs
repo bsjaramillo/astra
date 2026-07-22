@@ -388,7 +388,7 @@ pub fn remove_trusted_proxy(ctx: &AppContext, ip: &str) -> bool {
 /// Kinds válidos de avatar administrable (sala/default).
 const AVATAR_KINDS: &[&str] = &["server", "default"];
 /// Tamaño máximo aceptado para un avatar subido (64 KiB). sb0t reescala a
-/// 48x48/JPEG-q69 en el cliente GUI; acá no reescalamos (evita sumar una
+/// 48x48/JPEG-q69 en el cliente GUI; aquí no reescalamos (evita sumar una
 /// dependencia de procesamiento de imágenes), así que en su lugar ponemos
 /// un techo de tamaño para no dejar subir archivos gigantes.
 const MAX_AVATAR_BYTES: usize = 65_536;

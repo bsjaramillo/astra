@@ -33,7 +33,7 @@ roomsearch = true
 
 # Chequeo periódico (cada 6h) de nuevas versiones de Astra contra el registry
 # de imágenes (ghcr.io). Cuando hay una versión más nueva, avisa por PM a los
-# admins/owners conectados y lo marca en el panel /admin. Poné false para que
+# admins/owners conectados y lo marca en el panel /admin. Pon false para que
 # el server no haga requests salientes.
 update_check = true
 
@@ -54,7 +54,7 @@ web_port = 5010
 
 # Directorio donde Astra guarda la DB SQLite, logs y el seed de rooms.
 #
-# GeoIP opcional: si colocás bases MMDB en este directorio, se activan
+# GeoIP opcional: si colocas bases MMDB en este directorio, se activan
 # `/trace` (geolocalización) y el enforcement de `asnban`:
 #   - <data_dir>/city.mmdb  → GeoLite2-City o dbip-city-lite (ciudad/país)
 #   - <data_dir>/asn.mmdb   → GeoLite2-ASN  o dbip-asn-lite  (ASN)

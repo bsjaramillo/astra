@@ -118,7 +118,7 @@ async fn handle_ws_connection(
 
     // 5) Pasar al modo WebSocket. Si `peer` es un reverse proxy confiable
     // (paridad `ib0tClient.ApplyForwardedIP` de sb0t), resolvemos la IP real
-    // del cliente desde `X-Real-IP`/`X-Forwarded-For` acá — es el único
+    // del cliente desde `X-Real-IP`/`X-Forwarded-For` aquí — es el único
     // punto donde tenemos los headers HTTP del handshake.
     let resolved_ip = resolve_client_ip(&ctx, peer.ip(), &request.headers);
     handle_connection(ctx, stream, peer, resolved_ip, scripting).await
@@ -299,7 +299,7 @@ async fn handle_admin_route(
         return Ok(());
     }
 
-    // A partir de acá se requiere token válido.
+    // A partir de aquí se requiere token válido.
     if !crate::admin::validate(req.bearer_token()) {
         send_http_json(stream, 401, "{\"error\":\"unauthorized\"}").await?;
         return Ok(());

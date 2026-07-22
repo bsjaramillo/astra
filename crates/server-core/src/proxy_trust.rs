@@ -3,7 +3,7 @@
 //! `ib0tClient.ApplyForwardedIP` de sb0t).
 //!
 //! sb0t guarda esta lista en el registro de Windows y la lee en vivo en
-//! cada conexión (sin reiniciar el server); acá el equivalente es una tabla
+//! cada conexión (sin reiniciar el server); aquí el equivalente es una tabla
 //! SQLite + cache en memoria, mismo patrón que [`crate::room_flags::RoomFlags`].
 //!
 //! El chequeo real (qué headers confiar y en qué orden) vive en el crate

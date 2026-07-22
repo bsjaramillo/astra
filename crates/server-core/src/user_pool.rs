@@ -381,7 +381,7 @@ impl AresUser {
 /// Largo en unidades UTF-16 (paridad `String.length` de JavaScript): el
 /// protocolo de texto ib0t/web usa largos declarados por el cliente real
 /// (JS), que cuenta code units UTF-16, no chars/bytes — un emoji o char
-/// astral (fuera del BMP) ocupa 2, no 1. Si acá contáramos chars, un nick o
+/// astral (fuera del BMP) ocupa 2, no 1. Si aquí contáramos chars, un nick o
 /// mensaje con esos caracteres desalinearía el parseo del lado del cliente.
 fn ws_len(s: &str) -> usize {
     s.encode_utf16().count()

@@ -1,7 +1,7 @@
 # docker-compose.tls.yml — Astra + Caddy (HTTPS automático para la web/admin)
 #
 # Uso:
-#   1. Editá el Caddyfile: poné tu dominio real y apuntá su DNS a este host.
+#   1. Edita el Caddyfile: pon tu dominio real y apunta su DNS a este host.
 #   2. docker compose -f docker-compose.tls.yml up -d
 #
 # Resultado:
@@ -18,10 +18,10 @@ services:
     container_name: astra-server
     restart: unless-stopped
     # Corre como tu usuario del host para que ./data quede accesible desde el SO.
-    # Cambiá con: PUID=$(id -u) PGID=$(id -g) docker compose -f docker-compose.tls.yml up -d
+    # Cambia con: PUID=$(id -u) PGID=$(id -g) docker compose -f docker-compose.tls.yml up -d
     user: "${PUID:-1000}:${PGID:-1000}"
     # 5009 se publica para que los clientes Ares se conecten directo.
-    # La superficie web NO se publica acá: entra por Caddy (abajo).
+    # La superficie web NO se publica aquí: entra por Caddy (abajo).
     ports:
       - "5009:5009"       # TCP clientes Ares
       - "5009:5009/udp"   # UDP room search
