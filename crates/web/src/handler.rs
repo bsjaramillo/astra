@@ -164,8 +164,7 @@ pub async fn handle_connection(
     }
 
     // Broadcast del JOIN a usuarios Ares
-    let join_pkt = outbound::build_join_or_userlist(&user);
-    broadcast_to_room(&ctx, &user, join_pkt);
+    broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
 
     // Greet de bienvenida (PM del bot al usuario WS que entra)
     send_greet_ws(&ctx, &user, &ws_text_tx);
@@ -249,8 +248,7 @@ pub async fn handle_connection(
 
     if !ghost {
         // Broadcast del PART
-        let part_pkt = outbound::build_part(&user);
-        broadcast_to_room(&ctx, &user, part_pkt);
+        broadcast_to_room(&ctx, &user, |c| outbound::build_part_c(&user, c));
     } else {
         info!(
             "ghost departure: id={} '{}' (sesión nueva con ese nick o ya hijackeado) — sin PART",
@@ -835,8 +833,7 @@ fn handle_ws_public(
         from: name.clone(),
         text: text.to_string(),
     });
-    let pkt = outbound::build_public(&name, text);
-    broadcast_to_room(ctx, user, pkt);
+    broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, text, c));
     ctx.record_message(&name, text, false);
 }
 
@@ -1324,7 +1321,13 @@ fn filter_remove_user_ws(ctx: &AppContext, user: &Arc<AresUser>) {
     ctx.stats.on_user_part();
     for u in ctx.user_pool.users() {
         if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = u.send(part_pkt.clone());
+            // Cifrar por destinatario: un cliente Ares con crypto descarta
+            // en silencio el paquete plano.
+            if u.ares_crypto.is_some() {
+                let _ = u.send(outbound::build_part_c(user, u.ares_crypto));
+            } else {
+                let _ = u.send(part_pkt.clone());
+            }
         }
     }
 }
@@ -1358,29 +1361,44 @@ fn handle_ws_emote(
         from: name.clone(),
         text: text.to_string(),
     });
-    let pkt = outbound::build_emote(&name, text);
-    broadcast_to_room(ctx, user, pkt);
+    broadcast_to_room(ctx, user, |c| outbound::build_emote_c(&name, text, c));
     ctx.record_message(&name, text, true);
 }
 
 /// Broadcast a todos los usuarios en la misma vroom que `sender`.
 /// Para usuarios WS, traduce el binario a texto usando `ws_text_sender`.
-fn broadcast_to_room(ctx: &AppContext, sender: &AresUser, pkt: Bytes) {
+///
+/// `build` construye el paquete binario para un destinatario dado su `crypto`
+/// (`None` = plano). Se llama una vez con `None` (paquete compartido para los
+/// WS y para los clientes Ares sin cifrar) y una vez por cada cliente Ares que
+/// negoció cifrado — si no, ese cliente (cb0t manda `crypto = 250` por
+/// defecto) recibe strings en claro donde espera `u16 len + AES`, falla al
+/// parsear y descarta el paquete en silencio: no ve entrar/salir a nadie de
+/// la web ni lo que escriben. Misma firma que el `broadcast_to_room` del path
+/// TCP nativo.
+fn broadcast_to_room<F>(ctx: &AppContext, sender: &AresUser, build: F)
+where
+    F: Fn(outbound::Crypto) -> Bytes,
+{
     let vroom = *sender.vroom.read();
+    let plain = build(None);
     let users = ctx.user_pool.users();
     for u in users {
         if u.logged_in && *u.vroom.read() == vroom && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             if u.web_client {
                 // WS user: traducir a texto y enviar por ws_text_sender
-                if let Some(text) = translate_broadcast(&pkt, sender, &u) {
+                if let Some(text) = translate_broadcast(&plain, sender, &u) {
                     if let Some(tx) = &u.ws_text_sender {
                         let _ = tx.send(text);
                     }
                 }
                 // No enviar por el canal binario (sería basura para el WS)
+            } else if let Some(crypto) = u.ares_crypto {
+                // Cliente Ares cifrado: reconstruir con su key.
+                let _ = u.send(build(Some(crypto)));
             } else {
-                // TCP user: enviar binario
-                let _ = u.send(pkt.clone());
+                // Cliente Ares sin cifrar: el paquete plano compartido.
+                let _ = u.send(plain.clone());
             }
         }
     }

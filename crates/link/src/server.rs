@@ -227,7 +227,8 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
         b.write_u8(user.sex);
         b.write_u8(user.country);
         b.write_string(&user.region);
-        b.write_u8(*user.level.read() as u8);
+        // El protocolo Link es de sb0t: el nivel viaja en la escala Ares (0..3).
+        b.write_u8(server_core::outbound::ares_level(*user.level.read() as u8));
         b.write_u16(*user.vroom.read());
         b.write_u8(1); // custom_client (simplificado)
         b.write_u8(u8::from(
@@ -344,10 +345,8 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     LinkMsg::LeafPing => {}
                     LinkMsg::NickChanged => {
                         if let Some((old_name, user)) = parse_link_nick_changed_payload(&payload, crypto) {
-                            let part_pkt = build_server_part_for_name(&old_name);
-                            let join_pkt = build_server_join_from_link_user(&user);
-                            broadcast_to_local_users(&app, part_pkt);
-                            broadcast_to_local_users(&app, join_pkt);
+                            broadcast_to_local_users(&app, |c| build_server_part_for_name(&old_name, c));
+                            broadcast_to_local_users(&app, |c| build_server_join_from_link_user(&user, c));
                             app.publish_link_event(LinkEvent::NickChanged {
                                 origin: Some(leaf_name.clone()),
                                 old_name,
@@ -360,10 +359,8 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     }
                     LinkMsg::VroomChanged => {
                         if let Some(user) = parse_link_user_item(&payload, crypto) {
-                            let part_pkt = build_server_part_for_name(&user.name);
-                            let join_pkt = build_server_join_from_link_user(&user);
-                            broadcast_to_local_users(&app, part_pkt);
-                            broadcast_to_local_users(&app, join_pkt);
+                            broadcast_to_local_users(&app, |c| build_server_part_for_name(&user.name, c));
+                            broadcast_to_local_users(&app, |c| build_server_join_from_link_user(&user, c));
                             app.publish_link_event(LinkEvent::VroomChanged {
                                 origin: Some(leaf_name.clone()),
                                 user: snapshot_from_link_user(&user),
@@ -375,8 +372,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     }
                     LinkMsg::Part => {
                         if let Some(name) = parse_link_part_name(&payload, crypto) {
-                            let part_pkt = build_server_part_for_name(&name);
-                            broadcast_to_local_users(&app, part_pkt);
+                            broadcast_to_local_users(&app, |c| build_server_part_for_name(&name, c));
                             app.publish_link_event(LinkEvent::Part {
                                 origin: Some(leaf_name.clone()),
                                 name: name.clone(),
@@ -388,8 +384,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     }
                     LinkMsg::LeafJoin => {
                         if let Some(user) = parse_link_user_item(&payload, crypto) {
-                            let join_pkt = build_server_join_from_link_user(&user);
-                            broadcast_to_local_users(&app, join_pkt);
+                            broadcast_to_local_users(&app, |c| build_server_join_from_link_user(&user, c));
                             app.publish_link_event(LinkEvent::Join {
                                 origin: Some(leaf_name.clone()),
                                 user: snapshot_from_link_user(&user),
@@ -401,8 +396,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     }
                     LinkMsg::UserUpdated => {
                         if let Some(user) = parse_link_user_item(&payload, crypto) {
-                            let join_pkt = build_server_join_from_link_user(&user);
-                            broadcast_to_local_users(&app, join_pkt);
+                            broadcast_to_local_users(&app, |c| build_server_join_from_link_user(&user, c));
                             app.publish_link_event(LinkEvent::UserUpdated {
                                 origin: Some(leaf_name.clone()),
                                 user: snapshot_from_link_user(&user),
@@ -434,8 +428,9 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     }
                     LinkMsg::PublicText => {
                         if let Some((from, text)) = parse_link_chat_payload(&payload, crypto) {
-                            let pkt = server_core::outbound::build_public(&from, &text);
-                            broadcast_to_local_users(&app, pkt);
+                            broadcast_to_local_users(&app, |c| {
+                                server_core::outbound::build_public_c(&from, &text, c)
+                            });
                             app.publish_link_event(LinkEvent::Public {
                                 origin: Some(leaf_name.clone()),
                                 from,
@@ -447,8 +442,9 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     }
                     LinkMsg::EmoteText => {
                         if let Some((from, text)) = parse_link_chat_payload(&payload, crypto) {
-                            let pkt = server_core::outbound::build_emote(&from, &text);
-                            broadcast_to_local_users(&app, pkt);
+                            broadcast_to_local_users(&app, |c| {
+                                server_core::outbound::build_emote_c(&from, &text, c)
+                            });
                             app.publish_link_event(LinkEvent::Emote {
                                 origin: Some(leaf_name.clone()),
                                 from,
@@ -473,7 +469,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                                         to,
                                     });
                                 } else {
-                                    let _ = target.send(server_core::outbound::build_pvt(&from, &text));
+                                    let _ = target.send_pvt(&from, &text);
                                     app.publish_link_event(LinkEvent::Private {
                                         origin: Some(leaf_name.clone()),
                                         from,
@@ -496,7 +492,10 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     LinkMsg::PrivateIgnored => {
                         if let Some((from, to)) = parse_link_private_ignored_payload(&payload, crypto) {
                             if let Some(local_from) = app.user_pool.get_by_name(&from) {
-                                let mut w = PacketWriter::with_msg(TcpMsg::ServerIsIgnoringYou);
+                                let mut w = PacketWriter::with_msg_crypto(
+                                    TcpMsg::ServerIsIgnoringYou,
+                                    local_from.ares_crypto,
+                                );
                                 w.write_string(&to).ok();
                                 let _ = local_from.send(Bytes::copy_from_slice(w.as_bytes()));
                             }
@@ -512,7 +511,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     LinkMsg::PublicToUser => {
                         if let Some((from, to, text)) = parse_link_private_payload(&payload, crypto) {
                             if let Some(target) = app.user_pool.get_by_name(&to) {
-                                let _ = target.send(server_core::outbound::build_public(&from, &text));
+                                let _ = target.send_public(&from, &text);
                             }
                             app.publish_link_event(LinkEvent::PublicToUser {
                                 origin: Some(leaf_name.clone()),
@@ -527,7 +526,7 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     LinkMsg::EmoteToUser => {
                         if let Some((from, to, text)) = parse_link_private_payload(&payload, crypto) {
                             if let Some(target) = app.user_pool.get_by_name(&to) {
-                                let _ = target.send(server_core::outbound::build_emote(&from, &text));
+                                let _ = target.send_emote(&from, &text);
                             }
                             app.publish_link_event(LinkEvent::EmoteToUser {
                                 origin: Some(leaf_name.clone()),
@@ -541,10 +540,12 @@ async fn handle_leaf_connection(app: Arc<AppContext>, mut stream: TcpStream) -> 
                     }
                     LinkMsg::PersonalMessage => {
                         if let Some((name, text)) = parse_link_chat_payload(&payload, crypto) {
-                            let mut w = PacketWriter::with_msg(TcpMsg::PersonalMessage);
-                            w.write_string(&name).ok();
-                            w.write_string(&text).ok();
-                            broadcast_to_local_users(&app, Bytes::copy_from_slice(w.as_bytes()));
+                            broadcast_to_local_users(&app, |c| {
+                                let mut w = PacketWriter::with_msg_crypto(TcpMsg::PersonalMessage, c);
+                                w.write_string(&name).ok();
+                                w.write_string(&text).ok();
+                                Bytes::copy_from_slice(w.as_bytes())
+                            });
                             app.publish_link_event(LinkEvent::PersonalMessage {
                                 origin: Some(leaf_name.clone()),
                                 name,
@@ -612,7 +613,7 @@ fn parse_link_user_item(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<Li
     let sex = r.read_u8().ok()?;
     let country = r.read_u8().ok()?;
     let region = r.read_string().ok()?;
-    let level = r.read_u8().ok()?;
+    let level = server_core::outbound::ares_level_from_wire(r.read_u8().ok()?);
     let vroom = r.read_u16().ok()?;
     let custom_client = r.read_u8().ok()? != 0;
     let muzzled = r.read_u8().ok()? != 0;
@@ -952,8 +953,11 @@ fn build_private_ignored_payload(from: &str, to: &str, crypto: Option<LinkCrypto
     b.build_link_packet(LinkMsg::PrivateIgnored)[3..].to_vec()
 }
 
-fn build_server_join_from_link_user(user: &LinkUser) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerJoin);
+fn build_server_join_from_link_user(
+    user: &LinkUser,
+    crypto: server_core::outbound::Crypto,
+) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerJoin, crypto);
     w.write_u16_le(user.file_count).ok();
     w.write_u32_le(0).ok(); // reservado
     write_ip(&mut w, user.external_ip);
@@ -964,6 +968,7 @@ fn build_server_join_from_link_user(user: &LinkUser) -> Bytes {
     w.write_string(&user.name).ok();
     write_ip(&mut w, user.local_ip);
     w.write_u8(user.browsable as u8).ok();
+    // `LinkUser.level` ya está normalizado a la escala Ares al parsearlo.
     w.write_u8(user.level).ok();
     w.write_u8(user.age).ok();
     w.write_u8(user.sex).ok();
@@ -973,8 +978,8 @@ fn build_server_join_from_link_user(user: &LinkUser) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
-fn build_server_part_for_name(name: &str) -> Bytes {
-    let mut w = PacketWriter::with_msg(TcpMsg::ServerPart);
+fn build_server_part_for_name(name: &str, crypto: server_core::outbound::Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerPart, crypto);
     w.write_string(name).ok();
     Bytes::copy_from_slice(w.as_bytes())
 }
@@ -990,10 +995,23 @@ fn write_ip(w: &mut PacketWriter, ip: IpAddr) {
     }
 }
 
-fn broadcast_to_local_users(app: &AppContext, pkt: Bytes) {
+/// Difunde un paquete a los usuarios locales, cifrando por destinatario.
+///
+/// `build` se llama con `None` (paquete plano compartido) y una vez por cada
+/// cliente Ares que negoció cifrado: mandarle el plano hace que lo descarte
+/// en silencio (no vería a los usuarios ni el chat del leaf enlazado).
+fn broadcast_to_local_users<F>(app: &AppContext, build: F)
+where
+    F: Fn(server_core::outbound::Crypto) -> Bytes,
+{
+    let plain = build(None);
     for user in app.user_pool.users() {
         if user.logged_in && !user.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = user.send(pkt.clone());
+            if user.ares_crypto.is_some() {
+                let _ = user.send(build(user.ares_crypto));
+            } else {
+                let _ = user.send(plain.clone());
+            }
         }
     }
 }

@@ -27,7 +27,7 @@ use tracing::{debug, info};
 const IMAGE: &str = "bsjaramillo/astra";
 /// Intervalo entre chequeos. El registry es anónimo y barato; 6 h alcanza
 /// para enterarse el mismo día sin hacer ruido.
-const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const INTERVAL: Duration = Duration::from_secs(1 * 60 * 60);
 
 /// Loop del chequeo. Se spawnea desde `main` si `update_check` está activo.
 /// El primer chequeo corre al arrancar; los errores de red se loguean a

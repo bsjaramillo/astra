@@ -1092,8 +1092,16 @@ fn build_custom_font_wrapped(
 /// Construye un paquete de voice chat envuelto en ADVANCED_FEATURES:
 /// `[250][innerSize:u16][inner_op][sender\0][voice]` (el framing externo lo
 /// agrega la writer task).
-fn build_vc_wrapped(inner_op: TcpMsg, sender: &str, voice: &[u8]) -> Bytes {
-    let mut inner = PacketWriter::with_msg(inner_op);
+fn build_vc_wrapped(
+    inner_op: TcpMsg,
+    sender: &str,
+    voice: &[u8],
+    crypto: Option<proto_ares::AresCrypto>,
+) -> Bytes {
+    // El nombre del emisor va cifrado con la key del DESTINATARIO: cb0t lo
+    // lee con `ReadString(this.crypto)` (`Eval_VC_Chunk`), así que en claro
+    // no puede parsearlo y descarta la voz entera.
+    let mut inner = PacketWriter::with_msg_crypto(inner_op, crypto);
     inner.write_string_nt(sender).ok();
     inner.write_bytes(voice).ok();
     let inner_bytes = inner.into_bytes(); // [inner_op][sender\0][voice]
@@ -1121,7 +1129,7 @@ fn vc_relay_public(
             && u.voice_chat_public
             && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
         {
-            let _ = u.send(build_vc_wrapped(op, sender_name, voice));
+            let _ = u.send(build_vc_wrapped(op, sender_name, voice, u.ares_crypto));
         }
     }
 }
@@ -1145,7 +1153,7 @@ fn vc_relay_private(
         if target.voice_chat_private
             && !target.quarantined.load(std::sync::atomic::Ordering::Relaxed)
         {
-            let _ = target.send(build_vc_wrapped(op, sender_name, voice));
+            let _ = target.send(build_vc_wrapped(op, sender_name, voice, target.ares_crypto));
         }
     }
 }

@@ -858,10 +858,12 @@ impl AppContext {
     where
         F: Fn(&crate::user_pool::AresUser) -> bool,
     {
-        let pkt = crate::outbound::build_pvt(&self.settings.bot_name, text);
         for u in self.user_pool.users() {
             if u.logged_in && select(&u) {
-                let _ = u.send(pkt.clone());
+                // `send_pvt` cifra por destinatario (y traduce a texto para
+                // los clientes web): un cliente Ares con crypto descarta en
+                // silencio un paquete construido en claro.
+                let _ = u.send_pvt(&self.settings.bot_name, text);
             }
         }
     }

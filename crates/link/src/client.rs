@@ -248,7 +248,8 @@ fn build_leaf_join_payload(user: &server_core::user_pool::AresUser, crypto: Opti
     b.write_u8(user.sex);
     b.write_u8(user.country);
     b.write_string(&user.region);
-    b.write_u8(*user.level.read() as u8);
+    // El protocolo Link es de sb0t: el nivel viaja en la escala Ares (0..3).
+    b.write_u8(server_core::outbound::ares_level(*user.level.read() as u8));
     b.write_u16(*user.vroom.read());
     b.write_u8(u8::from(user.custom_client));
     b.write_u8(u8::from(
@@ -300,7 +301,7 @@ fn parse_userlist_item(payload: &[u8], crypto: Option<LinkCrypto>) -> Option<Lin
     let sex = r.read_u8().ok()?;
     let country = r.read_u8().ok()?;
     let region = r.read_string().ok()?;
-    let level = r.read_u8().ok()?;
+    let level = server_core::outbound::ares_level_from_wire(r.read_u8().ok()?);
     let vroom = r.read_u16().ok()?;
     let custom_client = r.read_u8().ok()? != 0;
     let muzzled = r.read_u8().ok()? != 0;
@@ -348,7 +349,7 @@ fn handle_incoming_link_message(
         LinkMsg::LeafJoin => {
             if let Some(user) = parse_userlist_item(payload, crypto) {
                 client.peer_users.lock().push(user.clone());
-                broadcast_to_local_users(app, build_server_join_from_link_user(&user));
+                broadcast_to_local_users(app, |c| build_server_join_from_link_user(&user, c));
                 true
             } else {
                 false
@@ -361,8 +362,8 @@ fn handle_incoming_link_message(
                     peer_users.retain(|item| !item.name.eq_ignore_ascii_case(&old_name));
                     peer_users.push(user.clone());
                 }
-                broadcast_to_local_users(app, build_server_part_for_name(&old_name));
-                broadcast_to_local_users(app, build_server_join_from_link_user(&user));
+                broadcast_to_local_users(app, |c| build_server_part_for_name(&old_name, c));
+                broadcast_to_local_users(app, |c| build_server_join_from_link_user(&user, c));
                 true
             } else {
                 false
@@ -375,8 +376,8 @@ fn handle_incoming_link_message(
                     peer_users.retain(|item| !item.name.eq_ignore_ascii_case(&user.name));
                     peer_users.push(user.clone());
                 }
-                broadcast_to_local_users(app, build_server_part_for_name(&user.name));
-                broadcast_to_local_users(app, build_server_join_from_link_user(&user));
+                broadcast_to_local_users(app, |c| build_server_part_for_name(&user.name, c));
+                broadcast_to_local_users(app, |c| build_server_join_from_link_user(&user, c));
                 true
             } else {
                 false
@@ -403,7 +404,7 @@ fn handle_incoming_link_message(
                         peer_users.push(user.clone());
                     }
                 }
-                broadcast_to_local_users(app, build_server_join_from_link_user(&user));
+                broadcast_to_local_users(app, |c| build_server_join_from_link_user(&user, c));
                 true
             } else {
                 false
@@ -412,7 +413,7 @@ fn handle_incoming_link_message(
         LinkMsg::Part => {
             if let Some(name) = parse_link_part_name(payload, crypto) {
                 client.peer_users.lock().retain(|user| !user.name.eq_ignore_ascii_case(&name));
-                broadcast_to_local_users(app, build_server_part_for_name(&name));
+                broadcast_to_local_users(app, |c| build_server_part_for_name(&name, c));
                 true
             } else {
                 false
@@ -501,10 +502,15 @@ fn handle_incoming_link_message(
             match (r.read_u8(), r.read_string_no_null()) {
                 (Ok(level), Ok(text)) => {
                     // sb0t HubPrintLevel: usuarios con Level > level (estricto).
+                    // El nivel del wire está en la escala Ares (0..3), así que
+                    // el local hay que traducirlo antes de comparar — si no,
+                    // se comparan escalas distintas y cualquier Moderator de
+                    // Astra (50) supera a un Host (3) del peer.
+                    let level = server_core::outbound::ares_level_from_wire(level);
                     let bot = app.settings.bot_name.clone();
                     for u in app.user_pool.users() {
                         if u.logged_in
-                            && (*u.level.read() as u8) > level
+                            && server_core::outbound::ares_level(*u.level.read() as u8) > level
                             && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
                         {
                             let _ = u.print(&bot, &text);
@@ -567,7 +573,7 @@ fn handle_incoming_link_message(
                             to,
                         });
                     } else {
-                        let _ = target.send(server_core::outbound::build_pvt(&from, &text));
+                        let _ = target.send_pvt(&from, &text);
                     }
                 }
                 true
@@ -578,7 +584,10 @@ fn handle_incoming_link_message(
         LinkMsg::PrivateIgnored => {
             if let Some((from, to)) = parse_link_private_ignored_payload(payload, crypto) {
                 if let Some(local_from) = app.user_pool.get_by_name(&from) {
-                    let mut w = proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::ServerIsIgnoringYou);
+                    let mut w = proto_ares::PacketWriter::with_msg_crypto(
+                        proto_ares::TcpMsg::ServerIsIgnoringYou,
+                        local_from.ares_crypto,
+                    );
                     w.write_string(&to).ok();
                     let _ = local_from.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
                 }
@@ -590,7 +599,7 @@ fn handle_incoming_link_message(
         LinkMsg::PublicToUser => {
             if let Some((from, to, text)) = parse_link_private_payload(payload, crypto) {
                 if let Some(target) = app.user_pool.get_by_name(&to) {
-                    let _ = target.send(server_core::outbound::build_public(&from, &text));
+                    let _ = target.send_public(&from, &text);
                 }
                 true
             } else {
@@ -600,7 +609,7 @@ fn handle_incoming_link_message(
         LinkMsg::EmoteToUser => {
             if let Some((from, to, text)) = parse_link_private_payload(payload, crypto) {
                 if let Some(target) = app.user_pool.get_by_name(&to) {
-                    let _ = target.send(server_core::outbound::build_emote(&from, &text));
+                    let _ = target.send_emote(&from, &text);
                 }
                 true
             } else {
@@ -609,10 +618,15 @@ fn handle_incoming_link_message(
         }
         LinkMsg::PersonalMessage => {
             if let Some((name, text)) = parse_link_chat_payload(payload, crypto) {
-                let mut w = proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::PersonalMessage);
-                w.write_string(&name).ok();
-                w.write_string(&text).ok();
-                broadcast_to_local_users(app, bytes::Bytes::copy_from_slice(w.as_bytes()));
+                broadcast_to_local_users(app, |c| {
+                    let mut w = proto_ares::PacketWriter::with_msg_crypto(
+                        proto_ares::TcpMsg::PersonalMessage,
+                        c,
+                    );
+                    w.write_string(&name).ok();
+                    w.write_string(&text).ok();
+                    bytes::Bytes::copy_from_slice(w.as_bytes())
+                });
                 true
             } else {
                 false
@@ -878,8 +892,11 @@ fn parse_link_custom_name_payload(payload: &[u8], crypto: Option<LinkCrypto>) ->
     Some((name, custom_name))
 }
 
-fn build_server_join_from_link_user(user: &LinkUser) -> bytes::Bytes {
-    let mut w = proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::ServerJoin);
+fn build_server_join_from_link_user(
+    user: &LinkUser,
+    crypto: server_core::outbound::Crypto,
+) -> bytes::Bytes {
+    let mut w = proto_ares::PacketWriter::with_msg_crypto(proto_ares::TcpMsg::ServerJoin, crypto);
     w.write_u16_le(user.file_count).ok();
     w.write_u32_le(0).ok();
     write_ip(&mut w, user.external_ip);
@@ -890,6 +907,7 @@ fn build_server_join_from_link_user(user: &LinkUser) -> bytes::Bytes {
     w.write_string(&user.name).ok();
     write_ip(&mut w, user.local_ip);
     w.write_u8(user.browsable as u8).ok();
+    // `LinkUser.level` ya está normalizado a la escala Ares al parsearlo.
     w.write_u8(user.level).ok();
     w.write_u8(user.age).ok();
     w.write_u8(user.sex).ok();
@@ -899,8 +917,11 @@ fn build_server_join_from_link_user(user: &LinkUser) -> bytes::Bytes {
     bytes::Bytes::copy_from_slice(w.as_bytes())
 }
 
-fn build_server_part_for_name(name: &str) -> bytes::Bytes {
-    let mut w = proto_ares::PacketWriter::with_msg(proto_ares::TcpMsg::ServerPart);
+fn build_server_part_for_name(
+    name: &str,
+    crypto: server_core::outbound::Crypto,
+) -> bytes::Bytes {
+    let mut w = proto_ares::PacketWriter::with_msg_crypto(proto_ares::TcpMsg::ServerPart, crypto);
     w.write_string(name).ok();
     bytes::Bytes::copy_from_slice(w.as_bytes())
 }
@@ -986,10 +1007,23 @@ fn send_scribble_custom_data(u: &server_core::user_pool::AresUser, sender: &str,
     }
 }
 
-fn broadcast_to_local_users(app: &AppContext, pkt: bytes::Bytes) {
+/// Difunde un paquete a los usuarios locales, cifrando por destinatario.
+///
+/// `build` se llama con `None` (paquete plano compartido) y una vez por cada
+/// cliente Ares que negoció cifrado: mandarle el plano hace que lo descarte
+/// en silencio (no vería a los usuarios ni el chat del otro server enlazado).
+fn broadcast_to_local_users<F>(app: &AppContext, build: F)
+where
+    F: Fn(server_core::outbound::Crypto) -> bytes::Bytes,
+{
+    let plain = build(None);
     for user in app.user_pool.users() {
         if user.logged_in && !user.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = user.send(pkt.clone());
+            if user.ares_crypto.is_some() {
+                let _ = user.send(build(user.ares_crypto));
+            } else {
+                let _ = user.send(plain.clone());
+            }
         }
     }
 }

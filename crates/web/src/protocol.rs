@@ -214,7 +214,7 @@ fn userinfo_like(
     inbizier_mobile: bool,
 ) -> String {
     let id_str = id.to_string();
-    let level_str = level.to_string();
+    let level_str = server_core::outbound::ares_level(level).to_string();
     let web = if inbizier_web { "1" } else { "0" };
     let mobile = if inbizier_mobile { "1" } else { "0" };
     // lens: name,pmsg,avatar,id,LEVEL,1,1 ; vals: name+pmsg+avatar+id+level+web+mobile
@@ -244,8 +244,14 @@ fn userinfo_like(
 /// `USERLIST:{nameLen},{levelLen}:{name}{level}` — item de userlist simple
 /// (no inbizier). La longitud del nivel debe ser la real (ver nota en
 /// `userinfo_like`): niveles de 2-3 dígitos con largo 1 desalinean el parseo.
+///
+/// `level` entra en la escala interna de Astra y sale en la del protocolo
+/// (0..3, ver [`server_core::outbound::ares_level`]): es la que manda sb0t
+/// (`WebOutbound.UserlistItemTo` escribe `(byte)level` con largo 1) y la que
+/// esperan los clientes reales — inbizio colorea a los staff por 1/2/3, así
+/// que con la escala de Astra un owner no se distinguía de un usuario normal.
 pub fn build_userlist_item(name: &str, level: u8) -> String {
-    let level_str = level.to_string();
+    let level_str = server_core::outbound::ares_level(level).to_string();
     format!("USERLIST:{},{}:{}{}", clen(name), clen(&level_str), name, level_str)
 }
 
@@ -298,8 +304,9 @@ pub fn build_pm(name: &str, text: &str) -> String {
 
 /// `UPDATE:{nameLen},{levelLen}:{name}{level}` — cambio de nivel de un usuario.
 /// La longitud del nivel debe ser la real (ver nota en `userinfo_like`).
+/// `level` se traduce a la escala del protocolo (ver [`build_userlist_item`]).
 pub fn build_update(name: &str, level: u8) -> String {
-    let level_str = level.to_string();
+    let level_str = server_core::outbound::ares_level(level).to_string();
     format!("UPDATE:{},{}:{}{}", clen(name), clen(&level_str), name, level_str)
 }
 
@@ -586,14 +593,16 @@ mod tests {
     #[test]
     fn build_userinfo_shape() {
         // USERINFO:name,pmsg,av,id,LEVEL,1,1:{name}{pmsg}{av}{id}{level}{web}{mobile}
-        // El largo del nivel es el REAL (100 → 3 chars), no 1 hardcodeado.
+        // El largo del nivel es el REAL, no 1 hardcodeado (el id sí puede
+        // tener varios dígitos). Owner (100 en Astra) sale como 3 (Host).
         let s = build_userinfo("Ann", "", "", 7, 100, true, false);
-        assert_eq!(s, "USERINFO:3,0,0,1,3,1,1:Ann710010");
+        assert_eq!(s, "USERINFO:3,0,0,1,1,1,1:Ann7310");
     }
 
     #[test]
     fn build_userlist_item_simple() {
-        assert_eq!(build_userlist_item("Cy", 50), "USERLIST:2,2:Cy50");
+        // Moderator (50 en Astra) sale como 1 (Moderator en la escala Ares).
+        assert_eq!(build_userlist_item("Cy", 50), "USERLIST:2,1:Cy1");
     }
 
     #[test]
@@ -650,14 +659,15 @@ mod tests {
         let name = "luna💖";
         let s = build_userinfo(name, "", "", 1, 100, false, true);
         // "luna" (4) + 💖 (2 utf16 units) = 6
-        assert!(s.starts_with(&format!("USERINFO:6,0,0,1,3,1,1:{}", name)));
+        assert!(s.starts_with(&format!("USERINFO:6,0,0,1,1,1,1:{}", name)));
     }
 
     #[test]
     fn level_is_decimal_byte() {
-        // level 100 → "100", concatenado tras el id.
+        // El nivel va como decimal concatenado tras el id.
+        // El nivel sale traducido a la escala Ares: System (255) → 3 (Host).
         let s = build_userinfo("X", "", "", 0, 255, false, true);
-        assert_eq!(s, "USERINFO:1,0,0,1,3,1,1:X025501");
+        assert_eq!(s, "USERINFO:1,0,0,1,1,1,1:X0301");
     }
 
     #[test]

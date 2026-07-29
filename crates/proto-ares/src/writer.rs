@@ -192,12 +192,16 @@ impl PacketWriter {
         self.write_bytes(&ip.octets())
     }
 
-    /// Escribe una `IpAddr` (siempre como IPv4 si es V4, o como V6 16 bytes si es V6).
+    /// Escribe una `IpAddr` en un campo IP del protocolo Ares, que **siempre
+    /// mide 4 bytes**. Una IPv6 se degrada a su IPv4 embebida (`::ffff:a.b.c.d`)
+    /// o a `0.0.0.0`: escribir 16 octetos desalinearía el resto del paquete y
+    /// el cliente lo descartaría entero.
     pub fn write_ip(&mut self, ip: IpAddr) -> WriteResult<&mut Self> {
-        match ip {
-            IpAddr::V4(v4) => self.write_ipv4(v4),
-            IpAddr::V6(v6) => self.write_bytes(&v6.octets()),
-        }
+        let v4 = match ip {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().unwrap_or(Ipv4Addr::UNSPECIFIED),
+        };
+        self.write_ipv4(v4)
     }
 }
 

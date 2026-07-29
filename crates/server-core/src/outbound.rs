@@ -210,17 +210,49 @@ pub fn build_userlist_item_c(user: &AresUser, crypto: Crypto) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
-/// Convierte un ILevel a su valor numérico (u8).
-fn level_to_u8(level: &crate::types::ILevel) -> u8 {
+/// Traduce un nivel de la escala interna de Astra (`ILevel`: 0/1/2/50/80/100/255)
+/// a la del **protocolo Ares**, que es la de `iconnect/ILevel.cs` de sb0t y la
+/// única que entienden los clientes nativos:
+///
+/// ```text
+/// 0 = Regular   1 = Moderator   2 = Administrator   3 = Host
+/// ```
+///
+/// Sin esta traducción, cb0t interpreta a un usuario Regular de Astra (1) como
+/// **Moderator**, y a un Owner (100) como un nivel desconocido: nunca cumple
+/// `MyLevel == 3`, así que el dueño de la sala no ve su propio menú de host.
+/// `Voice` no existe en Ares y baja a Regular (sigue sin ser staff).
+///
+/// Solo aplica a los paquetes binarios Ares. El protocolo de texto ib0t (web)
+/// usa la escala de Astra tal cual y no pasa por aquí.
+pub fn ares_level(level: u8) -> u8 {
     match level {
-        crate::types::ILevel::Anonymous => 0,
-        crate::types::ILevel::Regular => 1,
-        crate::types::ILevel::Voice => 2,
-        crate::types::ILevel::Moderator => 50,
-        crate::types::ILevel::Admin => 80,
-        crate::types::ILevel::Owner => 100,
-        crate::types::ILevel::System => 255,
+        l if l >= crate::types::ILevel::Owner as u8 => 3,
+        l if l >= crate::types::ILevel::Admin as u8 => 2,
+        l if l >= crate::types::ILevel::Moderator as u8 => 1,
+        _ => 0,
     }
+}
+
+/// Normaliza un nivel que llega **desde el wire** (protocolo Link) a la escala
+/// Ares 0..3.
+///
+/// El protocolo Link es de sb0t, así que un peer sb0t manda 0..3 y hay que
+/// tomarlo tal cual. Un Astra anterior a este cambio mandaba su escala interna
+/// (50/80/100): como esos valores no existen en la escala Ares, se pueden
+/// distinguir sin ambigüedad y se traducen. Así el link interopera con sb0t y
+/// con Astras de cualquier versión.
+pub fn ares_level_from_wire(level: u8) -> u8 {
+    if level <= 3 {
+        level
+    } else {
+        ares_level(level)
+    }
+}
+
+/// Convierte un ILevel al nivel del protocolo Ares (ver [`ares_level`]).
+fn level_to_u8(level: &crate::types::ILevel) -> u8 {
+    ares_level(*level as u8)
 }
 
 /// Construye el "bot" que aparece en la lista de usuarios (línea fantasma).
@@ -418,11 +450,18 @@ fn truncate_message(text: &str, max_chars: usize) -> String {
 }
 
 /// Helper para escribir una IP (maneja V4 y V6).
+/// Escribe una IP en un campo del protocolo Ares, que es **siempre de 4
+/// bytes**. Una IPv6 (posible cuando un proxy confiable reporta la IP real
+/// del cliente vía `X-Forwarded-For`) se degrada a su IPv4 embebida, o a
+/// `0.0.0.0` si no la tiene: escribir los 16 octetos desalinearía el resto
+/// del paquete y el cliente Ares lo descartaría entero (el usuario no
+/// aparecería en la userlist de nadie).
 fn write_ip(w: &mut PacketWriter, ip: &IpAddr) {
-    match ip {
-        IpAddr::V4(v4) => w.write_ipv4(*v4).ok(),
-        IpAddr::V6(v6) => w.write_bytes(&v6.octets()).ok(),
+    let v4 = match ip {
+        IpAddr::V4(v4) => *v4,
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().unwrap_or(Ipv4Addr::UNSPECIFIED),
     };
+    w.write_ipv4(v4).ok();
 }
 
 #[cfg(test)]
@@ -430,6 +469,37 @@ mod tests {
     use super::*;
     use crate::user_pool::AresUser;
     use std::net::Ipv4Addr;
+
+    /// La escala interna de Astra debe salir al wire como la de Ares (0..3):
+    /// un cliente nativo no entiende 50/80/100 y un Regular de Astra (1) se
+    /// vería como Moderator.
+    #[test]
+    fn ares_level_maps_astra_scale_to_ares_scale() {
+        use crate::types::ILevel;
+        assert_eq!(ares_level(ILevel::Anonymous as u8), 0);
+        assert_eq!(ares_level(ILevel::Regular as u8), 0);
+        assert_eq!(ares_level(ILevel::Voice as u8), 0);
+        assert_eq!(ares_level(ILevel::Moderator as u8), 1);
+        assert_eq!(ares_level(ILevel::Admin as u8), 2);
+        assert_eq!(ares_level(ILevel::Owner as u8), 3);
+        assert_eq!(ares_level(ILevel::System as u8), 3);
+    }
+
+    /// El wire del Link puede traer la escala Ares (peer sb0t, o Astra ya
+    /// actualizado) o la interna de Astra (peer Astra viejo). Los rangos no se
+    /// solapan, así que se distinguen sin ambigüedad.
+    #[test]
+    fn ares_level_from_wire_accepts_both_scales() {
+        // Escala Ares: se toma tal cual (un `1` de sb0t es Moderator, no Regular).
+        for l in 0..=3u8 {
+            assert_eq!(ares_level_from_wire(l), l);
+        }
+        // Escala Astra de un peer viejo: se traduce.
+        use crate::types::ILevel;
+        assert_eq!(ares_level_from_wire(ILevel::Moderator as u8), 1);
+        assert_eq!(ares_level_from_wire(ILevel::Admin as u8), 2);
+        assert_eq!(ares_level_from_wire(ILevel::Owner as u8), 3);
+    }
 
     fn make_test_user() -> std::sync::Arc<AresUser> {
         use tokio::sync::mpsc;
