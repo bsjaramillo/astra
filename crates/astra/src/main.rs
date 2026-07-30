@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Cargar configuración PRIMERO: necesitamos `data_dir` para saber dónde
     // escribir el archivo de log.
-    let mut settings = Settings::load_or_default(&cli.config);
+    let (mut settings, config_error) = Settings::load_reporting(&cli.config);
     if let Some(port) = cli.port {
         settings.port = port;
     }
@@ -154,13 +154,22 @@ async fn main() -> anyhow::Result<()> {
     //
     // No es cosmético: el `guid` es el secreto con el que un leaf se
     // autentica contra un hub. Compartido entre instalaciones no vale nada.
+    //
+    // Si el archivo existe pero no se pudo leer, se genera el guid en memoria
+    // pero NO se persiste: escribir ahí sustituiría la configuración del
+    // operador por los valores por defecto, que es justo lo que no se puede
+    // hacer cuando lo único que sabemos es que hay algo mal en su archivo.
     let generated_guid = if settings.has_real_guid() {
         None
     } else {
         settings.regenerate_guid();
-        match settings.save(&cli.config) {
-            Ok(()) => Some(Ok(())),
-            Err(e) => Some(Err(e)),
+        if config_error.is_some() {
+            None
+        } else {
+            match settings.save(&cli.config) {
+                Ok(()) => Some(Ok(())),
+                Err(e) => Some(Err(e)),
+            }
         }
     };
 
@@ -224,6 +233,19 @@ async fn main() -> anyhow::Result<()> {
     info!("║   Compatible con Ares Galaxy           ║");
     info!("╚════════════════════════════════════════╝");
     info!("logs → {}/astra.log (rotación diaria)", logs_dir.display());
+
+    // El archivo se leyó antes de que existiera el logging (hace falta
+    // `data_dir` para saber dónde escribir los logs), así que el aviso se da
+    // aquí. Va en ERROR y no en WARN a propósito: significa que el servidor
+    // está corriendo con una configuración que NO es la que el operador
+    // escribió, y eso incluye su contraseña de dueño y su puerto.
+    if let Some(err) = &config_error {
+        error!("{err}");
+        error!(
+            "ATENCIÓN: arrancando con la configuración POR DEFECTO. \
+             Tu archivo no se ha modificado; corrige el error y reinicia."
+        );
+    }
 
     // Subcomandos: se ejecutan y terminan sin levantar el server.
     if let Some(Command::SeedRefresh { url }) = &cli.command {

@@ -8,7 +8,15 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 /// Configuración principal de Astra.
+/// Configuración del servidor.
+///
+/// `#[serde(default)]` a nivel de struct: cualquier campo ausente toma su
+/// valor por defecto, que es lo que `astra.toml.example` promete y lo que
+/// espera quien escribe un toml mínimo con tres líneas. Sin esto, omitir una
+/// sola clave invalidaba el archivo entero y el servidor arrancaba con todo
+/// por defecto.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// Puerto TCP principal.
     pub port: u16,
@@ -261,20 +269,39 @@ impl Default for Settings {
 impl Settings {
     /// Carga la configuración desde un archivo TOML. Si no existe, usa defaults.
     pub fn load_or_default(path: &Path) -> Self {
+        Self::load_reporting(path).0
+    }
+
+    /// Como [`Self::load_or_default`], pero además dice si el archivo **existe
+    /// pero no se pudo leer**.
+    ///
+    /// Quien llama necesita distinguir ese caso de "no hay config todavía",
+    /// por dos motivos: el aviso hay que dárselo al operador cuando el logging
+    /// ya esté montado (aquí se emite demasiado pronto para que se vea), y
+    /// sobre todo **no se debe sobrescribir un archivo que no entendimos** —
+    /// si lo hiciéramos, un error de sintaxis borraría la configuración
+    /// entera del operador sin dejar rastro.
+    pub fn load_reporting(path: &Path) -> (Self, Option<String>) {
         if path.exists() {
             match std::fs::read_to_string(path) {
                 Ok(content) => match toml::from_str(&content) {
-                    Ok(s) => return s,
+                    Ok(s) => return (s, None),
                     Err(e) => {
-                        tracing::warn!("error parseando {}: {} - usando defaults", path.display(), e);
+                        return (
+                            Self::default(),
+                            Some(format!("error parseando {}: {e}", path.display())),
+                        )
                     }
                 },
                 Err(e) => {
-                    tracing::warn!("error leyendo {}: {} - usando defaults", path.display(), e);
+                    return (
+                        Self::default(),
+                        Some(format!("error leyendo {}: {e}", path.display())),
+                    )
                 }
             }
         }
-        Self::default()
+        (Self::default(), None)
     }
 
     /// Prefijo de los valores de `guid` que vinieron de fábrica (el default

@@ -111,9 +111,12 @@ guid = ""
 # --- Supabase (opcional, syncing de bans con un panel central) ------------
 
 # Si están configurados, Astra sincroniza bans con un backend Supabase.
-# Dejar ambos en null para operar 100% local.
-supabase_url = null
-supabase_key = null
+# Déjalos comentados para operar 100% local.
+#
+# OJO: TOML no tiene `null`. Escribir `supabase_url = null` invalida el
+# archivo ENTERO, no solo esa línea. Para desactivarlos, coméntalos.
+# supabase_url = "https://xxxx.supabase.co"
+# supabase_key = "clave-anon"
 
 # --- Seguridad (defensa en capas anti-DDoS) -------------------------------
 # Cada capa tiene sus propios límites. Los defaults son razonables para un
