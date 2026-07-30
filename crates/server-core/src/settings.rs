@@ -53,6 +53,10 @@ pub struct Settings {
     /// Configuración de seguridad.
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// Registro voluntario en el directorio público de salas.
+    #[serde(default)]
+    pub directory: DirectoryConfig,
     /// Leaves confiados para el Link Hub (paridad sb0t).
     ///
     /// Si la lista está vacía, el hub opera en modo legacy: acepta
@@ -237,6 +241,52 @@ impl Default for SecurityConfig {
     }
 }
 
+/// Publicación de la sala en el directorio público.
+///
+/// Es **opt-in**: por defecto no se manda nada. Publicar una sala es decisión
+/// de su dueño, y buena parte de este público está aquí precisamente por no
+/// figurar en ningún sitio.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DirectoryConfig {
+    /// Anunciar esta sala en el directorio.
+    pub enabled: bool,
+    /// Directorio al que anunciarse. Configurable para poder tener uno propio.
+    pub url: String,
+    /// Seguir apareciendo. En `false` se pide la baja sin dejar de mandar el
+    /// heartbeat, lo que permite volver a publicarla desde el panel.
+    pub listed: bool,
+    /// Descripción de la sala, en el listado y en la ficha.
+    pub description: String,
+    /// Etiquetas para el buscador del directorio (vocabulario cerrado).
+    pub tags: Vec<String>,
+    /// Web propia de la sala, si tiene.
+    pub website: String,
+    /// Dominio con el que anunciarse, si la sala tiene uno. Vacío = su IP.
+    pub public_host: String,
+    /// La sala está detrás de TLS y acepta `wss://`.
+    pub tls: bool,
+    /// Credencial que emite el directorio en el alta. **La gestiona el
+    /// servidor**: no hay que escribirla a mano.
+    pub token: String,
+}
+
+impl Default for DirectoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: "https://astra.inbizio.xyz".to_string(),
+            listed: true,
+            description: String::new(),
+            tags: Vec::new(),
+            website: String::new(),
+            public_host: String::new(),
+            tls: false,
+            token: String::new(),
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -256,6 +306,7 @@ impl Default for Settings {
             supabase_url: None,
             supabase_key: None,
             security: SecurityConfig::default(),
+            directory: DirectoryConfig::default(),
             link_trusted_leaves: Vec::new(),
             live_scripts_endpoint: default_live_scripts_endpoint(),
             seed_url: default_seed_url(),

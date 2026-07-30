@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tracing::{debug, error, info, warn};
 
 mod tcp_handler;
+mod directory;
 mod update_check;
 
 use tcp_handler::handle_tcp_client;
@@ -596,6 +597,18 @@ async fn main() -> anyhow::Result<()> {
     // los admins/owners conectados y lo marca para `/admin`.
     if ctx.settings.update_check {
         tokio::spawn(update_check::check_loop(ctx.clone()));
+    }
+
+    // Publicación en el directorio público de salas. Opt-in: sin
+    // `[directory] enabled = true` no sale ninguna petición de aquí.
+    if ctx.settings.directory.enabled {
+        // La credencial guardada, si la hay, se pasa a memoria: a partir de
+        // ahí manda la de memoria, que es la que sobrevive a un config de
+        // solo lectura.
+        if !ctx.settings.directory.token.is_empty() {
+            *ctx.directory_token.write() = Some(ctx.settings.directory.token.clone());
+        }
+        tokio::spawn(directory::heartbeat_loop(ctx.clone()));
     }
 
     // Rotación de URLs de la sala (cada 60s): difunde el siguiente banner

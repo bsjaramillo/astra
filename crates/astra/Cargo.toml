@@ -34,6 +34,7 @@ chrono = { workspace = true }
 scopeguard = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+sha2 = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 semver = { workspace = true }

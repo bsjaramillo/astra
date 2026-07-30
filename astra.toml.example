@@ -118,6 +118,51 @@ guid = ""
 # supabase_url = "https://xxxx.supabase.co"
 # supabase_key = "clave-anon"
 
+# --- Directorio público de salas -------------------------------------------
+
+# Anunciar esta sala en el directorio web, para que se pueda encontrar desde un
+# navegador y entrar sin instalar nada.
+#
+# Está DESACTIVADO por defecto: publicar una sala es decisión de su dueño.
+#
+# Qué se manda: nombre, topic, descripción, tags, puerto y cuánta gente hay.
+# Qué NO se manda, nunca: el `guid` (es el secreto de autenticación del Link;
+# viaja un identificador derivado del que no se puede volver al original), la
+# `owner_password`, las claves de Supabase, ni un solo dato de los usuarios
+# conectados.
+
+[directory]
+enabled = false
+
+# Directorio al que anunciarse. Se puede cambiar para usar uno propio.
+url = "https://astra.inbizio.xyz"
+
+# Con `false` se pide la baja sin dejar de anunciarse, así que se puede volver
+# a publicar desde el panel sin tocar este archivo.
+listed = true
+
+# Descripción de la sala en el listado y en su ficha.
+description = ""
+
+# Etiquetas para el buscador. Vocabulario cerrado; las que no estén en la lista
+# se ignoran: musica, latino, rock, chill, juegos, anime, deportes, amistad,
+# ayuda, programacion, cine, 18
+tags = []
+
+# Web propia de la sala, si tiene.
+website = ""
+
+# Dominio con el que anunciarse, si la sala tiene uno propio con HTTPS. Vacío =
+# se usa su IP. Con `tls = true` el cliente web abrirá `wss://` en vez de `ws://`.
+public_host = ""
+tls = false
+
+# Credencial que emite el directorio en el alta. LA GESTIONA EL SERVIDOR: no
+# hace falta escribirla. Si este archivo está montado de solo lectura, no se
+# podrá guardar y se pedirá una nueva en cada arranque — la sala sigue
+# publicándose igual.
+token = ""
+
 # --- Seguridad (defensa en capas anti-DDoS) -------------------------------
 # Cada capa tiene sus propios límites. Los defaults son razonables para un
 # servidor público pequeño. Ajustar según el tráfico esperado.

@@ -270,7 +270,7 @@ pub fn state_json(ctx: &AppContext) -> String {
     let secs = ctx.uptime_secs();
     write!(
         s,
-        "\"server\":{{\"room\":\"{}\",\"bot\":\"{}\",\"uptime\":{},\"users\":{},\"peak\":{},\"total\":{},\"bans\":{},\"topic\":\"{}\",\"status\":\"{}\",\"version\":\"{}\",\"update\":{}}}",
+        "\"server\":{{\"room\":\"{}\",\"bot\":\"{}\",\"uptime\":{},\"users\":{},\"peak\":{},\"total\":{},\"bans\":{},\"topic\":\"{}\",\"status\":\"{}\",\"version\":\"{}\",\"update\":{},\"directory\":{}}}",
         esc(&ctx.settings.room_name),
         esc(&ctx.settings.bot_name),
         secs,
@@ -282,6 +282,12 @@ pub fn state_json(ctx: &AppContext) -> String {
         esc(&ctx.room_status()),
         esc(server_core::VERSION),
         match ctx.available_update() {
+            Some(v) => format!("\"{}\"", esc(&v)),
+            None => "null".to_string(),
+        },
+        // URL de la ficha en el directorio, si la sala está publicada. Es la
+        // confirmación visible de que el registro funcionó.
+        match ctx.directory_listing() {
             Some(v) => format!("\"{}\"", esc(&v)),
             None => "null".to_string(),
         },

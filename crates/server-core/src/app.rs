@@ -428,6 +428,15 @@ pub struct AppContext {
     /// periódico (`None` = al día). La consumen los avisos a admins/owners
     /// y el estado del panel `/admin`.
     pub available_update: parking_lot::RwLock<Option<String>>,
+
+    /// URL de la ficha de esta sala en el directorio, una vez publicada.
+    /// La muestra el panel `/admin` como confirmación visible.
+    pub directory_listing: parking_lot::RwLock<Option<String>>,
+
+    /// Credencial del directorio en memoria. Existe además de la del config
+    /// porque el `astra.toml` puede estar montado de solo lectura y entonces
+    /// no hay dónde guardarla entre reinicios.
+    pub directory_token: parking_lot::RwLock<Option<String>>,
     /// Transferencias CUSTOM_DATA públicas en curso (imágenes/audio ib0t).
     pub custom_data: Arc<CustomDataStore>,
     /// Transferencias CUSTOM_DATA privadas (PM) en curso.
@@ -594,6 +603,8 @@ impl AppContext {
             room_flags,
             vroom_check: parking_lot::RwLock::new(None),
             available_update: parking_lot::RwLock::new(None),
+            directory_listing: parking_lot::RwLock::new(None),
+            directory_token: parking_lot::RwLock::new(None),
             custom_data,
             pm_custom_data,
             join_filters,
@@ -1029,6 +1040,16 @@ impl AppContext {
     }
 
     /// Última versión nueva de Astra conocida (si hay una pendiente).
+    /// URL pública de esta sala en el directorio, si ya se publicó.
+    pub fn directory_listing(&self) -> Option<String> {
+        self.directory_listing.read().clone()
+    }
+
+    /// Credencial vigente del directorio.
+    pub fn directory_token(&self) -> Option<String> {
+        self.directory_token.read().clone()
+    }
+
     pub fn available_update(&self) -> Option<String> {
         self.available_update.read().clone()
     }
