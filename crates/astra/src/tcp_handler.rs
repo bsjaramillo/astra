@@ -794,10 +794,14 @@ async fn dispatch_message(
         }
         TcpMsg::Public => {
             // Control de flood de texto (rate-limit + duplicados) antes de
-            // procesar. Los comandos slash se eximen (no son chat). Nivel >
+            // procesar. Los comandos se eximen (no son chat). Nivel >
             // Regular está exento (lo maneja is_flooding).
+            //
+            // Por este canal el prefijo de comando es `#`, no `/` (ver
+            // `handle_public`): una barra es texto normal y sí cuenta para
+            // el flood.
             let text = read_crypto_text(user, &pkt.data[1..]);
-            let is_cmd = text.as_deref().map(|t| t.trim_start().starts_with('/')).unwrap_or(false);
+            let is_cmd = text.as_deref().map(|t| t.trim_start().starts_with('#')).unwrap_or(false);
             if !is_cmd
                 && is_text_flooding(ctx, user, scripting, FloodKind::Public, text.as_deref().unwrap_or(""))
             {
@@ -1253,24 +1257,41 @@ async fn handle_public(
         return;
     }
 
-    // Si el mensaje empieza con '/' o '#', es un comando (paridad sb0t
-    // TCPProcessor.cs:343: ambos prefijos, y el texto no se difunde).
-    if let Some((cmd, args)) = astra_commands::parse_command(&text) {
-        let (handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
-        debug!("comando de '{}' (builtin={}): /{} {}", name, handled, cmd, args);
-        // Disparar los side-effects de scripting que el comando generó
-        // (incluye onVroomJoin, onNick, onRegistered, etc., que ahora
-        // emite el propio handler en `commands`).
-        for ev in events {
-            scripting.dispatch(ev);
+    // Comandos por el canal público. Paridad `TCPProcessor.Public` de sb0t,
+    // que es más sutil de lo que parece:
+    //
+    // - Solo `#` es prefijo de comando aquí. Un `/` NO lo es: cb0t traduce
+    //   `/cmd` al opcode `ClientCommand` (y `/me` a `Emote`) antes de mandar,
+    //   así que una barra dentro de un paquete público es texto literal que
+    //   el usuario quiso decir.
+    // - Salvo `#login`/`#register` (llevan credenciales y sb0t los oculta),
+    //   el comando se ejecuta **y el texto se difunde igual** — no hay
+    //   `return` en sb0t.
+    //
+    // Tratar ambos prefijos como comando y cortar hacía desaparecer en
+    // silencio cualquier mensaje que empezara con `#` o `/` ("#1", un
+    // hashtag, "/algo"): el emisor lo veía enviado y nadie más lo recibía.
+    if let Some(rest) = text.strip_prefix('#') {
+        let hides_text = rest.starts_with("login") || rest.starts_with("register");
+        if let Some((cmd, args)) = astra_commands::parse_command(&text) {
+            let (handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
+            debug!("comando de '{}' (builtin={}): #{} {}", name, handled, cmd, args);
+            // Disparar los side-effects de scripting que el comando generó
+            // (incluye onVroomJoin, onNick, onRegistered, etc., que ahora
+            // emite el propio handler en `commands`).
+            for ev in events {
+                scripting.dispatch(ev);
+            }
+            // Los scripts ven TODOS los comandos vía onCommand, los haya manejado
+            // un builtin o no (paridad core/Events.cs → js.Command siempre corre),
+            // salvo con captcha pendiente (sb0t corta antes de llegar a scripts).
+            if !user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed) {
+                astra_commands::dispatch(ctx, scripting, &name, cmd, args);
+            }
         }
-        // Los scripts ven TODOS los comandos vía onCommand, los haya manejado
-        // un builtin o no (paridad core/Events.cs → js.Command siempre corre),
-        // salvo con captcha pendiente (sb0t corta antes de llegar a scripts).
-        if !user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed) {
-            astra_commands::dispatch(ctx, scripting, &name, cmd, args);
+        if hides_text {
+            return;
         }
-        return;
     }
 
     // Muzzled: puede ejecutar comandos pero no hablar en público.

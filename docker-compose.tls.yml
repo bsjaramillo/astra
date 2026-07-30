@@ -28,8 +28,14 @@ services:
     volumes:
       # Bind mount: datos accesibles desde el host en ./data.
       - ./data:/app/data
-      - ./astra.toml:/app/astra.toml:ro
-    command: ["/app/astra", "--config", "/app/astra.toml"]
+      # SIN `:ro`: el panel /admin escribe en este mismo archivo (pestañas
+      # Server/Room linking/Security). Con `:ro` guardar desde el panel falla
+      # con "Read-only file system (os error 30)".
+      - ./astra.toml:/app/astra.toml
+    # Solo argumentos: la imagen ya tiene ENTRYPOINT ["/app/astra"]. Repetir el
+    # binario haría que Astra leyera "/app/astra" como subcomando y abortara
+    # con "unrecognized subcommand" (el contenedor no arrancaba).
+    command: ["--config", "/app/astra.toml"]
     environment:
       RUST_LOG: info
 

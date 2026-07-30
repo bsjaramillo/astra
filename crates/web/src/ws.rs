@@ -51,7 +51,12 @@ async fn handle_ws_connection(
 
     // 1.5) Rutas del panel de administración (HTTP, no WebSocket).
     if request.path == "/admin" || request.path.starts_with("/admin/") || request.path.starts_with("/admin?") {
-        return handle_admin_route(&ctx, &mut stream, &request).await;
+        // La IP real del cliente (no la del reverse proxy) para el rate-limit
+        // de `/admin/login`: detrás de Caddy todas las peticiones llegan con la
+        // IP del contenedor proxy, y sin resolver el forwarded header un solo
+        // atacante bloquearía a todos los administradores.
+        let admin_ip = resolve_client_ip(&ctx, peer.ip(), &request.headers);
+        return handle_admin_route(&ctx, &mut stream, &request, admin_ip).await;
     }
 
     // 2) Extraer la clave
@@ -267,10 +272,14 @@ fn parse_http_request(raw: &str) -> HttpRequest {
 /// - `POST /admin/login`    → `{password}` → `{token}` (o 401).
 /// - `GET  /admin/state`    → snapshot JSON (requiere Bearer token).
 /// - `POST /admin/cmd`      → `{cmd}` → `{output:[...]}` (requiere Bearer token).
+///
+/// `client_ip` es la IP real del cliente (resuelta contra los proxies
+/// confiables); se usa para el rate-limit de intentos de login.
 async fn handle_admin_route(
     ctx: &Arc<AppContext>,
     stream: &mut TcpStream,
     req: &HttpRequest,
+    client_ip: std::net::IpAddr,
 ) -> anyhow::Result<()> {
     let path = req.path.split('?').next().unwrap_or("");
 
@@ -287,13 +296,27 @@ async fn handle_admin_route(
 
     if path == "/admin/login" && req.method.eq_ignore_ascii_case("POST") {
         let password = json_field(&req.body, "password").unwrap_or_default();
-        match crate::admin::authenticate(ctx, &password) {
-            Some(token) => {
+        match crate::admin::authenticate(ctx, client_ip, &password) {
+            Ok(token) => {
+                info!("panel admin: login exitoso desde {}", client_ip);
                 let body = format!("{{\"token\":\"{}\"}}", token);
                 send_http_json(stream, 200, &body).await?;
             }
-            None => {
+            Err(crate::admin::AuthError::Invalid) => {
+                warn!("panel admin: login FALLIDO desde {}", client_ip);
                 send_http_json(stream, 401, "{\"error\":\"invalid password\"}").await?;
+            }
+            Err(crate::admin::AuthError::Throttled) => {
+                warn!(
+                    "panel admin: login bloqueado por demasiados intentos desde {}",
+                    client_ip
+                );
+                send_http_json(
+                    stream,
+                    429,
+                    "{\"error\":\"too many failed attempts, try again later\"}",
+                )
+                .await?;
             }
         }
         return Ok(());
@@ -433,19 +456,26 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+/// Responde JSON. Estas respuestas son todas del panel `/admin`, así que
+/// deliberadamente NO llevan `Access-Control-Allow-Origin`: con el wildcard,
+/// cualquier página web podía hacer `fetch("https://tu-sala/admin/login")` con
+/// passwords y LEER la respuesta (el token) desde el navegador del admin. Sin
+/// el header, el navegador bloquea la lectura cross-origin.
 async fn send_http_json(stream: &mut TcpStream, code: u16, body: &str) -> anyhow::Result<()> {
     let status = match code {
         200 => "200 OK",
         401 => "401 Unauthorized",
         403 => "403 Forbidden",
         404 => "404 Not Found",
+        429 => "429 Too Many Requests",
         _ => "400 Bad Request",
     };
     let response = format!(
         "HTTP/1.1 {}\r\n\
          Content-Type: application/json; charset=utf-8\r\n\
          Content-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
+         Cache-Control: no-store\r\n\
+         X-Content-Type-Options: nosniff\r\n\
          Connection: close\r\n\
          \r\n\
          {}",
@@ -499,7 +529,8 @@ async fn send_http_bytes(stream: &mut TcpStream, code: u16, bytes: &[u8]) -> any
         "HTTP/1.1 {}\r\n\
          Content-Type: {}\r\n\
          Content-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
+         Cache-Control: no-store\r\n\
+         X-Content-Type-Options: nosniff\r\n\
          Connection: close\r\n\
          \r\n",
         status,

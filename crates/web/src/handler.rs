@@ -697,9 +697,10 @@ async fn dispatch_ws_message(
 
     match ident {
         "PUBLIC" => {
-            // Control de flood (rate-limit + duplicados). Comandos (/ o #)
-            // exentos. Nivel > Regular exento (lo maneja is_flooding).
-            let is_cmd = args.trim_start().starts_with(['/', '#']);
+            // Control de flood (rate-limit + duplicados). Comandos exentos
+            // (por este canal el prefijo es `#`, ver `handle_ws_public`).
+            // Nivel > Regular exento (lo maneja is_flooding).
+            let is_cmd = args.trim_start().starts_with('#');
             if !is_cmd && ws_is_text_flooding(ctx, user, scripting, FloodKind::Public, args) {
                 return Ok(true);
             }
@@ -792,10 +793,19 @@ fn handle_ws_public(
         }
         return;
     }
-    // Comando: `/cmd` o `#cmd` (paridad WebProcessor.Text de sb0t).
-    if text.starts_with('/') || text.starts_with('#') {
+    // Comando por el canal público: paridad `WebProcessor.Text` de sb0t —
+    // solo el prefijo `#`, y salvo `#login`/`#register` (que llevan
+    // credenciales) el comando se ejecuta **y el texto se difunde igual**.
+    // Un `/` no es comando aquí: los clientes mandan sus comandos por el
+    // ident `COMMAND`, así que una barra en un `PUBLIC` es texto literal.
+    // Cortar en ambos prefijos hacía desaparecer en silencio cualquier
+    // mensaje que empezara con `#` o `/` (ver `handle_public` del path TCP).
+    if let Some(rest) = text.strip_prefix('#') {
+        let hides_text = rest.starts_with("login") || rest.starts_with("register");
         handle_ws_command(ctx, user, text, scripting);
-        return;
+        if hides_text {
+            return;
+        }
     }
     // Word filter: solo aplica (censura) a usuarios regulares (Moderator+ exentos).
     if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {

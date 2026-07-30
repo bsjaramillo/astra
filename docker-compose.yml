@@ -22,13 +22,15 @@ services:
       # ./data del host, accesibles directamente desde el explorador de archivos.
       - ./data:/app/data
     environment:
-      # Configurar aquí las opciones de Astra (alternativa al config file)
+      # RUST_LOG es la ÚNICA variable de entorno que Astra lee (via el
+      # EnvFilter de tracing). El server NO se configura por environment: para
+      # eso están los flags de `command:` y el archivo de config (ver abajo).
       RUST_LOG: info
-      ASTRA_PORT: "5009"
-      ASTRA_ROOM_NAME: "Astra Chat"
-      ASTRA_ROOM_TOPIC: "Welcome to Astra"
-    # Si quieres usar un config file:
+    # Astra sin `--config` corre con los defaults del código. Para configurarlo
+    # (nombre de sala, owner password, seguridad, etc.), montá un astra.toml
+    # —SIN `:ro`, porque el panel /admin escribe en ese mismo archivo y con
+    # `:ro` guardar falla con "Read-only file system"— y pasá `--config`:
     # volumes:
     #   - ./data:/app/data
-    #   - ./astra.toml:/app/astra.toml:ro
-    # command: ["/app/astra", "--config", "/app/astra.toml"]
+    #   - ./astra.toml:/app/astra.toml
+    # command: ["--config", "/app/astra.toml"]

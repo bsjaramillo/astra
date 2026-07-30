@@ -23,10 +23,21 @@ use tokio::sync::mpsc;
 const SESSION_TTL: Duration = Duration::from_secs(2 * 3600);
 /// ID de sesión reservado para el Owner sintético del panel.
 const ADMIN_USER_ID: u16 = 0xFFFE;
+/// Intentos fallidos de login tolerados por IP dentro de [`LOGIN_WINDOW`]
+/// antes de responder 429 sin siquiera comparar el password.
+const LOGIN_MAX_ATTEMPTS: u32 = 5;
+/// Ventana del contador de intentos fallidos de login.
+const LOGIN_WINDOW: Duration = Duration::from_secs(300);
 
 fn sessions() -> &'static Mutex<HashMap<String, Instant>> {
     static S: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Intentos fallidos de login por IP: `(contador, fin de la ventana)`.
+fn login_attempts() -> &'static Mutex<HashMap<IpAddr, (u32, Instant)>> {
+    static A: OnceLock<Mutex<HashMap<IpAddr, (u32, Instant)>>> = OnceLock::new();
+    A.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn random_token() -> String {
@@ -36,19 +47,63 @@ fn random_token() -> String {
     b.iter().map(|x| format!("{:02x}", x)).collect()
 }
 
-/// Valida el owner password y, si coincide, emite un token de sesión.
-/// Retorna `None` si el password es incorrecto o no hay owner password
-/// configurado (en ese caso el panel queda deshabilitado por seguridad).
-pub fn authenticate(ctx: &AppContext, password: &str) -> Option<String> {
-    let owner = &ctx.settings.owner_password;
-    if owner.is_empty() || password != owner {
-        return None;
+/// Compara dos secretos en tiempo constante respecto al contenido (el
+/// largo sí se filtra, como en cualquier comparación de este estilo). Evita
+/// que un atacante deduzca el password byte a byte midiendo la latencia de
+/// `/admin/login`.
+fn secret_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
     }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Por qué falló un intento de login.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AuthError {
+    /// Password incorrecto (o panel sin owner password configurado).
+    Invalid,
+    /// Demasiados intentos fallidos desde esta IP: hay que esperar.
+    Throttled,
+}
+
+/// Valida el owner password y, si coincide, emite un token de sesión.
+///
+/// `ip` es la IP real del cliente (ya resuelta contra los proxies
+/// confiables) y se usa para limitar la fuerza bruta: tras
+/// [`LOGIN_MAX_ATTEMPTS`] fallos en [`LOGIN_WINDOW`] la IP recibe
+/// [`AuthError::Throttled`] sin que se compare el password. Un login exitoso
+/// limpia el contador de esa IP.
+pub fn authenticate(ctx: &AppContext, ip: IpAddr, password: &str) -> Result<String, AuthError> {
+    let now = Instant::now();
+    {
+        let mut att = login_attempts().lock();
+        att.retain(|_, (_, until)| *until > now);
+        if let Some((count, _)) = att.get(&ip) {
+            if *count >= LOGIN_MAX_ATTEMPTS {
+                return Err(AuthError::Throttled);
+            }
+        }
+    }
+
+    let owner = &ctx.settings.owner_password;
+    if owner.is_empty() || !secret_eq(password, owner) {
+        let mut att = login_attempts().lock();
+        let entry = att.entry(ip).or_insert((0, now + LOGIN_WINDOW));
+        entry.0 += 1;
+        entry.1 = now + LOGIN_WINDOW;
+        return Err(AuthError::Invalid);
+    }
+
+    login_attempts().lock().remove(&ip);
     let token = random_token();
-    sessions()
-        .lock()
-        .insert(token.clone(), Instant::now() + SESSION_TTL);
-    Some(token)
+    sessions().lock().insert(token.clone(), now + SESSION_TTL);
+    Ok(token)
 }
 
 /// ¿Es `token` una sesión válida y vigente? Purga las expiradas de paso.
@@ -137,8 +192,44 @@ pub fn write_settings(ctx: &AppContext, toml_text: &str) -> Result<(), String> {
     let path = ctx
         .config_path()
         .ok_or_else(|| "no config file path known (started without --config)".to_string())?;
-    std::fs::write(&path, toml_text).map_err(|e| format!("write failed: {}", e))?;
+    // `fs::write` escribe EN SITIO (truncate + write), sin temp+rename: eso es
+    // deliberado. El config suele entrar al contenedor como bind mount de UN
+    // archivo, y un rename sobre el mountpoint fallaría con EBUSY/EXDEV.
+    std::fs::write(&path, toml_text).map_err(|e| config_write_error(&path, &e))?;
     Ok(())
+}
+
+/// Traduce un error de escritura del config a un mensaje accionable.
+///
+/// El caso frecuente es un deployment Docker donde el `astra.toml` entra como
+/// bind mount de solo lectura (`- ./astra.toml:/app/astra.toml:ro`): ahí el
+/// kernel devuelve EROFS y el error crudo ("Read-only file system") no dice
+/// qué hay que cambiar. Los demás casos (permisos del archivo, o `/app` no
+/// escribible porque el config no está montado y el WORKDIR es de root)
+/// también se explican.
+fn config_write_error(path: &std::path::Path, e: &std::io::Error) -> String {
+    let p = path.display();
+    // EROFS = 30 en Linux/macOS. Se compara el errno crudo en vez de
+    // `ErrorKind::ReadOnlyFilesystem` para no exigir un rustc más nuevo que el
+    // `rust-version` del workspace.
+    if e.raw_os_error() == Some(30) {
+        return format!(
+            "no se puede guardar en {p}: el archivo está montado como SOLO LECTURA. \
+             Si corres en Docker, quita el sufijo `:ro` del bind mount del config \
+             en tu docker-compose.yml (debe quedar \
+             `- ./astra.toml:/app/astra.toml`) y recrea el contenedor con \
+             `docker compose up -d`."
+        );
+    }
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        return format!(
+            "no se puede guardar en {p}: permiso denegado. El usuario del proceso \
+             no puede escribir ese archivo. En Docker, revisa que el `user:` del \
+             servicio sea dueño del archivo en el host \
+             (`chown $(id -u):$(id -g) astra.toml`)."
+        );
+    }
+    format!("no se puede guardar en {p}: {e}")
 }
 
 /// Escapa una string para incrustarla en JSON.
@@ -370,7 +461,7 @@ pub fn write_settings_json(ctx: &AppContext, json: &str) -> Result<(), String> {
     let path = ctx
         .config_path()
         .ok_or_else(|| "no config file path configured (started without --config)".to_string())?;
-    settings.save(&path).map_err(|e| format!("write failed: {}", e))
+    settings.save(&path).map_err(|e| config_write_error(&path, &e))
 }
 
 /// Agrega una IP a la lista de proxies confiables (panel Proxy). Retorna
@@ -393,6 +484,16 @@ const AVATAR_KINDS: &[&str] = &["server", "default"];
 /// un techo de tamaño para no dejar subir archivos gigantes.
 const MAX_AVATAR_BYTES: usize = 65_536;
 
+/// ¿Los bytes empiezan con la firma de un formato de imagen que los clientes
+/// saben mostrar? Solo se chequea el magic number (no se decodifica la
+/// imagen): alcanza para no difundir basura a la sala.
+fn is_supported_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(b"\xFF\xD8\xFF")
+        || bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+}
+
 /// Sube (o reemplaza) el avatar de sala (`"server"`) o el avatar default
 /// (`"default"`). Persiste en `<data_dir>/avatars/{kind}`, actualiza el
 /// estado en memoria, y si es el avatar de sala lo difunde en vivo a todos
@@ -404,6 +505,12 @@ pub fn set_avatar(ctx: &AppContext, kind: &str, bytes: Vec<u8>) -> Result<(), St
     }
     if bytes.len() > MAX_AVATAR_BYTES {
         return Err(format!("avatar too large ({} bytes, max {})", bytes.len(), MAX_AVATAR_BYTES));
+    }
+    // El avatar de sala se difunde tal cual a todos los conectados, así que no
+    // se aceptan bytes arbitrarios: solo formatos que un cliente Ares/web
+    // sepa decodificar (sb0t manda JPEG; PNG/GIF también los renderizan).
+    if !is_supported_image(&bytes) {
+        return Err("invalid image: expected PNG, JPEG or GIF".to_string());
     }
     let dir = std::path::Path::new(&ctx.settings.data_dir).join("avatars");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
@@ -462,11 +569,19 @@ mod tests {
         Arc::new(AppContext::new(settings, Database::in_memory().unwrap()))
     }
 
+    /// IP única por test: el contador de intentos fallidos es un estático
+    /// global compartido por todos los tests del binario, así que cada uno usa
+    /// su propia IP para no interferir con los demás.
+    fn test_ip(n: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, n))
+    }
+
     #[test]
     fn auth_requires_correct_password() {
         let ctx = ctx_with_owner("secret");
-        assert!(authenticate(&ctx, "wrong").is_none());
-        let token = authenticate(&ctx, "secret").expect("auth ok");
+        let ip = test_ip(1);
+        assert_eq!(authenticate(&ctx, ip, "wrong"), Err(AuthError::Invalid));
+        let token = authenticate(&ctx, ip, "secret").expect("auth ok");
         assert!(validate(&token));
         assert!(!validate("garbage"));
     }
@@ -475,7 +590,74 @@ mod tests {
     fn no_owner_password_disables_panel() {
         let ctx = ctx_with_owner("");
         assert!(!is_enabled(&ctx));
-        assert!(authenticate(&ctx, "").is_none());
+        assert_eq!(authenticate(&ctx, test_ip(2), ""), Err(AuthError::Invalid));
+    }
+
+    #[test]
+    fn auth_throttles_after_repeated_failures() {
+        let ctx = ctx_with_owner("secret");
+        let ip = test_ip(3);
+        for _ in 0..LOGIN_MAX_ATTEMPTS {
+            assert_eq!(authenticate(&ctx, ip, "wrong"), Err(AuthError::Invalid));
+        }
+        // Agotados los intentos, ni el password correcto pasa.
+        assert_eq!(authenticate(&ctx, ip, "wrong"), Err(AuthError::Throttled));
+        assert_eq!(authenticate(&ctx, ip, "secret"), Err(AuthError::Throttled));
+        // Y el bloqueo es por IP: otra IP no queda afectada.
+        assert!(authenticate(&ctx, test_ip(4), "secret").is_ok());
+    }
+
+    #[test]
+    fn auth_success_resets_the_failure_counter() {
+        let ctx = ctx_with_owner("secret");
+        let ip = test_ip(5);
+        assert_eq!(authenticate(&ctx, ip, "wrong"), Err(AuthError::Invalid));
+        assert!(authenticate(&ctx, ip, "secret").is_ok());
+        // Tras el éxito el contador arranca de cero: quedan todos los intentos.
+        for _ in 0..LOGIN_MAX_ATTEMPTS {
+            assert_eq!(authenticate(&ctx, ip, "wrong"), Err(AuthError::Invalid));
+        }
+        assert_eq!(authenticate(&ctx, ip, "wrong"), Err(AuthError::Throttled));
+    }
+
+    #[test]
+    fn secret_eq_matches_only_identical_strings() {
+        assert!(secret_eq("hunter2", "hunter2"));
+        assert!(!secret_eq("hunter2", "hunter3"));
+        assert!(!secret_eq("hunter2", "hunter22"));
+        assert!(!secret_eq("", "x"));
+        assert!(secret_eq("", ""));
+    }
+
+    #[test]
+    fn avatar_rejects_non_images() {
+        let ctx = ctx_with_owner("secret");
+        let err = set_avatar(&ctx, "server", b"not an image at all".to_vec());
+        assert!(err.unwrap_err().contains("invalid image"));
+        // Y el kind sigue validándose primero.
+        assert!(set_avatar(&ctx, "bogus", vec![]).unwrap_err().contains("invalid avatar kind"));
+    }
+
+    #[test]
+    fn image_signatures_are_recognized() {
+        assert!(is_supported_image(b"\x89PNG\r\n\x1a\n\x00\x00"));
+        assert!(is_supported_image(b"\xFF\xD8\xFF\xE0junk"));
+        assert!(is_supported_image(b"GIF89a...."));
+        assert!(!is_supported_image(b"<html>"));
+        assert!(!is_supported_image(b""));
+    }
+
+    #[test]
+    fn config_write_error_explains_readonly_mount() {
+        let path = std::path::Path::new("/app/astra.toml");
+        let eros = std::io::Error::from_raw_os_error(30);
+        let msg = config_write_error(path, &eros);
+        assert!(msg.contains("SOLO LECTURA"), "mensaje: {msg}");
+        assert!(msg.contains(":ro"), "mensaje: {msg}");
+
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
+        let msg = config_write_error(path, &denied);
+        assert!(msg.contains("permiso denegado"), "mensaje: {msg}");
     }
 
     #[test]
