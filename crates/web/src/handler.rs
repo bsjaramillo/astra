@@ -999,8 +999,24 @@ fn handle_ws_avatar(
         name: user.name.read().clone(),
         png: bytes.clone(),
     });
+    // `full_avatar` es el que ven los clientes web (base64, sin límite de
+    // tamaño). `avatar` es el que viaja por el canal binario Ares, que sí
+    // tiene tope: sb0t descarta los de 4064 bytes o más
+    // (`TCPProcessor.Avatar`). Una foto de móvil subida desde la web supera
+    // de largo los 64 KB del framing Ares, y mandarla igual desincronizaba
+    // el stream de los clientes nativos — dejaban de ver todo el chat.
+    let fits_ares = bytes.len() < server_core::avatars::MAX_ARES_AVATAR;
+    if !fits_ares {
+        debug!(
+            "avatar de '{}' ({} bytes) supera el máximo de {} del protocolo Ares: \
+             solo se manda a los clientes web",
+            user.name.read(),
+            bytes.len(),
+            server_core::avatars::MAX_ARES_AVATAR
+        );
+    }
     *user.full_avatar.lock() = Some(bytes.clone());
-    *user.avatar.lock() = Some(bytes.clone());
+    *user.avatar.lock() = fits_ares.then(|| bytes.clone());
     *user.org_avatar.lock() = Some(bytes);
     user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
 

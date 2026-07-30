@@ -5,6 +5,14 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 
+/// Tamaño máximo de un avatar que se puede mandar a un cliente Ares nativo
+/// (paridad `TCPProcessor.Avatar` de sb0t: `if (avatar.Length < 4064)`).
+///
+/// Los clientes web no tienen este límite — reciben el avatar completo en
+/// base64 por el protocolo de texto (`full_avatar`). Es solo el canal binario
+/// Ares el que no admite imágenes grandes.
+pub const MAX_ARES_AVATAR: usize = 4064;
+
 /// Manager de avatares.
 pub struct AvatarManager {
     /// Avatares cacheados por user ID.

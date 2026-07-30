@@ -328,6 +328,23 @@ async fn writer_task(
         }
         // Framing Ares: [size:u16 LE][op][payload], size = largo de op+payload menos 1
         // (= largo del payload), igual que `ToAresPacket` de sb0t.
+        //
+        // El largo va en un u16: un paquete más grande NO cabe en el framing.
+        // Truncar con `as u16` (lo que se hacía antes) es lo peor posible —
+        // el cliente lee un tamaño corto, interpreta el resto del payload
+        // como paquetes nuevos y su stream queda desincronizado para
+        // siempre: deja de ver todo, incluidos sus propios mensajes, sin
+        // desconectarse ni dar error. Descartamos el paquete: perder uno es
+        // infinitamente mejor que matar la sesión.
+        if data.len() > u16::MAX as usize + 1 {
+            warn!(
+                "writer: paquete de {} bytes (op {}) no cabe en el framing Ares (max {}); descartado",
+                data.len(),
+                data[0],
+                u16::MAX as usize + 1
+            );
+            continue;
+        }
         let size = (data.len() - 1) as u16;
         let header = size.to_le_bytes();
         if let Err(e) = write_half.write_all(&header).await {
@@ -770,6 +787,18 @@ async fn dispatch_message(
             // Avatar: el payload completo (sin opcode) son los bytes PNG.
             // < 10 bytes = "sin avatar" (paridad `AresClient.Avatar` setter).
             let png = pkt.data[1..].to_vec();
+            // Tope de sb0t (`TCPProcessor.Avatar`): un avatar de 4064 bytes o
+            // más se ignora — no cabe cómodamente en el framing Ares y, si se
+            // reenvía, rompe el stream de los clientes nativos.
+            if png.len() >= server_core::avatars::MAX_ARES_AVATAR {
+                debug!(
+                    "avatar de '{}' ignorado: {} bytes (máximo {})",
+                    user.name.read(),
+                    png.len(),
+                    server_core::avatars::MAX_ARES_AVATAR
+                );
+                return Ok(false);
+            }
             let cleared = png.len() < 10;
             *user.avatar.lock() = if cleared { None } else { Some(png.clone()) };
             // Avatar propio del cliente → stash para user.restoreAvatar().
