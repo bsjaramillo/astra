@@ -170,6 +170,13 @@ pub struct AresUser {
     pub ws_text_sender: Option<mpsc::UnboundedSender<String>>,
     /// Estado de control de flood de texto (rate-limit + duplicados).
     pub flood: crate::flood_control::FloodRecord,
+    /// ¿Se pidió matar esta sesión? Lo setea `request_kill()` (kick/ban/
+    /// hijack). El loop de lectura del socket lo consulta y corta.
+    killed: AtomicBool,
+    /// Señal para despertar al loop de lectura en cuanto se pide el kill, sin
+    /// esperar a que el cliente mande otro paquete. `notify_one()` guarda un
+    /// permiso si nadie está esperando, así que la señal nunca se pierde.
+    kill_signal: tokio::sync::Notify,
 }
 
 impl AresUser {
@@ -249,7 +256,39 @@ impl AresUser {
             sender: None,
             ws_text_sender: None,
             flood: crate::flood_control::FloodRecord::new(),
+            killed: AtomicBool::new(false),
+            kill_signal: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Marca la sesión para cierre inmediato y despierta a su loop de lectura.
+    ///
+    /// Sacar al usuario del pool (kick/ban/hijack) NO cerraba el socket: la
+    /// sesión seguía viva y el cliente podía seguir hablando aunque ya no
+    /// apareciera en ninguna userlist (bug "expulsado pero sigue escribiendo").
+    /// Con esto, el handler del socket corta en cuanto se pide el kick, sin
+    /// depender de que el cliente mande algo o de que falle una escritura.
+    pub fn request_kill(&self) {
+        self.killed.store(true, Ordering::Relaxed);
+        self.kill_signal.notify_one();
+    }
+
+    /// ¿Esta sesión está marcada para cierre? Los handlers dejan de procesar
+    /// mensajes entrantes en cuanto es `true`.
+    pub fn is_killed(&self) -> bool {
+        self.killed.load(Ordering::Relaxed)
+    }
+
+    /// Espera hasta que se pida el kill de esta sesión (para usar en un
+    /// `select!` junto a la lectura del socket).
+    pub async fn killed_notified(&self) {
+        // Si el kill llegó antes de que nadie esperara, `notify_one()` dejó un
+        // permiso y esto retorna de inmediato; el chequeo del flag cubre el
+        // caso de un permiso ya consumido por otro `await`.
+        if self.is_killed() {
+            return;
+        }
+        self.kill_signal.notified().await;
     }
 
     /// ¿Está muzzled ahora mismo? Los muzzles temporales (`/mtimeout`) se
@@ -471,5 +510,42 @@ impl UserPool {
     /// Devuelve una lista con todos los usuarios.
     pub fn users(&self) -> Vec<Arc<AresUser>> {
         self.users.read().values().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn user() -> AresUser {
+        AresUser::new(1, IpAddr::V4(Ipv4Addr::LOCALHOST), [0u8; 16])
+    }
+
+    #[tokio::test]
+    async fn kill_wakes_a_waiting_reader() {
+        let u = Arc::new(user());
+        assert!(!u.is_killed());
+        let waiter = {
+            let u = u.clone();
+            tokio::spawn(async move { u.killed_notified().await })
+        };
+        // Darle tiempo a la task a quedarse esperando la señal.
+        tokio::task::yield_now().await;
+        u.request_kill();
+        // Sin timeout: si la señal no llega, el test cuelga y falla igual.
+        waiter.await.unwrap();
+        assert!(u.is_killed());
+    }
+
+    #[tokio::test]
+    async fn kill_before_waiting_is_not_lost() {
+        let u = user();
+        u.request_kill();
+        // El kick puede llegar mientras el loop de lectura está procesando otra
+        // cosa: la señal tiene que seguir ahí cuando vuelva a esperarla.
+        u.killed_notified().await;
+        u.killed_notified().await;
+        assert!(u.is_killed());
     }
 }

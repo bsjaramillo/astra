@@ -920,6 +920,9 @@ impl AppContext {
     pub fn ghost_part_user(&self, target: &std::sync::Arc<crate::user_pool::AresUser>) {
         self.user_pool.remove(target.id);
         self.stats.on_user_part();
+        // La sesión vieja debe morir ya: si el socket zombie sigue vivo, el
+        // cliente reemplazado podría seguir hablando desde fuera del pool.
+        target.request_kill();
     }
 
     /// ¿La muerte de esta sesión debe ser SILENCIOSA (ghost)? Sí cuando la
@@ -943,6 +946,11 @@ impl AppContext {
 
         self.user_pool.remove(target.id);
         self.stats.on_user_part();
+        // Cerrar la sesión de verdad. Antes solo se lo sacaba del pool y se
+        // confiaba en que el socket se autolimpiara al fallar su lectura: un
+        // cliente vivo nunca falla, así que el expulsado desaparecía de la
+        // userlist pero seguía hablando en la sala.
+        target.request_kill();
 
         for u in self.user_pool.users() {
             if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
@@ -963,6 +971,7 @@ impl AppContext {
         self.record_departure(user);
         self.user_pool.remove(user.id);
         self.stats.on_user_part();
+        user.request_kill();
         for u in self.user_pool.users() {
             if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
                 continue;

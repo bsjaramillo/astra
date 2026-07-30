@@ -5275,6 +5275,9 @@ mod tests {
         assert!(!ctx.bans.is_banned(&bob.guid, bob.external_ip), "kick must not ban");
         assert_eq!(next_pvt_text(&mut bob_rx), "You have been kicked from this room.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Kicked 'Bob'.");
+        // Además de salir del pool, la sesión queda marcada para cierre: si no,
+        // el expulsado sigue hablando desde un socket que nadie cerró.
+        assert!(bob.is_killed(), "kick must mark the session for close");
     }
 
     #[test]

@@ -228,6 +228,12 @@ pub async fn handle_tcp_client(
                 debug!("writer detectó conexión rota para id={}, cerrando lector", user_id);
                 break;
             }
+            // Kick/ban/hijack: la sesión ya salió del pool, hay que cerrar el
+            // socket ahora (si no, el expulsado seguiría hablando en la sala).
+            _ = user_arc.killed_notified() => {
+                info!("sesión id={} marcada para cierre (kick/ban/hijack)", user_id);
+                break;
+            }
             read_result = timeout(idle_timeout, reader.read_packet()) => {
                 match read_result {
                     Ok(Ok(p)) if p.data.is_empty() => break, // EOF
@@ -243,6 +249,13 @@ pub async fn handle_tcp_client(
                 }
             }
         };
+
+        // Kick que llegó mientras este paquete estaba en vuelo: no procesarlo
+        // (si no, el expulsado alcanza a colar un último mensaje).
+        if user_arc.is_killed() {
+            info!("sesión id={} marcada para cierre (kick/ban/hijack)", user_id);
+            break;
+        }
 
         ctx.stats.add_bytes_in(pkt.data.len() as u64);
         // NOTA: el unidle es manual como en sb0t — solo hablar en público o

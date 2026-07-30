@@ -51,9 +51,23 @@ pub async fn handle_connection(
     // - broadcasts traducidos a texto
     let (ws_text_tx, mut ws_text_rx) = mpsc::unbounded_channel::<String>();
 
+    // Aviso de "el socket está muerto" del writer al lector: sin esto, una
+    // conexión que se cortó sin FIN (cliente cerrado de golpe, cambio de red,
+    // NAT que recicla el mapping) dejaba al lector esperando hasta el idle
+    // timeout — media hora con el usuario fantasma en la userlist. Paridad con
+    // el `write_failed` del path Ares nativo.
+    let (write_failed_tx, mut write_failed_rx) = tokio::sync::oneshot::channel::<()>();
+
     // Task de escritura: drena el canal de texto y envía como frames de texto WS.
     // Termina cuando `ws_text_tx` se cierra (drop del user).
-    let write_task = tokio::spawn(async move {
+    let mut write_task = tokio::spawn(async move {
+        let mut write_failed_tx = Some(write_failed_tx);
+        let mut fail = |e: anyhow::Error, what: &str| {
+            debug!("ws {} error: {}", what, e);
+            if let Some(tx) = write_failed_tx.take() {
+                let _ = tx.send(());
+            }
+        };
         while let Some(text) = ws_text_rx.recv().await {
             // Sentinel interno: responder un Ping del cliente con Pong
             // (RFC 6455 §5.5.2-3). El payload viaja hex-encodeado en el
@@ -63,15 +77,19 @@ pub async fn handle_connection(
                     .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
                     .collect();
                 crate::ws::write_pong_frame(&mut write_half, &payload).await
+            } else if text == PING_SENTINEL {
+                // Keepalive del server: el Ping fuerza tráfico de salida, así
+                // que una conexión muerta falla acá en vez de quedar colgada.
+                crate::ws::write_ping_frame(&mut write_half).await
             } else {
                 write_text_frame(&mut write_half, &text).await
             };
             if let Err(e) = write_result {
-                debug!("ws write error: {}", e);
+                fail(e, "write");
                 break;
             }
             if let Err(e) = write_half.flush().await {
-                debug!("ws flush error: {}", e);
+                fail(e.into(), "flush");
                 break;
             }
         }
@@ -177,13 +195,52 @@ pub async fn handle_connection(
     // Anuncio "was last seen as..." si el flag `lastseen` está activo.
     ctx.announce_last_seen(&user);
 
-    // Loop principal
+    // Loop principal.
+    //
+    // El `idle_timeout` configurable (30 min por defecto) es la red de
+    // seguridad; la detección real de clientes muertos son el keepalive
+    // (Ping cada `WS_PING_INTERVAL`, con corte si no llega NADA del cliente en
+    // `WS_DEAD_AFTER`) y `write_failed_rx`.
     let idle_timeout = Duration::from_secs(ctx.settings.security.idle_timeout_secs);
+    let mut ping_tick = tokio::time::interval(WS_PING_INTERVAL);
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Primer tick: `interval` dispara de inmediato, y no queremos pingear
+    // justo al entrar.
+    ping_tick.tick().await;
+    let mut last_inbound = tokio::time::Instant::now();
+    // Acumulador de mensajes fragmentados: vive afuera de `read_ws_frame`
+    // porque el `select!` de abajo puede cancelar la lectura a mitad de un
+    // mensaje (ver doc de la función).
+    let mut fragmented: Option<(WsOpcode, Vec<u8>)> = None;
     loop {
-        let read_result = timeout(idle_timeout, async {
-            read_ws_frame(&mut read_half, &mut buf).await
-        })
-        .await;
+        let read_result = tokio::select! {
+            biased;
+            // Kick/ban/hijack: el usuario ya salió del pool, hay que cerrar el
+            // socket ya (si no, el expulsado sigue hablando en la sala).
+            _ = user.killed_notified() => {
+                info!("ws sesión id={} marcada para cierre (kick/ban/hijack)", user_id);
+                break;
+            }
+            _ = &mut write_failed_rx => {
+                info!("ws writer detectó conexión muerta para id={}, cerrando", user_id);
+                break;
+            }
+            _ = ping_tick.tick() => {
+                if last_inbound.elapsed() >= WS_DEAD_AFTER {
+                    warn!(
+                        "ws sin respuesta del cliente id={} en {}s (keepalive), cerrando",
+                        user_id,
+                        WS_DEAD_AFTER.as_secs()
+                    );
+                    break;
+                }
+                if let Some(tx) = &user.ws_text_sender {
+                    let _ = tx.send(PING_SENTINEL.to_string());
+                }
+                continue;
+            }
+            r = timeout(idle_timeout, read_ws_frame(&mut read_half, &mut buf, &mut fragmented)) => r,
+        };
         let frame = match read_result {
             Ok(Ok(Some(frame))) => frame,
             Ok(Ok(None)) => break,
@@ -196,6 +253,16 @@ pub async fn handle_connection(
                 break;
             }
         };
+        // Cualquier frame (incluido un Pong al keepalive) prueba que el cliente
+        // sigue vivo.
+        last_inbound = tokio::time::Instant::now();
+
+        // Kick que llegó mientras este frame estaba en vuelo: no procesarlo (si
+        // no, el expulsado alcanza a colar un último mensaje).
+        if user.is_killed() {
+            info!("ws sesión id={} marcada para cierre (kick/ban/hijack)", user_id);
+            break;
+        }
 
         let (opcode, payload) = frame;
         match opcode {
@@ -262,7 +329,17 @@ pub async fn handle_connection(
     // de su loop y dropea `write_half`, cerrando el socket de verdad.
     drop(user);
     drop(ws_text_tx);
-    let _ = write_task.await;
+    // Margen para vaciar lo pendiente (p.ej. el aviso de kick) y cierre
+    // forzado si no termina: contra un socket muerto, `write_all`/`flush`
+    // pueden no volver nunca, y esperarlos dejaría la task colgada para
+    // siempre (paridad con el writer del path Ares nativo).
+    tokio::select! {
+        _ = &mut write_task => {}
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            debug!("ws write task de id={} no terminó a tiempo, abortando", user_id);
+            write_task.abort();
+        }
+    }
 
     info!("ws desconectado: id={}", user_id);
     Ok(())
@@ -273,6 +350,27 @@ pub async fn handle_connection(
 /// protocolo ib0t (ningún ident empieza con \u{1}).
 const PONG_SENTINEL: &str = "\u{1}PONG\u{1}";
 
+/// Mensaje interno del canal de texto WS para pedir un frame Ping (keepalive
+/// del server).
+const PING_SENTINEL: &str = "\u{1}PING\u{1}";
+
+/// Cada cuánto se le manda un Ping de keepalive al cliente web. Equivalente al
+/// FastPing de 2s del path Ares nativo, pero más espaciado: en WS el Pong lo
+/// contesta el browser solo y no hace falta tanta frecuencia.
+const WS_PING_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Si no llega NINGÚN frame del cliente en este lapso (ni su `PING` de
+/// aplicación, ni el Pong automático del browser a nuestros Pings), la conexión
+/// se considera muerta y se cierra. Sin esto, un cliente que se fue sin cerrar
+/// limpio (cierre de golpe, corte de red, NAT reciclado) quedaba fantasma en la
+/// userlist hasta el idle timeout (30 min por defecto).
+///
+/// Es holgado a propósito: normalmente el corte lo dispara antes el error de
+/// escritura del keepalive (`write_failed_rx`), que no depende de que el cliente
+/// conteste nada. Esto es solo el respaldo para el socket que acepta escrituras
+/// pero ya no responde.
+const WS_DEAD_AFTER: Duration = Duration::from_secs(90);
+
 /// Tamaño máximo de un mensaje fragmentado reensamblado (1 MiB).
 const MAX_FRAGMENTED_MSG: usize = 1 << 20;
 
@@ -282,12 +380,17 @@ const MAX_FRAGMENTED_MSG: usize = 1 << 20;
 /// acumulan y se retorna el mensaje completo con el opcode del primer
 /// fragmento. Frames de control (Ping/Pong) recibidos en medio de una
 /// fragmentación se consumen sin interrumpir el reensamblado.
+///
+/// El acumulador de fragmentos (`fragmented`) es del llamador a propósito:
+/// esta función se usa dentro de un `select!` (keepalive, kill), así que puede
+/// cancelarse a mitad de un mensaje fragmentado. Con el acumulador afuera, la
+/// próxima llamada retoma donde iba; si viviera acá se perdería y el
+/// Continuation siguiente rompería la conexión.
 async fn read_ws_frame(
     read_half: &mut OwnedReadHalf,
     buf: &mut BytesMut,
+    fragmented: &mut Option<(WsOpcode, Vec<u8>)>,
 ) -> anyhow::Result<Option<(WsOpcode, Vec<u8>)>> {
-    // (opcode del primer fragmento, payload acumulado)
-    let mut fragmented: Option<(WsOpcode, Vec<u8>)> = None;
     loop {
         while buf.len() < 2 {
             let mut tmp = [0u8; 4096];
@@ -379,7 +482,7 @@ async fn read_ws_frame(
                 if payload.len() > MAX_FRAGMENTED_MSG {
                     return Err(anyhow::anyhow!("mensaje fragmentado demasiado grande"));
                 }
-                fragmented = Some((opcode, payload));
+                *fragmented = Some((opcode, payload));
             }
             // Frames de control: no pueden fragmentarse (RFC 6455 §5.5)
             WsOpcode::Close | WsOpcode::Ping | WsOpcode::Pong => {
@@ -407,7 +510,7 @@ async fn ws_handshake_login(
     resolved_ip: std::net::IpAddr,
     scripting: &astra_scripting::ScriptHandle,
 ) -> anyhow::Result<Option<Arc<AresUser>>> {
-    let frame = read_ws_frame(read_half, buf).await?;
+    let frame = read_ws_frame(read_half, buf, &mut None).await?;
     let (opcode, payload) = match frame {
         Some(f) => f,
         None => {
@@ -1482,7 +1585,7 @@ mod tests {
         client.write_all(&frame(true, 0x0, b"mundo")).await.unwrap();
 
         let mut buf = BytesMut::new();
-        let (op, payload) = read_ws_frame(&mut read_half, &mut buf)
+        let (op, payload) = read_ws_frame(&mut read_half, &mut buf, &mut None)
             .await
             .unwrap()
             .unwrap();
@@ -1498,7 +1601,7 @@ mod tests {
         client.write_all(&frame(true, 0x0, b"b")).await.unwrap();
 
         let mut buf = BytesMut::new();
-        let (op, payload) = read_ws_frame(&mut read_half, &mut buf)
+        let (op, payload) = read_ws_frame(&mut read_half, &mut buf, &mut None)
             .await
             .unwrap()
             .unwrap();
@@ -1512,7 +1615,7 @@ mod tests {
         client.write_all(&frame(true, 0x1, b"hola")).await.unwrap();
 
         let mut buf = BytesMut::new();
-        let (op, payload) = read_ws_frame(&mut read_half, &mut buf)
+        let (op, payload) = read_ws_frame(&mut read_half, &mut buf, &mut None)
             .await
             .unwrap()
             .unwrap();
@@ -1526,7 +1629,7 @@ mod tests {
         client.write_all(&frame(true, 0x0, b"x")).await.unwrap();
 
         let mut buf = BytesMut::new();
-        let result = read_ws_frame(&mut read_half, &mut buf).await;
+        let result = read_ws_frame(&mut read_half, &mut buf, &mut None).await;
         assert!(result.is_err());
     }
 
@@ -1537,7 +1640,7 @@ mod tests {
         client.write_all(&frame(false, 0x1, b"b")).await.unwrap();
 
         let mut buf = BytesMut::new();
-        let result = read_ws_frame(&mut read_half, &mut buf).await;
+        let result = read_ws_frame(&mut read_half, &mut buf, &mut None).await;
         assert!(result.is_err());
     }
 }

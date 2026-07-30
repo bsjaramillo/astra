@@ -743,6 +743,18 @@ pub async fn write_pong_frame<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+/// Escribe un frame Ping (opcode 0x9) sin payload, sin máscara
+/// (server→cliente). Es el keepalive del server: un browser responde el Pong
+/// automáticamente, así que su ausencia identifica una conexión muerta
+/// (equivalente al FastPing del path Ares nativo).
+pub async fn write_ping_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+) -> anyhow::Result<()> {
+    let header = [0x89, 0x00]; // FIN=1, opcode=ping, sin payload
+    writer.write_all(&header).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,6 +786,15 @@ mod tests {
         assert_eq!(buf2[1] & 0x7F, 126);
         assert_eq!(u16::from_be_bytes([buf2[2], buf2[3]]), 200);
         assert_eq!(&buf2[4..], long.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn ping_frame_is_empty_and_unmasked() {
+        // Keepalive del server: Ping vacío, sin máscara (si el server enmascara,
+        // el browser cierra la conexión — justo lo contrario de lo que se busca).
+        let mut buf: Vec<u8> = Vec::new();
+        write_ping_frame(&mut buf).await.unwrap();
+        assert_eq!(buf, vec![0x89, 0x00]);
     }
 
     #[test]
