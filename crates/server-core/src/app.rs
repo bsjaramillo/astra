@@ -991,6 +991,34 @@ impl AppContext {
         }
     }
 
+    /// ¿La conexión viene "desde el propio servidor"? (paridad
+    /// `Helpers.IsLocalHost` de sb0t.)
+    ///
+    /// Solo si el ajuste `local_host` está activo, y únicamente para
+    /// loopback o para la IP declarada en `server_ip`. **No** incluye los
+    /// rangos privados que sí acepta sb0t: bajo Docker, todas las conexiones
+    /// pueden llegar desde el gateway `172.17.0.1`, y eso convertiría a la
+    /// sala entera en Owner.
+    ///
+    /// Quien pasa este chequeo entra como Owner y se salta ban, captcha,
+    /// cuarentena, detección de proxy y el gate `onJoinCheck` de scripts.
+    pub fn is_local_host(&self, ip: std::net::IpAddr) -> bool {
+        if !self.settings.local_host {
+            return false;
+        }
+        if ip.is_loopback() {
+            return true;
+        }
+        let declared = self.settings.server_ip.trim();
+        if declared.is_empty() {
+            return false;
+        }
+        match declared.parse::<std::net::IpAddr>() {
+            Ok(server_ip) => server_ip == ip,
+            Err(_) => false,
+        }
+    }
+
     /// Última versión nueva de Astra conocida (si hay una pendiente).
     pub fn available_update(&self) -> Option<String> {
         self.available_update.read().clone()
@@ -1035,6 +1063,54 @@ mod tests {
     fn make_ctx() -> AppContext {
         let db = crate::db::Database::in_memory().unwrap();
         AppContext::new(Settings::default(), db)
+    }
+
+    fn make_ctx_with(f: impl FnOnce(&mut Settings)) -> AppContext {
+        let db = crate::db::Database::in_memory().unwrap();
+        let mut st = Settings::default();
+        f(&mut st);
+        AppContext::new(st, db)
+    }
+
+    #[test]
+    fn local_host_is_off_by_default() {
+        let ctx = make_ctx();
+        assert!(!ctx.is_local_host(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn local_host_accepts_loopback_and_declared_ip_only() {
+        let ctx = make_ctx_with(|s| {
+            s.local_host = true;
+            s.server_ip = "203.0.113.7".to_string();
+        });
+        assert!(ctx.is_local_host(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(ctx.is_local_host("203.0.113.7".parse().unwrap()));
+        // Otra IP cualquiera: no.
+        assert!(!ctx.is_local_host("203.0.113.8".parse().unwrap()));
+        // Y, a diferencia de sb0t, los rangos privados NO cuentan: bajo
+        // Docker todas las conexiones pueden venir del gateway 172.17.0.1 y
+        // eso convertiría la sala entera en Owner.
+        for ip in ["172.17.0.1", "10.0.0.5", "192.168.1.20", "172.31.255.254"] {
+            assert!(!ctx.is_local_host(ip.parse().unwrap()), "{} no debe ser local", ip);
+        }
+    }
+
+    #[test]
+    fn local_host_without_declared_ip_is_loopback_only() {
+        let ctx = make_ctx_with(|s| s.local_host = true);
+        assert!(ctx.is_local_host(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(!ctx.is_local_host("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn local_host_ignores_unparseable_server_ip() {
+        let ctx = make_ctx_with(|s| {
+            s.local_host = true;
+            s.server_ip = "no-es-una-ip".to_string();
+        });
+        assert!(!ctx.is_local_host("203.0.113.7".parse().unwrap()));
+        assert!(ctx.is_local_host(IpAddr::V4(Ipv4Addr::LOCALHOST)));
     }
 
     fn add_user(ctx: &AppContext, id: u16, name: &str) -> std::sync::Arc<crate::user_pool::AresUser> {

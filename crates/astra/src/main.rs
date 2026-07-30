@@ -146,6 +146,24 @@ async fn main() -> anyhow::Result<()> {
     if let Some(d) = &cli.data_dir {
         settings.data_dir = d.clone();
     }
+
+    // GUID del servidor para el Link. Si nunca se configuró (falta en el
+    // toml, está vacío, o quedó el placeholder histórico), se genera uno
+    // aleatorio y se persiste — paridad con sb0t, que hace lo mismo al
+    // arrancar (`MainWindow.SetValues.cs`: `Guid.NewGuid()` + `Settings.Set`).
+    //
+    // No es cosmético: el `guid` es el secreto con el que un leaf se
+    // autentica contra un hub. Compartido entre instalaciones no vale nada.
+    let generated_guid = if settings.has_real_guid() {
+        None
+    } else {
+        settings.regenerate_guid();
+        match settings.save(&cli.config) {
+            Ok(()) => Some(Ok(())),
+            Err(e) => Some(Err(e)),
+        }
+    };
+
     let web_enabled = settings.web_enabled && !cli.no_web;
 
     // Init tracing: a consola Y (si se puede) a archivo rotativo diario en
@@ -220,6 +238,22 @@ async fn main() -> anyhow::Result<()> {
 
     info!("configuración cargada: puerto={}, sala='{}'", settings.port, settings.room_name);
     info!("data dir: {}", settings.data_dir);
+
+    // Resultado de la generación del GUID (se hizo antes de tener logger).
+    match generated_guid {
+        None => {}
+        Some(Ok(())) => info!(
+            "GUID de servidor generado y guardado en {} (identifica esta sala en el Link)",
+            cli.config.display()
+        ),
+        Some(Err(e)) => warn!(
+            "GUID de servidor generado pero NO se pudo guardar en {}: {}. \
+             Se usará solo en esta ejecución y cambiará al reiniciar: si tienes \
+             el Link configurado, fija `guid` a mano en el archivo.",
+            cli.config.display(),
+            e
+        ),
+    }
 
     // Abrir/crear la base de datos SQLite
     let db_path = std::path::PathBuf::from(&settings.data_dir).join("astra.db");

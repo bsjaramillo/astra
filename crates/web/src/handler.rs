@@ -124,7 +124,8 @@ pub async fn handle_connection(
     {
         let jname = user.name.read().clone();
         let jip = user.external_ip.to_string();
-        if !scripting.check_join(&jname, &jip) {
+        // El "local host" no puede ser rechazado por un script (paridad sb0t).
+        if !ctx.is_local_host(user.external_ip) && !scripting.check_join(&jname, &jip) {
             info!("ws join de '{}' rechazado por script (onJoinCheck)", jname);
             let _ = user.print(&ctx.settings.bot_name, "You have been rejected from this room.");
             scripting.dispatch(ScriptEvent::Rejected {
@@ -447,8 +448,13 @@ async fn ws_handshake_login(
     let external_ip = resolved_ip;
     let now_ms = server_core::time::unix_time();
 
+    // "Local host" (paridad `Helpers.IsLocalHost` de sb0t): quien entra
+    // desde el propio servidor queda exento de los gates de entrada y entra
+    // como Owner. Desactivado por defecto (ajuste `local_host`).
+    let is_local = ctx.is_local_host(external_ip);
+
     let guid_arr: [u8; 16] = login.guid;
-    if ctx.bans.is_banned(&guid_arr, external_ip) {
+    if !is_local && ctx.bans.is_banned(&guid_arr, external_ip) {
         warn!("REJECTED (ban persistente): peer={} nick='{}'", peer, login.name);
         let _ = ws_text_tx.send("ERROR:You are banned from this room".to_string());
         return Ok(None);
@@ -484,6 +490,13 @@ async fn ws_handshake_login(
     user.ws_text_sender = Some(ws_text_tx.clone());
     user.logged_in = true;
     user.web_client = true;
+    if is_local {
+        // Paridad sb0t (`WebProcessor.cs`, mismo bloque que el path TCP):
+        // Registered + Owner, y el nivel se aplica antes de anunciar el JOIN.
+        *user.level.write() = server_core::ILevel::Owner;
+        user.registered = true;
+        info!("LOCAL HOST (ws): '{}' desde {} entra como Owner", login.name, external_ip);
+    }
     user.inbizier_web = login.inbizier_web;
     user.inbizier_mobile = login.inbizier_mobile;
     if !login.pmsg.is_empty() {

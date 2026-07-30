@@ -137,7 +137,10 @@ pub async fn handle_tcp_client(
     {
         let jname = user.name.read().clone();
         let jip = user.external_ip.to_string();
-        if !scripting.check_join(&jname, &jip) {
+        // El "local host" no puede ser rechazado por un script (paridad sb0t:
+        // `if (!Events.Joining(client)) if (!Helpers.IsLocalHost(client))`),
+        // para que un script con un bug no deje al dueño fuera de su sala.
+        if !ctx.is_local_host(user.external_ip) && !scripting.check_join(&jname, &jip) {
             info!("join de '{}' rechazado por script (onJoinCheck)", jname);
             let mut w = proto_ares::PacketWriter::with_msg_crypto(
                 proto_ares::TcpMsg::ServerError,
@@ -450,6 +453,11 @@ async fn process_handshake(
         TcpMsg::ClientLogin | TcpMsg::ClientRelogin => {
             match parse_login(&pkt.data) {
                 Ok(login) => {
+                    // "Local host" (paridad `Helpers.IsLocalHost` de sb0t):
+                    // quien entra desde el propio servidor queda exento de
+                    // los gates de entrada y entra como Owner. Desactivado
+                    // por defecto (ajuste `local_host`).
+                    let is_local = ctx.is_local_host(peer.ip());
                     // CAPA 4: validación
                     let (validation_result, issues) = ctx.security.login_validator.validate(&login);
                     // Disparar eventos de scripting para issues detectados (no rechazos)
@@ -478,15 +486,18 @@ async fn process_handshake(
                     let external_ip = peer.ip();
                     let now_ms = server_core::time::unix_time();
 
-                    // Ban persistente
-                    if ctx.bans.is_banned(&login.guid, external_ip) {
+                    // Ban persistente. El "local host" queda exento
+                    // (paridad sb0t: `if (BanSystem.IsBanned(client)) if
+                    // (!Helpers.IsLocalHost(client))`) — así el dueño no se
+                    // deja fuera de su propia sala por un ban de IP.
+                    if !is_local && ctx.bans.is_banned(&login.guid, external_ip) {
                         warn!("REJECTED (ban persistente): peer={}", peer);
                         let _ = tx.send(server_error_packet("You are banned from this room"));
                         return Ok(None);
                     }
 
-                    // Range ban (prefijo de IP)
-                    if ctx.range_bans.is_banned(external_ip) {
+                    // Range ban (prefijo de IP) — misma exención.
+                    if !is_local && ctx.range_bans.is_banned(external_ip) {
                         warn!("REJECTED (range ban): peer={}", peer);
                         let _ = tx.send(server_error_packet("You are banned from this room"));
                         return Ok(None);
@@ -524,7 +535,7 @@ async fn process_handshake(
                     }
 
                     // ASN ban (requiere base GeoIP-ASN cargada; si no, no-op)
-                    if !ctx.asn_bans.is_empty() {
+                    if !is_local && !ctx.asn_bans.is_empty() {
                         if let Some(asn) = ctx.geoip.lookup_asn(external_ip) {
                             if ctx.asn_bans.is_banned(asn) {
                                 warn!("REJECTED (ASN ban {}): peer={}", asn, peer);
@@ -552,6 +563,20 @@ async fn process_handshake(
                     let mut user = server_core::login::build_ares_user(id, external_ip, login);
                     user.sender = Some(tx.clone());
                     user.logged_in = true;  // marcar ANTES de envolver en Arc
+                    if is_local {
+                        // Paridad sb0t: `client.Registered = true; client.Owner
+                        // = true;` y más tarde `client.Level = ILevel.Host`.
+                        // Se aplica ANTES de anunciar el JOIN para que el nivel
+                        // ya viaje en la userlist (sb0t lo hace después y por eso
+                        // los clientes lo ven como Regular hasta el próximo
+                        // refresco).
+                        *user.level.write() = server_core::ILevel::Owner;
+                        user.registered = true;
+                        info!(
+                            "LOCAL HOST: '{}' desde {} entra como Owner (ajuste local_host)",
+                            user.name.read(), external_ip
+                        );
+                    }
                     // Cifrado del cliente Ares: generamos key/IV; se los mandamos
                     // ofuscados en el CryptoKey antes del LoginAck.
                     if wants_crypto {
@@ -562,6 +587,7 @@ async fn process_handshake(
                     // Captcha gate (chequear ANTES de add_user, para que la
                     // primera conexión de una IP sea considerada "nueva").
                     let needs_captcha_now = ctx.settings.security.captcha_enabled
+                        && !is_local
                         && !ctx.user_history.has_prior_join(external_ip);
 
                     ctx.user_pool.add(user_arc.clone());

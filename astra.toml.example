@@ -37,6 +37,20 @@ roomsearch = true
 # el server no haga requests salientes.
 update_check = true
 
+# Auto-owner para quien entra "desde el propio servidor" (equivale al ajuste
+# `local_host` de sb0t). Con esto en true, un cliente cuya IP sea loopback o
+# igual a `server_ip` entra como OWNER, sin captcha ni cuarentena, y exento
+# del ban, de la detección de proxy y del gate onJoinCheck de los scripts.
+#
+# Es un permiso total concedido por IP: déjalo en false salvo que sepas
+# exactamente qué IP llega al server. A diferencia de sb0t, aquí NO cuentan
+# los rangos privados (10.x, 192.168.x, 172.16-31.x), porque bajo Docker todas
+# las conexiones pueden verse como 172.17.0.1 y eso haría Owner a toda la sala.
+local_host = false
+
+# IP pública del servidor, para `local_host`. Vacío = solo loopback.
+server_ip = ""
+
 # Idioma por defecto (0 = English).
 language = 0
 
@@ -68,9 +82,13 @@ data_dir = "./data"
 link_hub_enabled = false
 link_hub_port = 5011
 
-# GUID del server (16 bytes hex). Usado para autenticación con peers link.
-# Generar uno nuevo:  head -c 16 /dev/urandom | xxd -p
-guid = "astra-default-guid-12"
+# GUID del server: identifica esta sala ante otros servidores en el Link, y es
+# el secreto con el que un leaf se autentica contra un hub.
+#
+# DÉJALO VACÍO: al arrancar, el server genera uno aleatorio y lo escribe aquí
+# (igual que hace sb0t). No lo copies de otra sala ni lo compartas — quien lo
+# tenga puede hacerse pasar por tu servidor en el Link.
+guid = ""
 
 # Leaves confiados para el Link Hub (paridad sb0t).
 #

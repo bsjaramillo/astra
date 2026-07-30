@@ -73,6 +73,34 @@ pub struct Settings {
     /// Pon `false` para que el server no haga requests salientes.
     #[serde(default = "default_update_check")]
     pub update_check: bool,
+
+    /// Auto-owner para quien entra "desde el propio servidor" (paridad
+    /// `Helpers.IsLocalHost` de sb0t, ajuste `local_host`).
+    ///
+    /// Con esto activo, un cliente cuya IP sea loopback o coincida con
+    /// [`server_ip`](Self::server_ip) entra como **Owner**, sin captcha ni
+    /// cuarentena, y exento del ban, del chequeo de proxy y del gate
+    /// `onJoinCheck` de los scripts.
+    ///
+    /// **Desactivado por defecto**, igual que en sb0t: es un permiso total
+    /// concedido por IP, y basta con que algo enmascare la IP de origen para
+    /// que se lo lleve quien no debe.
+    ///
+    /// A diferencia de sb0t, aquí NO entran los rangos privados
+    /// (`10.x`, `192.168.x`, `172.16-31.x`): Astra corre en contenedor, y
+    /// con el userland proxy de Docker todas las conexiones llegarían desde
+    /// el gateway `172.17.0.1` — es decir, la sala entera sería Owner.
+    #[serde(default)]
+    pub local_host: bool,
+
+    /// IP pública del servidor, para [`local_host`](Self::local_host): quien
+    /// se conecte desde esta misma IP se considera "local".
+    ///
+    /// Vacío = solo se acepta loopback. Es el equivalente del ajuste `ip` de
+    /// sb0t; no se autodetecta a propósito (una detección errónea aquí
+    /// reparte permisos de Owner).
+    #[serde(default)]
+    pub server_ip: String,
 }
 
 fn default_update_check() -> bool {
@@ -224,6 +252,8 @@ impl Default for Settings {
             live_scripts_endpoint: default_live_scripts_endpoint(),
             seed_url: default_seed_url(),
             update_check: true,
+            local_host: false,
+            server_ip: String::new(),
         }
     }
 }
@@ -247,6 +277,35 @@ impl Settings {
         Self::default()
     }
 
+    /// Prefijo de los valores de `guid` que vinieron de fábrica (el default
+    /// del código y el del `astra.toml.example`). Se tratan igual que
+    /// "vacío": son idénticos en todas las instalaciones, así que no sirven
+    /// como secreto.
+    pub const PLACEHOLDER_GUID_PREFIX: &'static str = "astra-default-guid";
+
+    /// ¿El `guid` es un secreto real, o un placeholder / vacío?
+    pub fn has_real_guid(&self) -> bool {
+        let g = self.guid.trim();
+        !g.is_empty() && !g.starts_with(Self::PLACEHOLDER_GUID_PREFIX)
+    }
+
+    /// Genera un `guid` de servidor aleatorio (32 hex) y lo asigna.
+    ///
+    /// Paridad `MainWindow.SetValues.cs` de sb0t: si no hay GUID guardado,
+    /// se crea uno con `Guid.NewGuid()` y **se persiste** — nunca se pide al
+    /// usuario que lo invente.
+    ///
+    /// Importa que sea único por sala: el `guid` es el secreto con el que un
+    /// leaf se autentica contra un hub (`credentials = SHA1(reverse(name ++
+    /// guid))`). Con un valor compartido por todas las instalaciones,
+    /// cualquiera que sepa el nombre de la sala podría hacerse pasar por ella.
+    pub fn regenerate_guid(&mut self) {
+        use rand::RngCore;
+        let mut raw = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut raw);
+        self.guid = raw.iter().map(|b| format!("{:02x}", b)).collect();
+    }
+
     /// Guarda la configuración al archivo TOML.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
@@ -255,5 +314,57 @@ impl Settings {
         let content = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(path, content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_guid_is_not_a_real_secret() {
+        // El default histórico es idéntico en todas las instalaciones, así
+        // que debe tratarse como "sin configurar" y disparar la generación.
+        let s = Settings::default();
+        assert!(!s.has_real_guid());
+    }
+
+    #[test]
+    fn example_config_placeholder_is_not_a_real_secret() {
+        // `astra.toml.example` traía su propia variante del placeholder; si
+        // no se detecta, todo el que copie el ejemplo comparte secreto.
+        let mut s = Settings::default();
+        s.guid = "astra-default-guid-12".to_string();
+        assert!(!s.has_real_guid());
+    }
+
+    #[test]
+    fn empty_guid_is_not_a_real_secret() {
+        let mut s = Settings::default();
+        s.guid = "   ".to_string();
+        assert!(!s.has_real_guid());
+    }
+
+    #[test]
+    fn regenerate_guid_produces_a_usable_unique_secret() {
+        let mut a = Settings::default();
+        let mut b = Settings::default();
+        a.regenerate_guid();
+        b.regenerate_guid();
+
+        assert!(a.has_real_guid());
+        assert_ne!(a.guid, b.guid, "dos salas no pueden compartir el guid");
+        // 16 bytes en hex. El derivador del link (`guid_bytes_from_string`)
+        // toma los primeros 16 caracteres, así que el string debe ser al
+        // menos así de largo para no caer en el camino del SHA1.
+        assert_eq!(a.guid.len(), 32);
+        assert!(a.guid.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_configured_guid_is_left_alone() {
+        let mut s = Settings::default();
+        s.guid = "mi-guid-configurado-a-mano".to_string();
+        assert!(s.has_real_guid());
     }
 }
