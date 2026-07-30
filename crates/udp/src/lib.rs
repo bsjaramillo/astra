@@ -4,37 +4,44 @@
 //!
 //! ## Componentes
 //!
+//! Siempre disponibles (codec puro, sin estado ni runtime async):
+//!
 //! - [`types`]: tipos de datos (`UdpNode`, `UdpChannelItem`, `UdpStats`, etc.)
 //! - [`protocol`]: encode/decode de los 9 mensajes UDP del protocolo Ares
+//!
+//! Bajo la feature `node-manager` (activa por defecto), que es la que arrastra
+//! `server-core` y `tokio`:
+//!
 //! - [`manager`]: `UdpNodeManager` (in-memory + DB)
 //! - [`seed`]: carga del seed JSON (`data/seed_rooms.json`)
 //! - [`listener`]: task async que recibe/envía paquetes UDP
 //! - [`prober`]: task async que publica (ADDIPS) nuestra existencia a nodos periódicamente
 //!
-//! ## Uso
-//!
-//! ```no_run
-//! use std::sync::Arc;
-//! use astra_udp::UdpNodeManager;
-//! use server_core::db::Database;
-//!
-//! let db = Database::open("data/astra.db").unwrap();
-//! let manager = UdpNodeManager::new(db, 5009);
-//! let stats = astra_udp::load_seed(&manager.db_arc(), std::path::Path::new("data/seed_rooms.json")).unwrap();
-//! println!("seed: {} nodos cargados", stats.nodes_added);
-//! ```
+//! Compilar con `--no-default-features` deja solo el codec. Sirve para hablar
+//! el protocolo desde otro proceso —por ejemplo un rastreador que recorre la
+//! red para catalogarla— sin montar el núcleo del servidor.
 
 #![warn(missing_docs)]
 
-pub mod listener;
-pub mod manager;
-pub mod prober;
 pub mod protocol;
-pub mod seed;
 pub mod types;
 
-pub use listener::{run_listener, RoomInfoFn, UserCountFn};
-pub use manager::{NodeChangeCallback, NodeSnapshot, UdpNodeManager};
-pub use prober::{push_once, run_prober};
-pub use seed::{load_seed, load_seed_force, validate_seed};
+#[cfg(feature = "node-manager")]
+pub mod listener;
+#[cfg(feature = "node-manager")]
+pub mod manager;
+#[cfg(feature = "node-manager")]
+pub mod prober;
+#[cfg(feature = "node-manager")]
+pub mod seed;
+
 pub use types::{NodeAddr, UdpChannelItem, UdpNode, UdpStats};
+
+#[cfg(feature = "node-manager")]
+pub use listener::{run_listener, RoomInfoFn, UserCountFn};
+#[cfg(feature = "node-manager")]
+pub use manager::{NodeChangeCallback, NodeSnapshot, UdpNodeManager};
+#[cfg(feature = "node-manager")]
+pub use prober::{push_once, run_prober};
+#[cfg(feature = "node-manager")]
+pub use seed::{load_seed, load_seed_force, validate_seed};

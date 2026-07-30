@@ -6,16 +6,34 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
-[dependencies]
-proto-ares = { path = "../proto-ares" }
-server-core = { path = "../server-core" }
+[features]
+default = ["node-manager"]
 
-tokio = { workspace = true }
+# Todo lo que necesita estado del servidor: manager con persistencia, listener,
+# prober y carga del seed. Sin esta feature el crate queda reducido a `protocol`
+# y `types` —el codec puro del protocolo UDP de Ares—, sin arrastrar
+# server-core ni tokio. Así se puede hablar el protocolo desde otro proceso
+# (p. ej. un rastreador de la red) sin montar medio Astra para ello.
+node-manager = [
+    "dep:server-core",
+    "dep:tokio",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:anyhow",
+    "dep:rand",
+]
+
+[dependencies]
+# Siempre: el codec del protocolo y los tipos que maneja.
+proto-ares = { path = "../proto-ares" }
 bytes = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-anyhow = { workspace = true }
 parking_lot = { workspace = true }
-rand = { workspace = true }
-chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Solo con `node-manager`.
+server-core = { path = "../server-core", optional = true }
+tokio = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }

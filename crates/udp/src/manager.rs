@@ -2,6 +2,18 @@
 //!
 //! Combina un cache en memoria con persistencia en SQLite.
 //! Es el equivalente directo de `core/Udp/UdpNodeManager.cs` del sb0t original.
+//!
+//! ## Uso
+//!
+//! ```no_run
+//! use astra_udp::UdpNodeManager;
+//! use server_core::db::Database;
+//!
+//! let db = Database::open("data/astra.db").unwrap();
+//! let manager = UdpNodeManager::new(db, 5009);
+//! let stats = astra_udp::load_seed(&manager.db_arc(), std::path::Path::new("data/seed_rooms.json")).unwrap();
+//! println!("seed: {} nodos cargados", stats.nodes_added);
+//! ```
 
 use std::net::IpAddr;
 use std::sync::Arc;
