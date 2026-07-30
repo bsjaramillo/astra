@@ -41,6 +41,7 @@ pub const DEFAULT_COMMAND_LEVELS: &[(&str, ILevel)] = &[
     ("uptime", ILevel::Regular),
     ("stats", ILevel::Moderator),
     ("version", ILevel::Regular),
+    ("serverversion", ILevel::Regular),
     ("register", ILevel::Regular),
     ("unregister", ILevel::Regular),
     ("whisper", ILevel::Regular),

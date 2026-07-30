@@ -48,6 +48,7 @@ const DEFAULT_HELP_LINES: &[&str] = &[
     "/stats - server metrics block (mod)",
     "/shout <text> - shout as server text",
     "/version - show server version",
+    "/serverversion - show server version and available updates",
     "/register <password> - register your account",
     "/unregister - delete your account",
     "/login <password> - log into your account",
@@ -417,6 +418,12 @@ pub fn dispatch_builtin(
         }
         "version" => {
             handle_version(ctx, user, args);
+            (true, vec![])
+        }
+        // `/serverversion`: como `/version` pero además dice si hay una
+        // versión más nueva publicada (resultado del chequeo periódico).
+        "serverversion" => {
+            handle_serverversion(ctx, user, args);
             (true, vec![])
         }
         "register" => {
@@ -1751,6 +1758,33 @@ fn handle_version(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         user,
         &format!("Astra v{}", env!("CARGO_PKG_VERSION")),
     );
+}
+
+/// `/serverversion`: versión corriendo + si hay una más nueva publicada.
+///
+/// Lee el resultado cacheado del chequeo periódico (`update_check`), que
+/// consulta el registry de imágenes al arrancar y cada hora. No hace I/O de
+/// red: el dispatcher de comandos es síncrono y un comando no debe quedarse
+/// esperando a un servicio externo.
+fn handle_serverversion(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
+    send_system_line(ctx, user, &format!("Astra v{}", env!("CARGO_PKG_VERSION")));
+
+    if let Some(latest) = ctx.available_update() {
+        // Mismo texto que el aviso automático, para que un admin no vea dos
+        // redacciones distintas de lo mismo.
+        let text = ctx
+            .templates
+            .render("update.available", &[("+v", &latest), ("+c", server_core::VERSION)]);
+        send_system_line(ctx, user, &text);
+    } else if ctx.settings.update_check {
+        send_system_line(ctx, user, "No updates available: this is the latest version.");
+    } else {
+        send_system_line(
+            ctx,
+            user,
+            "Update checking is disabled in this room's config (update_check = false).",
+        );
+    }
 }
 
 fn handle_register(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Vec<astra_scripting::ScriptEvent> {
@@ -5371,6 +5405,30 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &alice, "version", "");
         let v = next_pvt_text(&mut alice_rx);
         assert!(v.starts_with("Astra v"), "got: {}", v);
+    }
+
+    #[test]
+    fn builtin_serverversion_reports_current_and_update_state() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+
+        // Sin update pendiente: versión + "estás en la última".
+        let (handled, _) = dispatch_builtin(&ctx, &alice, "serverversion", "");
+        assert!(handled, "el comando debe estar registrado");
+        let v = next_pvt_text(&mut alice_rx);
+        assert!(v.starts_with("Astra v"), "got: {}", v);
+        assert!(
+            next_pvt_text(&mut alice_rx).contains("latest version"),
+            "sin update pendiente debe decir que está actualizado"
+        );
+
+        // Con una versión nueva descubierta por el chequeo periódico.
+        *ctx.available_update.write() = Some("9.9.9".to_string());
+        let _ = dispatch_builtin(&ctx, &alice, "serverversion", "");
+        let _ = next_pvt_text(&mut alice_rx); // línea de versión
+        let notice = next_pvt_text(&mut alice_rx);
+        assert!(notice.contains("9.9.9"), "debe nombrar la versión nueva: {}", notice);
     }
 
     #[test]
