@@ -197,8 +197,21 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
     .backdrop{display:none}
     .only-mobile{display:none}
     .only-desktop{display:inline}
-    main{padding:24px 28px 70px}
+    /* `main` pasa a ser un grid item. Un grid item con márgenes `auto` en el
+       eje inline NO se estira: los márgenes absorben el espacio libre y el
+       ancho colapsa al intrínseco del contenido (~366px de 1174 disponibles),
+       que es lo que dejaba media pantalla vacía. Con `width:100%` explícito
+       el ancho deja de ser fit-content y el `auto` solo centra. */
+    main{padding:24px 28px 70px;width:100%;max-width:1180px;margin-inline:auto}
   }
+
+  /* Pantallas anchas: más ancho útil antes de que las líneas se vuelvan
+     incómodas de leer. El tope evita que en un monitor de 2560px los
+     formularios queden con inputs de un metro. */
+  @media(min-width:1500px){
+    main{max-width:1400px;padding:28px 36px 70px}
+  }
+
 
   .cardhead{margin:2px 2px 16px}
   .sub{color:var(--mut);font-size:13.5px;margin:3px 0 0}
@@ -267,6 +280,27 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
   .toast.show{opacity:1;transform:none}
   .toast.ok{border-color:rgba(52,199,89,.5)}
   .toast.err{border-color:rgba(255,82,87,.5)}
+
+  /* ---- Ajustes de ancho para desktop ----
+     Van al FINAL de la hoja a propósito: son overrides de reglas definidas
+     más arriba (.tiles, .card) y con la misma especificidad gana la última,
+     así que tienen que ir después. */
+
+  /* Cards cortas que se pueden leer en paralelo. En móvil se apilan solas
+     (una columna); en desktop aprovechan el ancho en vez de dejar media
+     pantalla vacía. `align-items:start` evita que la más corta se estire
+     hasta la altura de la más alta. */
+  .cardgrid{display:grid;gap:0 16px;align-items:start}
+  @media(min-width:900px){
+    .cardgrid{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+    /* Un campo suelto dentro de una card no gana nada midiendo 1000px: se
+       lee peor y el cursor queda lejísimos de su etiqueta. Los campos que
+       ya viven en una rejilla (.grid2, .flags) no se ven afectados porque
+       el selector es de hijo directo. */
+    .card>label.fld,.card>.inline,.card>.rowend{max-width:720px}
+    /* Las 7 tiles de Inicio entran en una sola fila. */
+    .tiles{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+  }
 </style>
 </head>
 <body>
@@ -822,6 +856,7 @@ function renderBaneos(){
       <div class="scroll"><table class="tbl"><thead><tr><th>${t("th_name")}</th><th>IP</th><th></th></tr></thead>
       <tbody>${bans||`<tr><td colspan=3 class=mut>${t("bans_users_empty")}</td></tr>`}</tbody></table></div>
       <div class="rowend"><button class="btn danger" id="clearBans">${t("bans_clear")}</button></div></div>
+    <div class="cardgrid">
     <div class="card"><h3>${t("bans_range_h")}</h3>
       <p class="sub" style="margin-bottom:10px">${t("bans_range_desc")}</p>
       <div>${rb||`<span class=mut>${t("common_none")}</span>`}</div>
@@ -829,7 +864,8 @@ function renderBaneos(){
     <div class="card"><h3>${t("bans_asn_h")}</h3>
       <p class="sub" style="margin-bottom:10px">${t("bans_asn_desc")}</p>
       <div>${ab||`<span class=mut>${t("common_none")}</span>`}</div>
-      <div class="inline" style="margin-top:10px"><input id="abIn" placeholder="${t("bans_asn_ph")}"><button class="btn" id="abAdd">${t("common_add")}</button></div></div>`;
+      <div class="inline" style="margin-top:10px"><input id="abIn" placeholder="${t("bans_asn_ph")}"><button class="btn" id="abAdd">${t("common_add")}</button></div></div>
+    </div>`;
 }
 
 function renderFiltros(){
@@ -873,6 +909,7 @@ function renderSala(){
 
 function renderAvatares(){
   return `<div class="cardhead"><h2>${t("av_h")}</h2><p class="sub">${t("av_sub")}</p></div>
+    <div class="cardgrid">
     <div class="card"><h3>${t("av_room_h")}</h3>
       <p class="sub" style="margin-bottom:12px">${t("av_room_desc")}</p>
       <div class="avbox"><img id="avImgServer" class="avimg" alt="">
@@ -882,7 +919,8 @@ function renderAvatares(){
       <p class="sub" style="margin-bottom:12px">${t("av_def_desc")}</p>
       <div class="avbox"><img id="avImgDefault" class="avimg" alt="">
         <div class="avside"><input type="file" id="avFileDefault" accept="image/*" style="margin-bottom:10px">
-        <button class="btn primary" id="avUpdateDefault">${t("av_upload")}</button></div></div></div>`;
+        <button class="btn primary" id="avUpdateDefault">${t("av_upload")}</button></div></div></div>
+    </div>`;
 }
 
 /* ---------------- Avanzado ---------------- */
