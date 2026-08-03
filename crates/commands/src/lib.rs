@@ -2134,7 +2134,13 @@ fn push_level_refresh(ctx: &AppContext, target: &Arc<AresUser>) {
         if let Some(tx) = &u.ws_text_sender {
             let _ = tx.send(ws_msg.clone());
         } else {
-            let _ = u.send(outbound::build_join_or_userlist_c(target, u.ares_crypto));
+            // Un cambio de nivel se anuncia con `UpdateUserStatus` (opcode 5),
+            // NO con el de JOIN: paridad del setter `AresClient.Level` de sb0t,
+            // que difunde `TCPOutbound.UpdateUserStatus` a la sala. Mandar el
+            // opcode de JOIN hace que cb0t escriba "X has joined" cada vez que
+            // alguien cambia de rango — y como el autologin aplica nivel en
+            // cada entrada, salía un "has joined" de más por cada login.
+            let _ = u.send(outbound::build_update_user_status_c(target, u.ares_crypto));
         }
     }
 }
@@ -2318,7 +2324,13 @@ fn apply_level(
         if let Some(tx) = &u.ws_text_sender {
             let _ = tx.send(ws_msg.clone());
         } else {
-            let _ = u.send(outbound::build_join_or_userlist_c(target, u.ares_crypto));
+            // Un cambio de nivel se anuncia con `UpdateUserStatus` (opcode 5),
+            // NO con el de JOIN: paridad del setter `AresClient.Level` de sb0t,
+            // que difunde `TCPOutbound.UpdateUserStatus` a la sala. Mandar el
+            // opcode de JOIN hace que cb0t escriba "X has joined" cada vez que
+            // alguien cambia de rango — y como el autologin aplica nivel en
+            // cada entrada, salía un "has joined" de más por cada login.
+            let _ = u.send(outbound::build_update_user_status_c(target, u.ares_crypto));
         }
     }
 
