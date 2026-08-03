@@ -101,7 +101,7 @@ pub async fn handle_tcp_client(
     let handshake_timeout = Duration::from_secs(ctx.settings.security.handshake_timeout_secs);
     let mut reader = PacketReaderStream::new(read_half);
 
-    let user = match timeout(handshake_timeout, async {
+    let (user, hijacked) = match timeout(handshake_timeout, async {
         process_handshake(&ctx, &mut reader, peer, tx.clone(), &scripting).await
     })
     .await
@@ -174,7 +174,17 @@ pub async fn handle_tcp_client(
     send_initial_state(&ctx, &user, &scripting).await;
 
     // Broadcast del JOIN a los usuarios existentes (ya con el nivel aplicado).
-    broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
+    //
+    // Salvo que esto sea un HIJACK: el mismo usuario reconectando (típico en
+    // móvil, cuando el socket viejo quedó zombie y el server aún no lo había
+    // enterrado). Ahí la sesión vieja se retiró como ghost —sin PART— así que
+    // para la sala nunca se fue; anunciar el JOIN produce el "X has joined"
+    // repetido sin ningún "has parted" en medio. sb0t hace justo esto:
+    // `if (hijack == null || !(hijack is AresClient))` envuelve todo el
+    // bloque del anuncio (`TCPProcessor.cs`).
+    if !hijacked {
+        broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
+    }
     ctx.publish_link_event(LinkEvent::Join {
         origin: None,
         user: LinkUserSnapshot::from_user(&user),
@@ -446,7 +456,7 @@ async fn process_handshake(
     peer: SocketAddr,
     tx: mpsc::UnboundedSender<Bytes>,
     scripting: &astra_scripting::ScriptHandle,
-) -> anyhow::Result<Option<Arc<server_core::user_pool::AresUser>>> {
+) -> anyhow::Result<Option<(Arc<server_core::user_pool::AresUser>, bool)>> {
     let pkt = reader.read_packet().await?;
     if pkt.data.is_empty() {
         return Ok(None);
@@ -530,12 +540,14 @@ async fn process_handshake(
                     // Name/OrgName, compara `OriginalIP`): se saca la sesión
                     // vieja y se deja pasar la nueva. Si es una IP DISTINTA, se
                     // rechaza como antes ("name in use" real).
+                    let mut hijacked = false;
                     if let Some(existing) = ctx.user_pool.get_by_name(&login.org_name) {
                         if existing.external_ip == external_ip {
                             info!(
                                 "hijack (misma IP): peer={} nick='{}' reemplaza sesión vieja id={}",
                                 peer, login.org_name, existing.id
                             );
+                            hijacked = true;
                             // GHOST (paridad sb0t Disconnect(true)): sin PART
                             // ni anuncio — la sesión nueva reemplaza el nombre
                             // en las userlists sin que la sala vea "has parted".
@@ -656,7 +668,7 @@ async fn process_handshake(
                         );
                     }
 
-                    Ok(Some(user_arc))
+                    Ok(Some((user_arc, hijacked)))
                 }
                 Err(e) => {
                     warn!("login inválido desde {}: {}", peer, e);

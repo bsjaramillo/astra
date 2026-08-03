@@ -104,7 +104,7 @@ pub async fn handle_connection(
     // Esperar el primer mensaje (LOGIN)
     let mut buf = BytesMut::with_capacity(8192);
     let handshake_timeout = Duration::from_secs(15);
-    let user = match timeout(handshake_timeout, async {
+    let (user, hijacked) = match timeout(handshake_timeout, async {
         ws_handshake_login(&ctx.clone(), &mut read_half, &mut buf, &ws_text_tx, peer, resolved_ip, &scripting).await
     })
     .await
@@ -182,8 +182,16 @@ pub async fn handle_connection(
         scripting.dispatch(ScriptEvent::LoginGranted { name: jname });
     }
 
-    // Broadcast del JOIN a usuarios Ares
-    broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
+    // Broadcast del JOIN a la sala — salvo que sea un HIJACK (el mismo
+    // usuario reconectando: móvil que perdió la red y vuelve antes de que el
+    // server entierre el socket viejo). Ahí la sesión anterior se retiró como
+    // ghost, sin PART, así que para la sala nunca se fue: anunciar el JOIN
+    // produce el "X has joined" repetido sin ningún "has parted" en medio.
+    // Paridad `TCPProcessor.cs` de sb0t, que envuelve todo el anuncio en
+    // `if (hijack == null || !(hijack is AresClient))`.
+    if !hijacked {
+        broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
+    }
 
     // Greet de bienvenida (PM del bot al usuario WS que entra)
     send_greet_ws(&ctx, &user, &ws_text_tx);
@@ -509,7 +517,7 @@ async fn ws_handshake_login(
     peer: SocketAddr,
     resolved_ip: std::net::IpAddr,
     scripting: &astra_scripting::ScriptHandle,
-) -> anyhow::Result<Option<Arc<AresUser>>> {
+) -> anyhow::Result<Option<(Arc<AresUser>, bool)>> {
     let frame = read_ws_frame(read_half, buf, &mut None).await?;
     let (opcode, payload) = match frame {
         Some(f) => f,
@@ -573,12 +581,14 @@ async fn ws_handshake_login(
     // Nick duplicado: si la sesión existente es de la MISMA IP (ya resuelta
     // vía proxy trust si aplica), es una reconexión — hijack, paridad
     // sb0t. Si es otra IP, se rechaza como antes.
+    let mut hijacked = false;
     if let Some(existing) = ctx.user_pool.get_by_name(&login.name) {
         if existing.external_ip == external_ip {
             info!(
                 "hijack (misma IP): peer={} nick='{}' reemplaza sesión vieja id={}",
                 peer, login.name, existing.id
             );
+            hijacked = true;
             // GHOST (paridad sb0t Disconnect(true)): sin PART ni anuncio.
             ctx.ghost_part_user(&existing);
         } else {
@@ -636,7 +646,7 @@ async fn ws_handshake_login(
         login.inbizier_web || login.inbizier_mobile
     );
 
-    Ok(Some(user_arc))
+    Ok(Some((user_arc, hijacked)))
 }
 
 /// Convierte los args parseados del LOGIN en `server_core::login::LoginData`.
