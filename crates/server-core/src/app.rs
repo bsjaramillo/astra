@@ -540,6 +540,7 @@ impl AppContext {
     /// Crea un nuevo contexto con la configuración y base de datos dadas.
     pub fn new(settings: Settings, db: Arc<Database>) -> Self {
         let initial_room_topic = settings.room_topic.clone();
+        let initial_room_status = settings.room_status.clone();
         let stats = Arc::new(Stats::new());
         let user_pool = Arc::new(UserPool::new());
         let bans = Arc::new(BanSystem::new(db.clone()));
@@ -628,7 +629,7 @@ impl AppContext {
             link_requests: broadcast::channel(256).0,
             start_time: Instant::now(),
             room_topic: RwLock::new(initial_room_topic),
-            room_status: RwLock::new(String::new()),
+            room_status: RwLock::new(initial_room_status),
             message_history: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             link_events,
             user_records: parking_lot::RwLock::new(std::collections::VecDeque::new()),
@@ -665,8 +666,56 @@ impl AppContext {
     }
 
     /// Actualiza el topic actual en memoria.
+    ///
+    /// No escribe en disco a propósito: el reloj de sala (`/clock`) reescribe
+    /// el topic cada minuto para meterle la hora, y persistir aquí machacaría
+    /// el archivo continuamente. Para los cambios que hace una persona está
+    /// [`persist_room_meta`](Self::persist_room_meta).
     pub fn set_room_topic(&self, topic: impl Into<String>) {
         *self.room_topic.write() = topic.into();
+    }
+
+    /// Guarda topic y/o status en el `astra.toml`, que es lo que se relee al
+    /// arrancar. Sin esto, un cambio hecho desde el chat o el panel duraba
+    /// hasta el siguiente reinicio y volvía al valor del archivo.
+    ///
+    /// Es best-effort: en Docker el config se monta a menudo de solo lectura.
+    /// En ese caso se avisa y el cambio sigue vigente en memoria, que es lo
+    /// mejor que se puede hacer sin poder escribir.
+    pub fn persist_room_meta(&self, topic: Option<&str>, status: Option<&str>) {
+        let Some(path) = self.config_path() else { return };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("no se pudo leer {} para guardar el cambio: {e}", path.display());
+                return;
+            }
+        };
+        // Se parsea el archivo del disco, no el snapshot de arranque: entre
+        // medias pudo escribirlo el panel o astra-creator, y no hay que
+        // deshacer lo suyo.
+        let mut settings: crate::settings::Settings = match toml::from_str(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "{} no parsea ({e}): el cambio no se guardará y se perderá al reiniciar",
+                    path.display()
+                );
+                return;
+            }
+        };
+        if let Some(t) = topic {
+            settings.room_topic = t.to_string();
+        }
+        if let Some(st) = status {
+            settings.room_status = st.to_string();
+        }
+        if let Err(e) = settings.save(&path) {
+            tracing::warn!(
+                "no se pudo guardar {} ({e}): el cambio sigue activo, pero se perderá al reiniciar",
+                path.display()
+            );
+        }
     }
 
     /// Retorna el status actual de la sala.

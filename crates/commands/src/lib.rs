@@ -1251,6 +1251,9 @@ fn handle_topic(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         truncate_text(args.trim(), 300)
     };
     ctx.set_room_topic(new_topic.clone());
+    // A disco: es un cambio hecho por una persona y debe sobrevivir al
+    // reinicio (el reloj de sala, que reescribe el topic solo, no persiste).
+    ctx.persist_room_meta(Some(&new_topic), None);
     broadcast_topic(ctx, &new_topic);
     send_system_line(ctx, user, "Topic updated.");
 }
@@ -3011,6 +3014,7 @@ fn handle_status(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
     let next = if text == "-" { String::new() } else { truncate_text(text, 200) };
     ctx.set_room_status(next.clone());
+    ctx.persist_room_meta(None, Some(&next));
     if next.is_empty() {
         send_system_line(ctx, user, "Room status cleared.");
     } else {

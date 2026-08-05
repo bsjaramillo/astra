@@ -24,8 +24,15 @@ pub struct Settings {
     pub bot_name: String,
     /// Nombre de la sala por defecto.
     pub room_name: String,
-    /// Topic por defecto.
+    /// Topic de la sala.
+    ///
+    /// Se persiste aquí cuando alguien lo cambia desde el chat o el panel: es
+    /// el único sitio que se relee al arrancar, y sin escribirlo el cambio se
+    /// perdía en el siguiente reinicio.
     pub room_topic: String,
+    /// Mensaje de estado de la sala. Se persiste igual que el topic.
+    #[serde(default)]
+    pub room_status: String,
     /// Password del owner (hash).
     pub owner_password: String,
     /// ¿Permitir registro de cuentas?
@@ -294,6 +301,7 @@ impl Default for Settings {
             bot_name: "Astra".to_string(),
             room_name: "Astra Chat".to_string(),
             room_topic: "Welcome to Astra".to_string(),
+            room_status: String::new(),
             owner_password: String::new(),
             allow_registration: true,
             roomsearch: true,
