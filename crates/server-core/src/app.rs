@@ -829,6 +829,64 @@ impl AppContext {
         self.broadcast_print(&text);
     }
 
+    /// Difunde un mensaje público de `sender` **aplicando su custom name**:
+    /// en vez del paquete público normal (nick + texto), la sala recibe una
+    /// línea `NoSuch` con el custom name antepuesto al texto, que es como
+    /// sb0t implementa la función (`TCPProcessor.Public`: el nick real
+    /// desaparece y el prefijo lo pone el propio custom name, por eso sirve
+    /// para colores/emojis/caracteres que un nick no admite).
+    ///
+    /// Devuelve `false` si el emisor no tiene custom name activo — el
+    /// llamador debe entonces difundir el público normal. Los destinatarios
+    /// que pidieron `MSG_CHAT_CLIENT_BLOCK_CUSTOMNAMES` (cb0t) siguen viendo
+    /// el público con el nick real.
+    pub fn broadcast_public_custom_name(
+        &self,
+        sender: &crate::user_pool::AresUser,
+        text: &str,
+    ) -> bool {
+        // Gate de sala: con `customnames` off, el custom name guardado no se
+        // aplica (paridad del getter `AresClient.CustomName`, que devuelve
+        // vacío si el setting está apagado).
+        if !self.room_flags.get("customnames") {
+            return false;
+        }
+        let Some(custom) = self.user_custom_name(sender) else {
+            return false;
+        };
+        // `CustomName + text` en crudo (paridad sb0t): el separador es cosa
+        // de quien pone el custom name — si quiere un espacio, lo incluye
+        // (`#customname <nick> (T) `).
+        let line = format!("{}{}", custom, text);
+        let vroom = *sender.vroom.read();
+        let name = sender.name.read().clone();
+        for u in self.user_pool.users() {
+            if !u.logged_in
+                || *u.vroom.read() != vroom
+                || u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                continue;
+            }
+            if !u.web_client
+                && u.block_custom_names
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                let _ = u.send(crate::outbound::build_public_c(&name, text, u.ares_crypto));
+            } else {
+                let _ = u.send_nosuch(&line);
+            }
+        }
+        true
+    }
+
+    /// Custom name efectivo de un usuario (`None` si no tiene o está vacío).
+    fn user_custom_name(&self, user: &crate::user_pool::AresUser) -> Option<String> {
+        user.custom_name
+            .read()
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+    }
+
     /// Broadcast de una línea de sistema (texto del server) a todos los
     /// usuarios logueados. Equivalente a `Server.Print` de sb0t.
     pub fn broadcast_print(&self, text: &str) {
@@ -1202,6 +1260,81 @@ mod tests {
         *u.name.write() = name.to_string();
         ctx.user_pool.add(std::sync::Arc::new(u));
         ctx.user_pool.get(id).unwrap()
+    }
+
+    fn add_user_with_sender(
+        ctx: &AppContext,
+        id: u16,
+        name: &str,
+    ) -> (
+        std::sync::Arc<crate::user_pool::AresUser>,
+        tokio::sync::mpsc::UnboundedReceiver<bytes::Bytes>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut u = crate::user_pool::AresUser::new(
+            id,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, id as u8)),
+            [id as u8; 16],
+        );
+        u.logged_in = true;
+        u.sender = Some(tx);
+        *u.name.write() = name.to_string();
+        ctx.user_pool.add(std::sync::Arc::new(u));
+        (ctx.user_pool.get(id).unwrap(), rx)
+    }
+
+    /// El custom name debe REEMPLAZAR al nick en el chat público: la sala
+    /// recibe una `NoSuch` con el prefijo, no el paquete público normal
+    /// (paridad `TCPProcessor.Public` de sb0t). Sin esto el custom name se
+    /// guardaba y se listaba, pero no se veía en ningún mensaje.
+    #[test]
+    fn custom_name_replaces_nick_in_public_text() {
+        let ctx = make_ctx();
+        ctx.room_flags.set("customnames", true);
+        let (alice, _a_rx) = add_user_with_sender(&ctx, 1, "Alice");
+        let (_bob, mut b_rx) = add_user_with_sender(&ctx, 2, "Bob");
+        let (carol, mut c_rx) = add_user_with_sender(&ctx, 3, "Carol");
+        // Carol pidió no ver custom names (cb0t opcode 242).
+        carol
+            .block_custom_names
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // El prefijo se concatena en crudo: el espacio lo pone quien fija el
+        // custom name, no el servidor.
+        *alice.custom_name.write() = Some("(T) ".to_string());
+
+        assert!(ctx.broadcast_public_custom_name(&alice, "hola mensaje de prueba"));
+
+        let pkt = b_rx.try_recv().expect("Bob debe recibir el mensaje");
+        assert_eq!(pkt[0], proto_ares::TcpMsg::ServerNosuch as u8);
+        let mut r = proto_ares::PacketReader::new(&pkt[1..]);
+        assert_eq!(r.read_string_nt().unwrap(), "(T) hola mensaje de prueba");
+
+        // Carol, con BlockCustomNames, sigue viendo el público normal.
+        let pkt = c_rx.try_recv().expect("Carol debe recibir el mensaje");
+        assert_eq!(pkt[0], proto_ares::TcpMsg::Public as u8);
+        let mut r = proto_ares::PacketReader::new(&pkt[1..]);
+        assert_eq!(r.read_string_nt().unwrap(), "Alice");
+        assert_eq!(r.read_string_nt().unwrap(), "hola mensaje de prueba");
+    }
+
+    /// Sin custom name, o con `customnames` off en la sala, el llamador debe
+    /// difundir el público normal (la función devuelve `false` y no manda nada).
+    #[test]
+    fn custom_name_is_skipped_when_unset_or_room_flag_off() {
+        let ctx = make_ctx();
+        let (alice, _a_rx) = add_user_with_sender(&ctx, 1, "Alice");
+        let (_bob, mut b_rx) = add_user_with_sender(&ctx, 2, "Bob");
+
+        // Flag on pero sin custom name.
+        ctx.room_flags.set("customnames", true);
+        assert!(!ctx.broadcast_public_custom_name(&alice, "hola"));
+        assert!(b_rx.try_recv().is_err());
+
+        // Custom name puesto pero la sala lo tiene deshabilitado.
+        *alice.custom_name.write() = Some("(T)".to_string());
+        ctx.room_flags.set("customnames", false);
+        assert!(!ctx.broadcast_public_custom_name(&alice, "hola"));
+        assert!(b_rx.try_recv().is_err());
     }
 
     /// Regresión del lastseen que "se encontraba a sí mismo": solo debe

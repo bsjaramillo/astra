@@ -387,6 +387,20 @@ pub fn build_public_c(from_name: &str, text: &str, crypto: Crypto) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+/// Línea de sistema sin emisor (`MSG_CHAT_SERVER_NOSUCH`, 44). El cliente la
+/// pinta como texto suelto en la sala; es el transporte que usa sb0t para los
+/// mensajes de usuarios con custom name (`TCPOutbound.NoSuch`).
+///
+/// Formato: `str text`
+pub fn build_nosuch_c(text: &str, crypto: Crypto) -> Bytes {
+    // sb0t corta la NoSuch a 4000 bytes, no a los 300 del público: aquí el
+    // texto ya viene con el custom name antepuesto y no debe perder la cola.
+    let text = truncate_message(text, 340);
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerNosuch, crypto);
+    w.write_string_nt(&text).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
 /// Emote (broadcast).
 ///
 /// Formato: `str name, str text`

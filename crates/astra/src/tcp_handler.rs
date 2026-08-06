@@ -1005,6 +1005,16 @@ fn handle_advanced_features(
         handle_custom_font(ctx, user, inner);
         return;
     }
+    // BlockCustomNames (242): el cliente pide ver siempre el nick real en vez
+    // de los custom names de los demás (paridad `TCPAdvancedProcessor`).
+    // Payload: 1 byte sin cifrar, 0=no 1=sí.
+    if TcpMsg::from_u8(inner_op) == Some(TcpMsg::ClientBlockCustomNames) {
+        if let Some(b) = inner.first() {
+            user.block_custom_names
+                .store(*b == 1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return;
+    }
     // Voice chat: el emisor muzzled no transmite (paridad sb0t).
     if user.is_muzzled() {
         return;
@@ -1434,7 +1444,11 @@ async fn handle_public(
         scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
     }
 
-    broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, &text, c));
+    // Con custom name activo el mensaje sale como línea `NoSuch` con el
+    // prefijo del custom name; si no, público normal.
+    if !ctx.broadcast_public_custom_name(user, &text) {
+        broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, &text, c));
+    }
     ctx.record_message(&name, &text, false);
     vspy_copy(ctx, user, &name, &text);
     ctx.publish_link_event(LinkEvent::Public {

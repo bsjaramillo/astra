@@ -133,6 +133,10 @@ pub struct AresUser {
     pub font: parking_lot::RwLock<IFont>,
     /// Custom name.
     pub custom_name: parking_lot::RwLock<Option<String>>,
+    /// El cliente pidió NO ver los custom names de los demás
+    /// (`MSG_CHAT_CLIENT_BLOCK_CUSTOMNAMES`, 242): recibe el público normal
+    /// con el nick real (paridad sb0t `AresClient.BlockCustomNames`).
+    pub block_custom_names: AtomicBool,
     /// Personal message (protegido para acceso concurrente).
     pub personal_message: parking_lot::Mutex<String>,
     /// Avatar. (protegido por Mutex para asignación thread-safe vía Arc)
@@ -241,6 +245,7 @@ impl AresUser {
             ares_crypto: None,
             font: parking_lot::RwLock::new(IFont::default()),
             custom_name: parking_lot::RwLock::new(None),
+            block_custom_names: AtomicBool::new(false),
             personal_message: parking_lot::Mutex::new(String::new()),
             avatar: parking_lot::Mutex::new(None),
             org_avatar: parking_lot::Mutex::new(None),
@@ -396,6 +401,19 @@ impl AresUser {
                 .is_ok();
         }
         self.send(crate::outbound::build_pvt_c(bot_name, text, self.ares_crypto))
+    }
+
+    /// Línea suelta en la sala, sin emisor (`NoSuch`). A diferencia de
+    /// `print`, para clientes Ares NO va como PM del bot sino como el paquete
+    /// `ServerNosuch`, que es lo que pinta el chat público sin nick delante:
+    /// el transporte de los mensajes con custom name (sb0t `TCPOutbound.NoSuch`).
+    pub fn send_nosuch(&self, text: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx
+                .send(format!("NOSUCH:{}:{}", ws_len(text), text))
+                .is_ok();
+        }
+        self.send(crate::outbound::build_nosuch_c(text, self.ares_crypto))
     }
 
     /// PM real desde el bot (u otro emisor): para clientes web abre la

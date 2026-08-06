@@ -1117,9 +1117,12 @@ fn handle_customname(ctx: &AppContext, user: &Arc<AresUser>, args: &str, set: bo
     // Paridad sb0t Eval.CustomName/UncustomName: forma target-based para
     // mods (`/customname <nick> <nombre>`) y self-service para el propio
     // usuario (permitido si nivel > Regular o el flag `general` está on).
-    let trimmed = args.trim();
+    // Solo se recorta por la izquierda: el custom name se concatena EN CRUDO
+    // delante del mensaje, así que un espacio final es parte del nombre y lo
+    // decide quien lo pone (`#customname Bob (T) ` → "(T) hola").
+    let trimmed = args.trim_start();
 
-    if trimmed.is_empty() {
+    if trimmed.trim_end().is_empty() {
         if set {
             // Extra de Astra: sin args muestra el propio custom name.
             let current = user.custom_name.read().clone();
@@ -1137,7 +1140,7 @@ fn handle_customname(ctx: &AppContext, user: &Arc<AresUser>, args: &str, set: bo
     // ¿Primer token es un usuario online? → forma target-based.
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let first = parts.next().unwrap_or("");
-    let rest = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim_start();
     if let Some(target) = ctx.user_pool.get_by_name(first) {
         if target.id != user.id {
             if !can_edit_topic(user) {
@@ -1159,6 +1162,16 @@ fn handle_customname(ctx: &AppContext, user: &Arc<AresUser>, args: &str, set: bo
                 }
             }
             apply_custom_name(ctx, user, &target, value);
+            // El seteo por un mod no está gateado, pero el custom name solo
+            // se PINTA si la sala tiene custom names habilitados: sin este
+            // aviso el mod cree que falló la función.
+            if value.is_some() && !ctx.room_flags.get("customnames") {
+                send_system_line(
+                    ctx,
+                    user,
+                    "Note: custom names are disabled in this room (#customnames on to show them).",
+                );
+            }
             return;
         }
     }
@@ -5863,6 +5876,12 @@ mod tests {
             next_pvt_text(&mut a_rx),
             "Bob's custom name has been set by Alice"
         );
+
+        // El espacio final del argumento es parte del custom name (se
+        // concatena en crudo delante del mensaje), así que NO se recorta.
+        let _ = dispatch_builtin(&ctx, &alice, "customname", "Bob (T) ");
+        assert_eq!(bob.custom_name.read().clone(), Some("(T) ".to_string()));
+        let _ = next_pvt_text(&mut a_rx);
 
         // Y lo limpia con uncustomname <nick>.
         let _ = dispatch_builtin(&ctx, &alice, "uncustomname", "Bob");

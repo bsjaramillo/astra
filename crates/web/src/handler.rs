@@ -969,7 +969,10 @@ fn handle_ws_public(
         from: name.clone(),
         text: text.to_string(),
     });
-    broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, text, c));
+    // Custom name activo → línea `NoSuch` con el prefijo (paridad TCP).
+    if !ctx.broadcast_public_custom_name(user, text) {
+        broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, text, c));
+    }
     ctx.record_message(&name, text, false);
 }
 
