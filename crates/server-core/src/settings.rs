@@ -372,7 +372,21 @@ impl Settings {
     /// ¿El `guid` es un secreto real, o un placeholder / vacío?
     pub fn has_real_guid(&self) -> bool {
         let g = self.guid.trim();
-        !g.is_empty() && !g.starts_with(Self::PLACEHOLDER_GUID_PREFIX)
+        !g.is_empty()
+            && !g.starts_with(Self::PLACEHOLDER_GUID_PREFIX)
+            && !Self::is_derived_from_room_id(g)
+    }
+
+    /// ¿El `guid` es uno de los que astra-creator derivaba del id de la sala?
+    ///
+    /// Hasta astra-creator 0.0.12 el scaffold escribía `astra-<id>-guid` (con
+    /// ceros al final si no llegaba a 16 chars). Eso NO es un secreto: quien
+    /// conoce el nombre de la sala lo adivina, y con él puede autenticarse
+    /// como leaf del hub. Se trata como placeholder para que el servidor lo
+    /// reemplace por uno aleatorio en el próximo arranque, igual que al
+    /// default de fábrica — así las salas ya creadas se curan solas.
+    fn is_derived_from_room_id(g: &str) -> bool {
+        g.starts_with("astra-") && g.trim_end_matches('0').ends_with("-guid")
     }
 
     /// Genera un `guid` de servidor aleatorio (32 hex) y lo asigna.
@@ -445,6 +459,21 @@ mod tests {
         // menos así de largo para no caer en el camino del SHA1.
         assert_eq!(a.guid.len(), 32);
         assert!(a.guid.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn guid_derived_from_the_room_id_is_not_a_real_secret() {
+        // astra-creator ≤0.0.12 escribía esto en el scaffold: adivinable a
+        // partir del nombre de la sala, así que hay que regenerarlo.
+        for guessable in [
+            "astra-mi-sala-guid",
+            "astra-uno-guid00",       // padding a 16 chars de ids cortos
+            "astra-radio-latina-guid",
+        ] {
+            let mut s = Settings::default();
+            s.guid = guessable.to_string();
+            assert!(!s.has_real_guid(), "{guessable} no es un secreto");
+        }
     }
 
     #[test]
