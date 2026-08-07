@@ -345,6 +345,16 @@ pub fn build_custom_data_c(ident: &str, sender: &str, data: &[u8], crypto: Crypt
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+/// Nudge/buzz nativo de cb0t (paridad `AresClient.Nudge` de sb0t):
+/// CustomData `cb0t_nudge` cuyo payload es `base64(e67("0"+sender, 1488))`.
+/// Sólo tiene sentido hacia un custom client.
+pub fn build_nudge_c(sender: &str, crypto: Crypto) -> Bytes {
+    use base64::Engine as _;
+    let enc = crate::hashlink::e67_seed(format!("0{}", sender).as_bytes(), 1488);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(enc);
+    build_custom_data_c("cb0t_nudge", sender, b64.as_bytes(), crypto)
+}
+
 /// Error fatal del server (`ServerError`) — aviso antes de expulsar.
 pub fn build_server_error_c(text: &str, crypto: Crypto) -> Bytes {
     let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerError, crypto);

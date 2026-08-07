@@ -848,6 +848,7 @@ async fn dispatch_ws_message(
             }
             handle_ws_pm(ctx, user, args, scripting);
         }
+        "BUZZ" => handle_ws_buzz(ctx, user, args),
         "PERMSG" => handle_ws_permsg(ctx, user, args, scripting),
         "AVATAR" => handle_ws_avatar(ctx, user, args, scripting),
         "CUSTOM_DATA_HEAD" => handle_ws_custom_data_head(ctx, user, args, false),
@@ -978,6 +979,45 @@ fn handle_ws_public(
 
 /// PM saliente de un usuario web: `PM:{nameLen},{textLen}:{target}{text}`.
 /// Paridad `WebProcessor.PM` de sb0t (incluye `#cmd`//`/cmd` al bot = comando).
+/// `BUZZ:{len}:{target}` — zumbido dirigido a un usuario (paridad
+/// `WebProcessor.Buzz` de sb0t). El destinatario recibe `BUZZ:{len}:{emisor}`.
+///
+/// sb0t sólo busca el target entre los clientes web (`UserPool.WUsers`) y su
+/// `ib0tClient.Nudge` es un método vacío; aquí además se puentea a los
+/// clientes Ares custom (cb0t) como el `cb0t_nudge` nativo, para que el
+/// zumbido funcione entre clientes distintos.
+fn handle_ws_buzz(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !ctx.room_flags.get("buzzes") {
+        return;
+    }
+    let Some(items) = protocol::parse_lens_args(args) else {
+        return;
+    };
+    let Some(target_name) = items.first().map(|s| s.trim()) else {
+        return;
+    };
+    if target_name.is_empty() {
+        return;
+    }
+    let Some(target) = ctx.user_pool.get_by_name(target_name) else {
+        return;
+    };
+    if !target.logged_in || target.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let from = user.name.read().clone();
+    // Un zumbido es una notificación intrusiva: si te ignoran, no llega.
+    if target
+        .ignore_list
+        .read()
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case(&from))
+    {
+        return;
+    }
+    let _ = target.send_buzz(&from);
+}
+
 fn handle_ws_pm(
     ctx: &AppContext,
     user: &Arc<AresUser>,

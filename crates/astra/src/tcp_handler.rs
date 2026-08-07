@@ -588,6 +588,10 @@ async fn process_handshake(
                     let mut user = server_core::login::build_ares_user(id, external_ip, login);
                     user.sender = Some(tx.clone());
                     user.logged_in = true;  // marcar ANTES de envolver en Arc
+                    // Paridad sb0t `TCPProcessor.Login`: "everyone can be
+                    // custom client". Gatea el ruteo de CustomData (nudges,
+                    // scribbles privados, `cb0t_pm_msg`) hacia este cliente.
+                    user.custom_client = true;
                     if is_local {
                         // Paridad sb0t: `client.Registered = true; client.Owner
                         // = true;` y más tarde `client.Level = ILevel.Host`.
@@ -943,7 +947,7 @@ async fn dispatch_message(
             }
         }
         TcpMsg::CustomData => {
-            publish_raw_link(ctx, LINK_MSG_CUSTOM_DATA_TO, &pkt.data[1..]);
+            handle_custom_data(ctx, user, &pkt.data[1..], &scripting);
         }
         TcpMsg::CustomDataAll => {
             publish_raw_link(ctx, LINK_MSG_CUSTOM_DATA_ALL, &pkt.data[1..]);
@@ -1601,9 +1605,9 @@ async fn handle_pvt(
                 to: target_name.clone(),
                 text: text.clone(),
             });
-            // El PM se cifra con la key del DESTINATARIO.
-            let pkt = outbound::build_pvt_c(&from, &text, target.ares_crypto);
-            if !target.send(pkt) {
+            // `send_pvt` cifra con la key del DESTINATARIO y traduce a texto
+            // ib0t si el destinatario es un cliente web (WS).
+            if !target.send_pvt(&from, &text) {
                 warn!("no se pudo enviar PM de '{}' a '{}'", from, target_name);
             }
         }
@@ -1619,6 +1623,164 @@ async fn handle_pvt(
         let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerNosuch, user.ares_crypto);
         w.write_string_nt(&format!("User '{}' not found", target_name)).ok();
         user.send(Bytes::copy_from_slice(w.as_bytes()));
+    }
+}
+
+/// Maneja MSG_CHAT_CLIENT_CUSTOM_DATA (200): el canal *privado* de los
+/// clientes custom (cb0t). Es el segundo transporte de PM además del PVT
+/// binario: `cb0t_pm_msg` (PM enriquecido cb0t↔cb0t), `cb0t_scribble_*`
+/// (dibujo privado), nudges, etc.
+///
+/// Formato: `str ident, str target_name, bytes data` (los strings cifrados
+/// con la key del EMISOR; `data` va en claro).
+///
+/// Paridad `TCPProcessor.CustomData` de sb0t: se entrega al target LOCAL si
+/// existe y es un custom client; sólo si no está local se reenvía al link.
+fn handle_custom_data(
+    ctx: &AppContext,
+    user: &Arc<server_core::user_pool::AresUser>,
+    data: &[u8],
+    scripting: &ScriptHandle,
+) {
+    // Gate sb0t: `if (client.Quarantined || !client.Captcha) return;`
+    if user.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        || user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    let mut r = PacketReader::new_crypto(data, user.ares_crypto);
+    let ident = match r.read_string_nt() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let target_name = match r.read_string_nt() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let payload = &data[r.position()..];
+    let from = user.name.read().clone();
+
+    let found = ctx
+        .user_pool
+        .get_by_name(&target_name)
+        .filter(|t| t.logged_in);
+
+    // Nudge (buzz) hacia un cliente web: se traduce al ident `BUZZ` del
+    // protocolo ib0t. sb0t no lo puentea (su `ib0tClient.Nudge` está vacío),
+    // pero sin esto el zumbido de cb0t hacia la web se pierde.
+    if ident == "cb0t_nudge" {
+        if let Some(target) = found.as_ref().filter(|t| t.web_client) {
+            if !ctx.room_flags.get("buzzes")
+                || target
+                    .ignore_list
+                    .read()
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(&from))
+            {
+                return;
+            }
+            let _ = target.send_buzz(&from);
+            return;
+        }
+    }
+
+    // sb0t busca en `UserPool.AUsers` con `CustomClient`: los clientes web no
+    // hablan este protocolo binario, así que para ellos el target "no existe".
+    let target = found.filter(|t| t.custom_client && !t.web_client);
+
+    let send_offline = || {
+        let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerOfflineUser, user.ares_crypto);
+        w.write_string_nt(&target_name).ok();
+        user.send(Bytes::copy_from_slice(w.as_bytes()));
+    };
+
+    match ident.as_str() {
+        "cb0t_pm_msg" => {
+            let Some(target) = target else {
+                send_offline();
+                return;
+            };
+            // Muzzled o en la ignore list del target → "is ignoring you"
+            // (sb0t colapsa ambos casos en la misma respuesta).
+            if user.is_muzzled()
+                || target
+                    .ignore_list
+                    .read()
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(&from))
+            {
+                let mut w =
+                    PacketWriter::with_msg_crypto(TcpMsg::ServerIsIgnoringYou, user.ares_crypto);
+                w.write_string_nt(&target_name).ok();
+                user.send(Bytes::copy_from_slice(w.as_bytes()));
+                return;
+            }
+            if target.cloaked.load(std::sync::atomic::Ordering::Relaxed) {
+                send_offline();
+                return;
+            }
+            // Hook onPMBefore: el texto real va cifrado dentro del payload
+            // cb0t, así que sb0t pasa un placeholder al script (sólo puede
+            // cancelar, no reescribir). Mantenemos esa semántica.
+            if scripting.check_pm_before(&from, &target_name, "          ").is_none() {
+                return;
+            }
+            ctx.stats.on_pm();
+            let _ = target.send(server_core::outbound::build_custom_data_c(
+                &ident,
+                &from,
+                payload,
+                target.ares_crypto,
+            ));
+            scripting.dispatch(astra_scripting::ScriptEvent::Private {
+                from,
+                to: target_name,
+                text: "          ".to_string(),
+            });
+        }
+        // Scribble privado: gate de sala + hook onScribbleCheck(is_pm=true).
+        i if i.starts_with("cb0t_scribble_") => {
+            let Some(target) = target else {
+                return;
+            };
+            if !ctx.room_flags.get("scribbles") || !scripting.check_scribble(&from, true) {
+                return;
+            }
+            if target
+                .ignore_list
+                .read()
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(&from))
+            {
+                return;
+            }
+            let _ = target.send(server_core::outbound::build_custom_data_c(
+                &ident,
+                &from,
+                payload,
+                target.ares_crypto,
+            ));
+        }
+        // Resto de idents (nudges, tags propios de cb0t): passthrough al
+        // target local, o al link si no está aquí.
+        _ => match target {
+            Some(target) => {
+                if !target
+                    .ignore_list
+                    .read()
+                    .iter()
+                    .any(|e| e.eq_ignore_ascii_case(&from))
+                {
+                    let _ = target.send(server_core::outbound::build_custom_data_c(
+                        &ident,
+                        &from,
+                        payload,
+                        target.ares_crypto,
+                    ));
+                }
+            }
+            None => publish_raw_link(ctx, LINK_MSG_CUSTOM_DATA_TO, data),
+        },
     }
 }
 

@@ -338,6 +338,21 @@ impl AresUser {
         self.send(crate::outbound::build_pvt_c(from, text, self.ares_crypto))
     }
 
+    /// Envía un zumbido (buzz/nudge) de `from`. Clientes web: ident `BUZZ`
+    /// del protocolo ib0t; clientes Ares custom: el `cb0t_nudge` nativo.
+    /// Retorna `false` si el cliente no sabe recibirlo (Ares no custom).
+    pub fn send_buzz(&self, from: &str) -> bool {
+        if let Some(tx) = &self.ws_text_sender {
+            return tx
+                .send(format!("BUZZ:{}:{}", ws_len(from), from))
+                .is_ok();
+        }
+        if !self.custom_client {
+            return false;
+        }
+        self.send(crate::outbound::build_nudge_c(from, self.ares_crypto))
+    }
+
     /// Como [`send_pvt`](Self::send_pvt) pero para un mensaje público.
     pub fn send_public(&self, from: &str, text: &str) -> bool {
         if let Some(tx) = &self.ws_text_sender {
@@ -538,6 +553,31 @@ mod tests {
 
     fn user() -> AresUser {
         AresUser::new(1, IpAddr::V4(Ipv4Addr::LOCALHOST), [0u8; 16])
+    }
+
+    #[test]
+    fn send_buzz_web_usa_el_ident_de_texto() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let mut u = user();
+        u.ws_text_sender = Some(tx);
+        assert!(u.send_buzz("Pedrito"));
+        assert_eq!(rx.try_recv().unwrap(), "BUZZ:7:Pedrito");
+    }
+
+    #[test]
+    fn send_buzz_ares_gatea_en_custom_client() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<bytes::Bytes>();
+        let mut u = user();
+        u.sender = Some(tx);
+        // Cliente Ares que no es custom client: no sabe qué hacer con el nudge.
+        assert!(!u.send_buzz("Pedrito"));
+        assert!(rx.try_recv().is_err());
+        // Custom client (cb0t): CustomData (200) con ident `cb0t_nudge`.
+        u.custom_client = true;
+        assert!(u.send_buzz("Pedrito"));
+        let pkt = rx.try_recv().unwrap();
+        assert_eq!(pkt[0], proto_ares::TcpMsg::CustomData as u8);
+        assert!(pkt.windows(11).any(|w| w == b"cb0t_nudge\0"));
     }
 
     #[tokio::test]

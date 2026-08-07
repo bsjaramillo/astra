@@ -1810,20 +1810,10 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
             // Paridad sb0t `AresClient.Nudge`: CustomData `cb0t_nudge` con
             // payload base64(e67("0"+sender, seed 1488)). Solo custom clients
             // (sb0t gatea en JSUser.Nudge con CustomClient).
-            if !u.custom_client {
-                false
-            } else {
-                let sender = if arg.trim().is_empty() { bot.clone() } else { arg.trim().to_string() };
-                let raw = format!("0{}", sender);
-                let enc = server_core::hashlink::e67_seed(raw.as_bytes(), 1488);
-                let b64 = base64_encode_bytes_to_string(&enc);
-                u.send(server_core::outbound::build_custom_data_c(
-                    "cb0t_nudge",
-                    &sender,
-                    b64.as_bytes(),
-                    u.ares_crypto,
-                ))
-            }
+            let sender = if arg.trim().is_empty() { bot.clone() } else { arg.trim().to_string() };
+            // `send_buzz` gatea en custom_client para Ares y traduce a `BUZZ`
+            // para los clientes web (sb0t no puede: su ib0tClient no lo hace).
+            u.send_buzz(&sender)
         }
         "setUrl" => {
             // Paridad sb0t `IUser.URL(addr, text)`: manda el paquete de URL
