@@ -70,8 +70,11 @@ estaba completa desde Fase 2; ahora expuesta como comandos:
   reensambla continuations, consume Ping/Pong intercalados sin perder el
   acumulador, rechaza fragmentación anidada y limita a 1 MiB. 5 tests nuevos
   con TCP real en loopback
-- [x] Panel HTML servido: `GET /` sin `Upgrade: websocket` responde 200 con
-  `panel::INDEX_HTML` (antes 400). Validado E2E con curl
+- [x] `GET /` sin `Upgrade: websocket` responde 200 (antes 400). Validado E2E
+  con curl. **Revertido en parte (2026-08-07):** lo que servía era un chat de
+  prueba con auto-login como "WebUser" — abrir la URL de la sala en el
+  navegador te metía en la sala. Eliminado; ahora responde una línea de texto
+  plano y el único HTML servido es `/admin`
 
 ## Fase E — Link hardening ✅ (2026-07-08)
 

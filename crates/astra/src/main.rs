@@ -683,6 +683,42 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Expiración de muzzles (cada 60s, paridad `Muzzles.Tick` de sb0t): los
+    // muzzles puestos con `#muzzle` caducan pasado el `#mtimeout` de la sala y
+    // la expiración se ANUNCIA a todos (Timeouts#1). `is_muzzled()` ya expira
+    // de forma perezosa; este barrido es el que emite el aviso.
+    let muzzle_ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let now = server_core::time::unix_time();
+            for u in muzzle_ctx.user_pool.users() {
+                if !u.muzzled.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+                let until = u.muzzle_until.load(std::sync::atomic::Ordering::Relaxed);
+                if until == 0 || now < until {
+                    continue;
+                }
+                u.muzzled.store(false, std::sync::atomic::Ordering::Relaxed);
+                u.muzzle_until
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                let name = u.name.read().clone();
+                muzzle_ctx.publish_link_event(server_core::LinkEvent::UserUpdated {
+                    origin: None,
+                    user: server_core::LinkUserSnapshot::from_user(&u),
+                });
+                muzzle_ctx.broadcast_print(
+                    &muzzle_ctx
+                        .templates
+                        .render("timeouts.muzzle_expired", &[("+n", &name)]),
+                );
+            }
+        }
+    });
+
     // FastPing periódico (cada 2s) a todos los clientes Ares TCP logueados.
     // Paridad `ServerCore.cs` de sb0t: el server les manda esto a los
     // clientes para (a) mantener viva la conexión contra NAT/firewalls

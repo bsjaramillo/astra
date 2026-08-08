@@ -32,6 +32,88 @@
 > fecha absoluta); bloque de `roominfo` con textos RoomInfo#0-5. Fix de
 > paso: `announce_last_seen` interpretaba ms como segundos.
 >
+> **Fix 2026-08-07 (`#customname` reportado por el usuario):** faltaba el
+> parseo de target de sb0t. `Helpers.PopulateCommand` (`core/Helpers.cs:253`)
+> resuelve el target de CUALQUIER comando así: (1) el argumento entero como
+> nick (permite espacios), (2) `"<nick>" <args>` (exacto y, si falla, por
+> prefijo), (3) `<id> <args>` con el **id numérico** que muestra `#id <nick>`,
+> (4) `<id>` suelto; si nada resuelve, sb0t **descarta los args**. Astra solo
+> miraba el primer token como nick, así que `#customname 52 (T) ` caía en el
+> self-service y guardaba `"52 (T)"` como custom name. Implementado en
+> `commands::populate_command` (+ la extensión `<nick> <args>` sin comillas de
+> Astra en `resolve_target_arg`, que sb0t no acepta), usado por `customname`/
+> `uncustomname` y por el `target` que reciben los scripts en `onCommand`.
+> Segundo bug del mismo reporte: `parse_command` recortaba el argumento por la
+> derecha y el custom name se concatena EN CRUDO delante del mensaje, así que
+> el espacio separador desaparecía (`(T)hola` en vez de `(T) hola`); ahora los
+> entry points usan `parse_command_raw` y `dispatch_builtin` recorta salvo para
+> los comandos de `WHITESPACE_SENSITIVE_COMMANDS`.
+>
+> **Rollout completo (2026-08-07, misma tanda):**
+> - `populate_command` aplicado a **todos** los comandos con target vía dos
+>   helpers: `find_target` (comandos que solo llevan target: ban/ban10/ban60/
+>   kick/muzzle/unmuzzle/whois/revoke/oldname/kiddy/unkiddy/lower/kewltext/
+>   paint/locate/trace/unban/lastseen/id/…) y `find_target_and_args`
+>   (`<target> <args>`: whisper/changename/changemessage/echo/clone/redirect/
+>   customname). Los que ya usaban `rsplitn` con el valor al final
+>   (grant/setlevel/addautologin/move) resuelven el nick con `find_target`, así
+>   que también aceptan id y comillas. Ahora `#kick 52`, `#muzzle "Juan Perez"`
+>   o `#echo 52 texto` funcionan como en sb0t. NO se tocó
+>   `#unquarantine <nick|index>` (ahí el número es el índice de la lista, no un
+>   id) ni las búsquedas por nick del PROTOCOLO (PM/scribble/audio/voice), que
+>   en sb0t también son match exacto.
+> - **Custom names persistentes** (`commands/CustomNames.cs`): tabla
+>   `custom_names(guid, name, text)` en SQLite, `AppContext::save_custom_name`
+>   al setear/limpiar y `load_custom_name` en el join (TCP y web), paridad
+>   `CustomNames.Set` dentro de `Joined()`. Clave guid+nick como sb0t: si el
+>   usuario entra con otro nick, no se reaplica.
+> - **`#mtimeout` reescrito**: en sb0t (`Eval.MTimeout`) **no es por usuario** —
+>   fija `Settings.MuzzleTimeout` (minutos, 0-99, 0 = ilimitado) para toda la
+>   sala y lo anuncia con Timeouts#0; los muzzles de `#muzzle` caducan solos
+>   pasado ese tiempo (`Muzzles.Tick`) y la expiración se anuncia con
+>   Timeouts#1. Astra lo tenía como "muzzle temporal a un usuario". Ahora
+>   `#mtimeout <0-99>` es la forma sb0t (nuevo `AppContext::muzzle_timeout`,
+>   aplicado en `handle_muzzle`, con barrido de expiración cada 60s en
+>   `main.rs`), y `#mtimeout <nick|id> <segundos>` se conserva como extra.
+>
+> **Pasada de niveles / templates / textos de salida (2026-08-07):**
+> - **Niveles:** diff mecánico de los 86 `[CommandLevel]` de `Eval.cs` contra
+>   `DEFAULT_COMMAND_LEVELS` → **0 diferencias**. Las 3 entradas sin gate
+>   central (`customname`/`uncustomname`/`idle`) son deliberadas: ahí sb0t
+>   decide dentro del handler (self-service vs target).
+> - **`#help` estaba incompleto:** 44 comandos existían en el dispatcher pero
+>   no se listaban (ban10, ban60, listbans, cbans, whisper, pmblock, viewmotd,
+>   loadmotd, un*, host*, link/unlink, greetmsg/pmgreetmsg/addgreetmsg/…,
+>   *filter, addtopic/remtopic, rempassword, adminannounce, loadtemplate…).
+>   Diff automatizado contra los `admin.Print("/…")` de `ServerEvents.Help`:
+>   ahora la cobertura es completa. Alias `hostcbans` agregado (sb0t despacha
+>   con `StartsWith("hostcban")`).
+> - **Notification#29:** sb0t responde *"your admin level is too low to use
+>   this command on +n"* cuando el target tiene nivel >= al del admin, con el
+>   MISMO texto en todos los comandos. Astra tenía 8 frases distintas
+>   inventadas → unificadas en `notification.level_too_low` vía
+>   `send_level_too_low`. Además **faltaba el chequeo** en `ban`/`ban10`/
+>   `ban60` (un Admin podía banear a un Owner; también cubre `#hostban`).
+> - **AdminAction #7-#18 y #23-#26:** 16 anuncios públicos que Astra no
+>   emitía — efectos de texto (lower/unlower/kewltext/unkewltext/paint/
+>   unpaint), kiddy/unkiddy, echo/unecho, changemessage, range bans y ASN
+>   bans. Agregados con sus textos exactos (los range/ASN usan `+r`, no `+n`,
+>   de ahí `announce_admin_action_as`).
+> - **Category.EnableDisable (38 textos):** en sb0t **cada toggle de sala se
+>   DIFUNDE** con su frase propia ("+n has enabled colors", "dynamic url tag
+>   was enabled by +n", …); Astra solo respondía "Room flag 'x' enabled." en
+>   privado. Ahora se difunde también, vía `announce_flag_change` (stealth/
+>   cloak firman como la sala) desde `handle_room_flag` y desde los toggles
+>   con handler propio (history/lastseen/roominfo/idle/customnames/url). Los
+>   flags que solo existen en Astra (`avatars`, `roomsearch`) no inventan
+>   anuncio: `TemplateManager::has` decide.
+> - **`#disableavatar` era otra divergencia semántica:** en sb0t es POR
+>   USUARIO (borra el avatar del target + AdminAction#23), no un toggle de
+>   sala. Reescrito; el toggle sigue disponible como `#avatars [on|off]`.
+> - **`#filter <on|off>`:** faltaba el toggle de `Settings.Filtering` (Astra
+>   solo tenía los subcomandos add/del/list). Agregado `WordFilterManager::
+>   set_enabled` + gate en `check`/`check_announce`.
+>
 > **Pendiente (fuera del alcance de la auditoría de comandos):**
 > `roomsearch` real (requiere la channel list UDP), tags de media en MOTD
 > (divergencia documentada), y la verificación manual con cliente Ares e

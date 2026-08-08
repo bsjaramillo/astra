@@ -169,6 +169,9 @@ pub async fn handle_connection(
     // que ve el propio usuario.
     let _ = astra_commands::dispatch_autologin(&ctx, &user);
 
+    // Custom name guardado (paridad `CustomNames.Set` dentro de `Joined()`).
+    ctx.load_custom_name(&user);
+
     // Enviar estado inicial (directo a ws_text_tx como strings)
     send_initial_state_ws(&ctx, &user, &ws_text_tx, &scripting).await;
 
@@ -870,12 +873,15 @@ fn handle_ws_command(
     raw: &str,
     scripting: &astra_scripting::ScriptHandle,
 ) {
-    let raw = raw.trim().trim_start_matches(['/', '#']).trim();
-    if raw.is_empty() {
+    // Solo se recorta por la izquierda: hay comandos donde el espacio final es
+    // parte del argumento (`#customname 52 (T) ` — el custom name se concatena
+    // en crudo delante del mensaje). `dispatch_builtin` recorta el resto.
+    let raw = raw.trim_start().trim_start_matches(['/', '#']).trim_start();
+    if raw.trim_end().is_empty() {
         return;
     }
     let (cmd, cargs) = match raw.split_once(' ') {
-        Some((c, a)) => (c, a.trim()),
+        Some((c, a)) => (c, a.trim_start()),
         None => (raw, ""),
     };
     let (_handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);

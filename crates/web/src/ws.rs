@@ -73,10 +73,17 @@ async fn handle_ws_connection(
             // en GET /; cualquier otra cosa es un 400.
             if request.method.eq_ignore_ascii_case("GET") {
                 // GET normal (navegador abriendo la URL): NO es un cliente de
-                // sala, es el panel HTML. Se loguea distinto para que no se
-                // confunda con un intento de entrar a la sala.
-                info!("HTTP GET {} de {}: sirviendo panel (no es cliente de sala)", request.path, peer);
-                send_http_html(&mut stream, crate::panel::INDEX_HTML).await?;
+                // sala. Antes se servía aquí un chat de prueba que hacía
+                // auto-login como "WebUser" — o sea que cualquiera que abriera
+                // la URL de la sala en el navegador entraba solito. Ahora se
+                // responde una línea de texto y nada más; el panel está en
+                // /admin (que se atiende antes, en handle_admin_route).
+                info!("HTTP GET {} de {}: no es cliente de sala", request.path, peer);
+                send_http_text(
+                    &mut stream,
+                    "Astra chat server - connect with an Ares or ib0t client.\n",
+                )
+                .await?;
             } else {
                 warn!("HTTP {} de {} sin Sec-WebSocket-Key (no es WS): 400", request.method, peer);
                 send_http_error(&mut stream, 400, "Missing Sec-WebSocket-Key").await?;
@@ -541,6 +548,23 @@ async fn send_http_bytes(stream: &mut TcpStream, code: u16, bytes: &[u8]) -> any
     if code == 200 {
         stream.write_all(bytes).await?;
     }
+    Ok(())
+}
+
+/// Responde 200 OK con un body de texto plano y cierra la conexión.
+async fn send_http_text(stream: &mut TcpStream, text: &str) -> anyhow::Result<()> {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        text.len(),
+        text
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
     Ok(())
 }
 

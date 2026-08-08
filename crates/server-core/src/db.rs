@@ -259,6 +259,13 @@ impl Database {
                 PRIMARY KEY (pattern, line_index)
             );
 
+            CREATE TABLE IF NOT EXISTS custom_names (
+                guid TEXT NOT NULL,
+                name TEXT NOT NULL,
+                text TEXT NOT NULL,
+                PRIMARY KEY (guid, name)
+            );
+
             CREATE TABLE IF NOT EXISTS kv (
                 k TEXT NOT NULL PRIMARY KEY,
                 v TEXT NOT NULL
@@ -1013,6 +1020,48 @@ impl Database {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    // ========================================================================
+    // Custom names (paridad `commands/CustomNames.cs`: customnames.xml)
+    // ========================================================================
+
+    /// Guarda (o borra, con `text = None`) el custom name de un usuario.
+    /// La clave es `guid` + `nick`, igual que sb0t: si el usuario cambia de
+    /// nick, el custom name no lo sigue.
+    pub fn set_custom_name(&self, guid: &[u8; 16], name: &str, text: Option<&str>) -> DbResult<()> {
+        let conn = self.conn.lock();
+        let guid = &guid_to_hex(guid);
+        match text {
+            Some(t) => {
+                conn.execute(
+                    "INSERT INTO custom_names (guid, name, text) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(guid, name) DO UPDATE SET text = excluded.text",
+                    params![guid, name, t],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM custom_names WHERE guid = ?1 AND name = ?2",
+                    params![guid, name],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Custom name guardado de un usuario (`guid` + nick), si lo hay.
+    pub fn get_custom_name(&self, guid: &[u8; 16], name: &str) -> DbResult<Option<String>> {
+        let conn = self.conn.lock();
+        let guid = &guid_to_hex(guid);
+        let found = conn
+            .query_row(
+                "SELECT text FROM custom_names WHERE guid = ?1 AND name = ?2",
+                params![guid, name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found)
     }
 
     // ========================================================================

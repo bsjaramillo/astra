@@ -470,6 +470,10 @@ pub struct AppContext {
     /// Si está activo, los comandos admin se ignoran salvo para el Owner
     /// (`/disableadmins`). Paridad con `Settings.DisableAdmins` de sb0t.
     pub admins_disabled: std::sync::atomic::AtomicBool,
+    /// Timeout de muzzle de la sala en MINUTOS (`#mtimeout <0-99>`, paridad
+    /// `Settings.MuzzleTimeout` de sb0t). 0 = ilimitado: los muzzles no
+    /// expiran solos. `#muzzle` lo aplica al silenciar (`Muzzles.Tick`).
+    pub muzzle_timeout: std::sync::atomic::AtomicU64,
     /// Ruta del archivo de config (`astra.toml`) para que el panel admin
     /// pueda leerlo/escribirlo. `None` si se arrancó sin archivo.
     pub config_path: RwLock<Option<std::path::PathBuf>>,
@@ -619,6 +623,7 @@ impl AppContext {
             geoip,
             ban_log: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             admins_disabled: std::sync::atomic::AtomicBool::new(false),
+            muzzle_timeout: std::sync::atomic::AtomicU64::new(0),
             config_path: RwLock::new(None),
             udp_nodes: parking_lot::RwLock::new(Vec::new()),
             external_ip: parking_lot::RwLock::new(None),
@@ -877,6 +882,55 @@ impl AppContext {
             }
         }
         true
+    }
+
+    /// Difunde a la sala que un usuario se quedó sin avatar (paridad
+    /// `TCPOutbound.Avatar`/`WebOutbound.AvatarTo` con avatar vacío).
+    pub fn broadcast_avatar_cleared(&self, user: &crate::user_pool::AresUser) {
+        let name = user.name.read().clone();
+        let vroom = *user.vroom.read();
+        let ws_msg = format!("AVATAR:{}:{}", name.encode_utf16().count(), name);
+        for other in self.user_pool.users() {
+            if !other.logged_in
+                || *other.vroom.read() != vroom
+                || other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                continue;
+            }
+            if let Some(tx) = &other.ws_text_sender {
+                let _ = tx.send(ws_msg.clone());
+            } else {
+                let _ = other.send(crate::outbound::build_avatar_cleared_c(
+                    &name,
+                    other.ares_crypto,
+                ));
+            }
+        }
+    }
+
+    /// Persiste el custom name de un usuario (`None` lo borra). Paridad
+    /// `CustomNames.UpdateCustomName` (sb0t lo guarda en customnames.xml por
+    /// `guid` + nick y lo reaplica en cada login).
+    pub fn save_custom_name(&self, user: &crate::user_pool::AresUser, value: Option<&str>) {
+        let name = user.name.read().clone();
+        if let Err(e) = self.db.set_custom_name(&user.guid, &name, value) {
+            tracing::warn!("no se pudo persistir el custom name de '{}': {}", name, e);
+        }
+    }
+
+    /// Reaplica el custom name guardado de un usuario que acaba de entrar
+    /// (paridad `CustomNames.Set`, llamado desde `ServerEvents.Joined`).
+    /// No pisa un custom name ya seteado en esta sesión.
+    pub fn load_custom_name(&self, user: &crate::user_pool::AresUser) {
+        if user.custom_name.read().is_some() {
+            return;
+        }
+        let name = user.name.read().clone();
+        match self.db.get_custom_name(&user.guid, &name) {
+            Ok(Some(text)) => *user.custom_name.write() = Some(text),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("no se pudo leer el custom name de '{}': {}", name, e),
+        }
     }
 
     /// Custom name efectivo de un usuario (`None` si no tiene o está vacío).

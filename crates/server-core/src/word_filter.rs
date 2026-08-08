@@ -82,6 +82,10 @@ pub struct WordFilterManager {
     /// Líneas de respuesta por pattern, solo relevante para entradas
     /// `Announce`. Vacío (o ausente) para Block/Kick/Ban.
     lines: RwLock<HashMap<String, Vec<String>>>,
+    /// ¿Está activo el filtrado? (`#filter on|off`, paridad
+    /// `Settings.Filtering` de sb0t). Con esto apagado los patrones siguen
+    /// guardados pero no se evalúa ninguno.
+    enabled: std::sync::atomic::AtomicBool,
 }
 
 impl WordFilterManager {
@@ -101,7 +105,19 @@ impl WordFilterManager {
             db,
             cache: RwLock::new(cache),
             lines: RwLock::new(lines),
+            enabled: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// ¿Está activo el filtrado de la sala? (`#filter on|off`).
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Activa/desactiva el filtrado de la sala sin borrar los patrones.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Cantidad de filtros.
@@ -164,6 +180,9 @@ impl WordFilterManager {
     /// mensaje, ver [`Self::check_announce`]. Retorna la acción del primer
     /// patrón que matchee, o `None` si ninguno.
     pub fn check(&self, text: &str) -> Option<FilterAction> {
+        if !self.is_enabled() {
+            return None;
+        }
         let lower = text.to_ascii_lowercase();
         for (pattern, action) in self.cache.read().iter() {
             if *action != FilterAction::Announce && matches_pattern(pattern, &lower) {
@@ -181,6 +200,9 @@ impl WordFilterManager {
     /// por esto — a diferencia de `check()`, es responsabilidad del
     /// caller difundir las líneas Y dejar pasar el mensaje normalmente.
     pub fn check_announce(&self, text: &str) -> Option<(String, Vec<String>, String)> {
+        if !self.is_enabled() {
+            return None;
+        }
         let lower = text.to_ascii_lowercase();
         let cache = self.cache.read();
         for (pattern, action) in cache.iter() {

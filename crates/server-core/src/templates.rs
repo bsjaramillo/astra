@@ -56,6 +56,15 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     ("muzzle.target", "You have been muzzled."),
     ("muzzle.confirm", "Muzzled '+n'."),
     ("unmuzzle.target", "You have been unmuzzled."),
+    // Notification #29 de sb0t: el target tiene nivel >= al del admin. Es el
+    // MISMO texto para todos los comandos (ban/kick/muzzle/echo/redirect/...).
+    (
+        "notification.level_too_low",
+        "your admin level is too low to use this command on +n",
+    ),
+    // Category.Timeouts #0/#1 de sb0t (`#mtimeout` y expiración del muzzle).
+    ("timeouts.muzzle_set", "+n has set the muzzle timeout to +i"),
+    ("timeouts.muzzle_expired", "+n your muzzle timeout has expired"),
     ("unmuzzle.confirm", "Unmuzzled '+n'."),
     // Grant / revoke  (+l = nivel, ej. "80 (admin)")
     ("grant.target", "Your level is now +l."),
@@ -95,6 +104,64 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     ("adminaction.redirect", "+n has been redirected to +r by +a"),
     ("adminaction.customname", "+n's custom name has been set by +a"),
     ("adminaction.uncustomname", "+n's custom name has been unset by +a"),
+    // AdminAction #7-#18 y #23-#26 de sb0t: los efectos de texto, el avatar,
+    // el personal message y los range/ASN bans también se ANUNCIAN a la sala.
+    // Category.EnableDisable de sb0t: cada toggle de sala se ANUNCIA a
+    // toda la sala con su texto propio (no es un ack privado al op).
+    ("enabledisable.sharefiles.on", "+n has enabled File Share monitoring"),
+    ("enabledisable.sharefiles.off", "+n has disabled File Share monitoring"),
+    ("enabledisable.idle.on", "+n has enabled Idle Monitoring"),
+    ("enabledisable.idle.off", "+n has disabled Idle Monitoring"),
+    ("enabledisable.clock.on", "+n enabled the topic clock"),
+    ("enabledisable.clock.off", "+n disabled the topic clock"),
+    ("enabledisable.greetmsg.on", "+n has enabled the greet message"),
+    ("enabledisable.greetmsg.off", "+n has disabled the greet message"),
+    ("enabledisable.pmgreetmsg.on", "+n has enabled the PM greet message"),
+    ("enabledisable.pmgreetmsg.off", "+n has disabled the PM greet message"),
+    ("enabledisable.caps.on", "+n has enabled CAPS monitoring"),
+    ("enabledisable.caps.off", "+n has disabled CAPS monitoring"),
+    ("enabledisable.anon.on", "+n has enabled Anon monitoring"),
+    ("enabledisable.anon.off", "+n has disabled Anon monitoring"),
+    ("enabledisable.customnames.on", "+n has enabled custom names"),
+    ("enabledisable.customnames.off", "+n has disabled custom names"),
+    ("enabledisable.general.on", "+n has enabled general commands"),
+    ("enabledisable.general.off", "+n has disabled general commands"),
+    ("enabledisable.url.on", "dynamic url tag was enabled by +n"),
+    ("enabledisable.url.off", "dynamic url tag was disabled by +n"),
+    ("enabledisable.roominfo.on", "+n has enabled Room Information Updates"),
+    ("enabledisable.roominfo.off", "+n has disabled Room Information Updates"),
+    ("enabledisable.lastseen.on", "+n has enabled Last Seen monitoring"),
+    ("enabledisable.lastseen.off", "+n has disabled Last Seen monitoring"),
+    ("enabledisable.history.on", "+n has enabled chat history feature"),
+    ("enabledisable.history.off", "+n has disabled chat history feature"),
+    ("enabledisable.stealth.on", "+n has enabled stealth mode"),
+    ("enabledisable.stealth.off", "+n has disabled stealth mode"),
+    ("enabledisable.colors.on", "+n has enabled colors"),
+    ("enabledisable.colors.off", "+n has disabled colors"),
+    ("enabledisable.filter.on", "+n has enabled room filters"),
+    ("enabledisable.filter.off", "+n has disabled room filters"),
+    ("enabledisable.scribbles.on", "+n has enabled scribbles"),
+    ("enabledisable.scribbles.off", "+n has disabled scribbles"),
+    ("enabledisable.audios.on", "+n has enabled audios"),
+    ("enabledisable.audios.off", "+n has disabled audios"),
+    ("enabledisable.buzzes.on", "+n has enabled buzzes"),
+    ("enabledisable.buzzes.off", "+n has disabled buzzes"),
+    ("adminaction.kewltext", "+n has been set kewl text by +a"),
+    ("adminaction.unkewltext", "+n has been unset kewl text by +a"),
+    ("adminaction.lower", "+n has been lowered by +a"),
+    ("adminaction.unlower", "+n has been unlowered by +a"),
+    ("adminaction.kiddy", "+n has been kiddied by +a"),
+    ("adminaction.unkiddy", "+n has been unkiddied by +a"),
+    ("adminaction.echo", "+n has been echoed by +a"),
+    ("adminaction.unecho", "+n has been unechoed by +a"),
+    ("adminaction.paint", "+n has been painted by +a"),
+    ("adminaction.unpaint", "+n has been unpainted by +a"),
+    ("adminaction.rangeban", "+r has been range banned by +a"),
+    ("adminaction.rangeunban", "+r has been range unbanned by +a"),
+    ("adminaction.disableavatar", "+n's avatar was disabled by +a"),
+    ("adminaction.changemessage", "+n's personal message was set by +a"),
+    ("adminaction.asnban", "+r has been ASN banned by +a"),
+    ("adminaction.asnunban", "+r has been unbanned by +a"),
     // Listado de admins (Category.AdminList de sb0t; se difunde a la sala)
     ("adminlist.header", "ADMIN LIST REQUESTED BY [+n]"),
     ("adminlist.entry", "Level +l : +n"),
@@ -336,6 +403,13 @@ impl TemplateManager {
             return v.clone();
         }
         default_for(key).unwrap_or(key).to_string()
+    }
+
+    /// ¿Existe esa clave en el catálogo (o tiene un override)? Sirve para los
+    /// textos opcionales, como el anuncio de un toggle que solo existe en
+    /// Astra y no tiene equivalente en sb0t.
+    pub fn has(&self, key: &str) -> bool {
+        default_for(key).is_some() || self.overrides.read().contains_key(key)
     }
 
     /// Texto de una clave con los placeholders sustituidos.

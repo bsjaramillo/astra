@@ -179,23 +179,32 @@ mod tests {
         assert_eq!(m.verify("user1", &format!("  {}  ", c.word)), VerifyResult::Ok);
     }
 
+    /// Respuesta que NUNCA coincide con el challenge: la palabra generada
+    /// es aleatoria de 4 chars, así que adivinar a ciegas ("WRONG"/"ALSO")
+    /// hacía flakear el test cuando el random caía justo en esa palabra.
+    fn wrong_answer(word: &str) -> String {
+        format!("{}x", word)
+    }
+
     #[test]
     fn wrong_answer_increments_attempts() {
         let m = CaptchaManager::new(300, 3);
-        m.create("user1".to_string());
-        let r = m.verify("user1", "WRONG");
+        let c = m.create("user1".to_string());
+        let bad = wrong_answer(&c.word);
+        let r = m.verify("user1", &bad);
         assert_eq!(r, VerifyResult::Wrong { remaining: 2 });
-        let r = m.verify("user1", "ALSO");
+        let r = m.verify("user1", &bad);
         assert_eq!(r, VerifyResult::Wrong { remaining: 1 });
     }
 
     #[test]
     fn wrong_answer_three_times_kicks() {
         let m = CaptchaManager::new(300, 3);
-        m.create("user1".to_string());
-        assert!(matches!(m.verify("user1", "WRONG"), VerifyResult::Wrong { .. }));
-        assert!(matches!(m.verify("user1", "WRONG"), VerifyResult::Wrong { .. }));
-        let r = m.verify("user1", "WRONG");
+        let c = m.create("user1".to_string());
+        let bad = wrong_answer(&c.word);
+        assert!(matches!(m.verify("user1", &bad), VerifyResult::Wrong { .. }));
+        assert!(matches!(m.verify("user1", &bad), VerifyResult::Wrong { .. }));
+        let r = m.verify("user1", &bad);
         assert_eq!(r, VerifyResult::TooManyAttempts);
         assert!(!m.has_pending("user1"));
     }

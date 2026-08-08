@@ -171,6 +171,9 @@ pub async fn handle_tcp_client(
     // el nivel del autologin no llegaba en el paquete de entrada).
     let _ = astra_commands::dispatch_autologin(&ctx, &user);
 
+    // Custom name guardado (paridad `CustomNames.Set` dentro de `Joined()`).
+    ctx.load_custom_name(&user);
+
     send_initial_state(&ctx, &user, &scripting).await;
 
     // Broadcast del JOIN a los usuarios existentes (ya con el nivel aplicado).
@@ -1265,8 +1268,10 @@ fn route_command_text(
     scripting: &ScriptHandle,
     text: &str,
 ) {
-    let text = text.trim();
-    if text.is_empty() {
+    // Solo se recorta por la izquierda: el espacio final puede ser semántico
+    // (`/customname 52 (T) ` → el custom name incluye el espacio separador).
+    let text = text.trim_start();
+    if text.trim_end().is_empty() {
         return;
     }
     let slashed = if text.starts_with('/') {
@@ -1274,7 +1279,7 @@ fn route_command_text(
     } else {
         format!("/{}", text)
     };
-    if let Some((cmd, args)) = astra_commands::parse_command(&slashed) {
+    if let Some((cmd, args)) = astra_commands::parse_command_raw(&slashed) {
         let (_handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
         // Eventos side-effect del builtin (ej. AdminLevelChanged tras /ban).
         for ev in events {
@@ -1367,7 +1372,7 @@ async fn handle_public(
     // hashtag, "/algo"): el emisor lo veía enviado y nadie más lo recibía.
     if let Some(rest) = text.strip_prefix('#') {
         let hides_text = rest.starts_with("login") || rest.starts_with("register");
-        if let Some((cmd, args)) = astra_commands::parse_command(&text) {
+        if let Some((cmd, args)) = astra_commands::parse_command_raw(&text) {
             let (handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
             debug!("comando de '{}' (builtin={}): #{} {}", name, handled, cmd, args);
             // Disparar los side-effects de scripting que el comando generó
