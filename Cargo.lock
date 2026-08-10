@@ -140,7 +140,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "astra"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "astra-captcha"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "image",
  "rand 0.8.7",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "astra-commands"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "astra-scripting",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "astra-link"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "aes",
  "anyhow",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "astra-scripting"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "astra-udp"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "bytes",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "astra-web"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "astra-commands",
@@ -309,9 +309,9 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.91"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -480,7 +480,7 @@ dependencies = [
  "static_assertions",
  "tap",
  "thin-vec",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "time",
 ]
 
@@ -2286,9 +2286,9 @@ checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "portable-atomic"
-version = "1.14.0"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
 name = "potential_utf"
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "proto-ares"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "aes",
  "byteorder",
@@ -2367,7 +2367,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "web-time",
@@ -2389,7 +2389,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "tinyvec",
  "tracing",
  "web-time",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -2995,11 +2995,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl 2.0.19",
+ "thiserror-impl 2.0.20",
 ]
 
 [[package]]
@@ -3015,9 +3015,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3330,7 +3330,7 @@ checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
 dependencies = [
  "crossbeam-channel",
  "symlink",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "time",
  "tracing-subscriber",
 ]
@@ -4020,7 +4020,7 @@ dependencies = [
  "memchr",
  "pbkdf2",
  "sha1",
- "thiserror 2.0.19",
+ "thiserror 2.0.20",
  "time",
  "xz2",
  "zeroize",
