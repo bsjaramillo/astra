@@ -1098,27 +1098,80 @@ function __mkScribbleImage(b64, arg){
 }
 
 // ---- Avatar: imagen de avatar sobre los natives Avatar_* ----
-function Avatar(src){ this.oncomplete = null; this.__id = -1; if (src != null) this.__id = Avatar_new("" + src); }
+// sb0t parity: avatar.src puede ser URL (para download) o base64 (para constructor).
+function Avatar(src){ this.oncomplete = null; this.__id = -1; this.__url = null; if (src != null) this.__id = Avatar_new("" + src); }
 Object.defineProperty(Avatar.prototype, "src", {
-  get: function(){ return this.__id < 0 ? null : Avatar_getBytes(this.__id); },
-  set: function(v){ this.__id = Avatar_new(v == null ? "" : "" + v); }
+  get: function(){ return this.__url || (this.__id < 0 ? null : Avatar_getBytes(this.__id)); },
+  set: function(v){
+    var s = v == null ? "" : "" + v;
+    if (s.indexOf("http://") === 0 || s.indexOf("https://") === 0) {
+      this.__url = s;
+    } else {
+      this.__id = Avatar_new(s);
+    }
+  }
 });
 Object.defineProperty(Avatar.prototype, "size", { get: function(){ return this.__id < 0 ? -1 : Avatar_getSize(this.__id); } });
 Avatar.prototype.save = function(path){ return this.__id < 0 ? false : Avatar_save(this.__id, "" + path); };
 Avatar.prototype.load = function(path){ var b = __read_file_b64("" + path); if (b == null) return false; this.__id = Avatar_new(b); return this.__id >= 0; };
 Avatar.prototype.setForUser = function(name){ return this.__id < 0 ? false : Avatar_setForUser("" + name, this.__id); };
-Avatar.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null && ("" + bytes).length){ self.__id = Avatar_new(Base64_encode("" + bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
+Avatar.prototype.download = function(url){
+  if (typeof HttpRequest === "undefined") return false;
+  var self = this;
+  var downloadUrl = url;
+  if (downloadUrl == null || downloadUrl === 0 || ("" + downloadUrl).length < 5) {
+    downloadUrl = self.__url;
+  }
+  if (!downloadUrl || ("" + downloadUrl).length < 5) return false;
+  var r = new HttpRequest();
+  r.src = downloadUrl;
+  r.utf = false; // binary data, native returns base64
+  r.oncomplete = function(bytes){
+    if (bytes != null && ("" + bytes).length){
+      self.__id = Avatar_new("" + bytes); // native already returns base64 when utf=false
+    }
+    if (typeof self.oncomplete === "function") self.oncomplete(self);
+  };
+  return r.download();
+};
 
 // ---- Scribble: imagen scribble sobre los natives ScribbleImage_* ----
-function Scribble(src){ this.oncomplete = null; this.__id = -1; if (src != null) this.__id = ScribbleImage_new("" + src); }
+// sb0t parity: scribble.src puede ser URL (para download) o base64 (para constructor).
+function Scribble(src){ this.oncomplete = null; this.__id = -1; this.__url = null; if (src != null) this.__id = ScribbleImage_new("" + src); }
 Object.defineProperty(Scribble.prototype, "src", {
-  get: function(){ return this.__id < 0 ? null : this.__id; },
-  set: function(v){ this.__id = ScribbleImage_new(v == null ? "" : "" + v); }
+  get: function(){ return this.__url || (this.__id < 0 ? null : this.__id); },
+  set: function(v){
+    var s = v == null ? "" : "" + v;
+    if (s.indexOf("http://") === 0 || s.indexOf("https://") === 0) {
+      this.__url = s;
+    } else {
+      this.__id = ScribbleImage_new(s);
+    }
+  }
 });
 Object.defineProperty(Scribble.prototype, "size", { get: function(){ return this.__id < 0 ? -1 : ScribbleImage_getSize(this.__id); } });
 Scribble.prototype.save = function(path){ return this.__id < 0 ? false : ScribbleImage_save(this.__id, "" + path); };
 Scribble.prototype.load = function(path){ var b = __read_file_b64("" + path); if (b == null) return false; this.__id = ScribbleImage_new(b); return this.__id >= 0; };
-Scribble.prototype.download = function(url){ if (typeof HttpRequest === "undefined") return false; var self = this; var r = new HttpRequest(); r.src = url; r.oncomplete = function(bytes){ if (bytes != null && ("" + bytes).length){ self.__id = ScribbleImage_new(Base64_encode("" + bytes)); } if (typeof self.oncomplete === "function") self.oncomplete(self); }; return r.download(); };
+Scribble.prototype.download = function(url){
+  if (typeof HttpRequest === "undefined") return false;
+  var self = this;
+  // sb0t parity: si recibe URL o falsy, usar scribble.src (seteado como URL).
+  var downloadUrl = url;
+  if (downloadUrl == null || downloadUrl === 0 || ("" + downloadUrl).length < 5) {
+    downloadUrl = self.__url;
+  }
+  if (!downloadUrl || ("" + downloadUrl).length < 5) return false;
+  var r = new HttpRequest();
+  r.src = downloadUrl;
+  r.utf = false; // binary data, native returns base64
+  r.oncomplete = function(bytes){
+    if (bytes != null && ("" + bytes).length){
+      self.__id = ScribbleImage_new("" + bytes); // native already returns base64 when utf=false
+    }
+    if (typeof self.oncomplete === "function") self.oncomplete(self);
+  };
+  return r.download();
+};
 
 // ---- HttpRequest: petición HTTP async con oncomplete (Fase 3b) ----
 // __http_download hace la petición en un thread de background; el manager
