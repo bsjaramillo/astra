@@ -187,6 +187,17 @@ pub async fn handle_tcp_client(
     // bloque del anuncio (`TCPProcessor.cs`).
     if !hijacked {
         broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
+    } else {
+        // Pero la sesión nueva igual necesita su PROPIA entrada en la userlist:
+        // `send_initial_state` (arriba) le manda el userlist de los DEMÁS,
+        // excluyéndose a sí misma, y este JOIN no se difunde a la sala, así que
+        // sin este envío un cliente Ares nativo que solo se pinta a sí mismo al
+        // recibir su propio JOIN dejaría de verse en su lista tras una
+        // reconexión ("mi nick desaparece de mi userlist"), aunque la sala siga
+        // viéndolo. Se le manda su propio JOIN solo a ella (no a la sala): es
+        // lo que `send_initial_state` haría si incluyera a self, pero sin
+        // anunciarle a los demás un join fantasma.
+        let _ = user.send(outbound::build_join_or_userlist_c(&user, user.ares_crypto));
     }
     ctx.publish_link_event(LinkEvent::Join {
         origin: None,
