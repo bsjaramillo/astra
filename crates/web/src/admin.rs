@@ -144,7 +144,8 @@ pub fn run_command(ctx: &Arc<AppContext>, line: &str) -> Vec<String> {
     u.sender = Some(tx);
     let u = Arc::new(u);
 
-    let (handled, _events) = astra_commands::dispatch_builtin(ctx, &u, cmd, args);
+    let scripting = astra_scripting::ScriptHandle::dummy();
+    let (handled, _events) = astra_commands::dispatch_builtin(ctx, &scripting, &u, cmd, args);
 
     let mut out = Vec::new();
     while let Ok(pkt) = rx.try_recv() {

@@ -78,6 +78,14 @@ pub struct Settings {
     /// `https://api.github.com`).
     #[serde(default = "default_live_scripts_endpoint")]
     pub live_scripts_endpoint: String,
+    /// ¿Habilitar ejecución inline de JS desde el chat? (paridad sb0t
+    /// `ScriptInRoom`). Con esto activo, usuarios que pasen el gate de
+    /// `script_level` pueden evaluar expresiones JS directamente desde la
+    /// sala: texto que empieza con `@` se ejecuta en el script room
+    /// (salida suprimida), el resto se evalúa y el resultado (si no es
+    /// `undefined`) se imprime en la sala.
+    #[serde(default)]
+    pub script_in_room: bool,
     /// URL del `rooms.json` para el seed del room-search UDP. Si el
     /// room-search está activo y no hay ni seed local ni nodos en la DB, el
     /// server descarga este JSON al arrancar para poder propagarse en la red
@@ -321,6 +329,7 @@ impl Default for Settings {
             update_check: true,
             local_host: false,
             server_ip: String::new(),
+            script_in_room: false,
         }
     }
 }

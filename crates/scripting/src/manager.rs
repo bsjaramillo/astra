@@ -45,7 +45,7 @@ use tracing::{debug, error, info, warn};
 use server_core::AppContext;
 
 use crate::api::{
-    call_global_function, eval_script, make_context, unregister_context,
+    call_global_function, eval_script, eval_script_value, make_context, unregister_context,
 };
 use crate::types::{Script, ScriptEvent, ScriptId, ScriptState as ScriptLifecycle};
 
@@ -102,12 +102,62 @@ pub enum ScriptRequest {
         msg: String,
         reply: std_mpsc::SyncSender<bool>,
     },
+    /// Gate de bloqueo de avatar (paridad sb0t `AvatarReceived`).
+    AvatarCheck {
+        name: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de bloqueo de personal message (paridad sb0t `PersonalMessageReceived`).
+    PersonalMessageCheck {
+        name: String,
+        text: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de bloqueo de registro (paridad sb0t `Registering`).
+    RegisteringCheck {
+        name: String,
+        ip: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de bloqueo de cambio de nick (paridad sb0t `Nick`).
+    NickCheck {
+        name: String,
+        new_name: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de bloqueo de ignore (paridad sb0t `Ignoring`).
+    IgnoringCheck {
+        name: String,
+        target: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de bloqueo de PM del bot (paridad sb0t `BotPrivateSent`).
+    BotPMCheck {
+        name: String,
+        text: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
+    /// Gate de rechazo de proxy (paridad sb0t `ProxyDetected`).
+    ProxyDetectedCheck {
+        name: String,
+        ip: String,
+        reply: std_mpsc::SyncSender<bool>,
+    },
     /// Eval inline de chat (`@código`, paridad sb0t TextSending): evalúa
     /// `code` en el primer script activo con `userobj` preseteado al emisor.
     EvalChat {
         name: String,
         code: String,
         reply: std_mpsc::SyncSender<Result<(), String>>,
+    },
+    /// Eval inline del room script (paridad sb0t `ScriptInRoom`): evalúa
+    /// `code` en el script de sala ("room") y retorna el resultado como string
+    /// (o `None` si es `undefined`, lo que significa que no se imprime en sala).
+    /// `userobj` se presetea al emisor antes de evaluar.
+    EvalRoom {
+        name: String,
+        code: String,
+        reply: std_mpsc::SyncSender<Option<String>>,
     },
     /// Lista los nombres de los scripts cargados (`/listscripts`).
     ListScripts {
@@ -138,7 +188,15 @@ impl ScriptRequest {
             ScriptRequest::JoinCheck { .. } => "onJoinCheck",
             ScriptRequest::VroomJoinCheck { .. } => "onVroomJoinCheck",
             ScriptRequest::FloodBefore { .. } => "onFloodBefore",
+            ScriptRequest::AvatarCheck { .. } => "onAvatar",
+            ScriptRequest::PersonalMessageCheck { .. } => "onPersonalMessage",
+            ScriptRequest::RegisteringCheck { .. } => "onRegistering",
+            ScriptRequest::NickCheck { .. } => "onNick",
+            ScriptRequest::IgnoringCheck { .. } => "onIgnoring",
+            ScriptRequest::BotPMCheck { .. } => "onBotPM",
+            ScriptRequest::ProxyDetectedCheck { .. } => "onProxyDetected",
             ScriptRequest::EvalChat { .. }
+            | ScriptRequest::EvalRoom { .. }
             | ScriptRequest::ListScripts { .. }
             | ScriptRequest::LoadScript { .. }
             | ScriptRequest::KillScript { .. } => unreachable!("resuelto antes en dispatch_request"),
@@ -154,6 +212,11 @@ impl ScriptRequest {
             ScriptRequest::PMBefore { .. } => match idx {
                 0 | 1 => ArgKind::User,
                 2 => ArgKind::Pm,
+                _ => ArgKind::Str,
+            },
+            // onIgnoring(userobj, target) — ambos JSUser
+            ScriptRequest::IgnoringCheck { .. } => match idx {
+                0 | 1 => ArgKind::User,
                 _ => ArgKind::Str,
             },
             _ => {
@@ -181,7 +244,15 @@ impl ScriptRequest {
                 vec![name.clone(), vroom.to_string()]
             }
             ScriptRequest::FloodBefore { name, msg, .. } => vec![name.clone(), msg.clone()],
+            ScriptRequest::AvatarCheck { name, .. } => vec![name.clone()],
+            ScriptRequest::PersonalMessageCheck { name, text, .. } => vec![name.clone(), text.clone()],
+            ScriptRequest::RegisteringCheck { name, ip, .. } => vec![name.clone(), ip.clone()],
+            ScriptRequest::NickCheck { name, new_name, .. } => vec![name.clone(), new_name.clone()],
+            ScriptRequest::IgnoringCheck { name, target, .. } => vec![name.clone(), target.clone()],
+            ScriptRequest::BotPMCheck { name, text, .. } => vec![name.clone(), text.clone()],
+            ScriptRequest::ProxyDetectedCheck { name, ip, .. } => vec![name.clone(), ip.clone()],
             ScriptRequest::EvalChat { .. }
+            | ScriptRequest::EvalRoom { .. }
             | ScriptRequest::ListScripts { .. }
             | ScriptRequest::LoadScript { .. }
             | ScriptRequest::KillScript { .. } => unreachable!("resuelto antes en dispatch_request"),
@@ -201,6 +272,15 @@ pub struct ScriptHandle {
 }
 
 impl ScriptHandle {
+    /// Crea un handle dummy — todos los gates retornan `true` (allow) y los
+    /// dispatch async se descartan. Útil para tests y admin donde no hay
+    /// manager corriendo.
+    pub fn dummy() -> Self {
+        let (tx, _) = mpsc::unbounded_channel();
+        let (tx_req, _) = mpsc::unbounded_channel();
+        Self { tx, tx_req }
+    }
+
     /// Encola un evento async. No bloquea.
     pub fn dispatch(&self, event: ScriptEvent) {
         let _ = self.tx.send(event);
@@ -263,6 +343,82 @@ impl ScriptHandle {
         self.send_and_wait(request, rx, true)
     }
 
+    /// Gate de avatar (paridad sb0t `AvatarReceived`): `false` → bloquear.
+    pub fn check_avatar(&self, name: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::AvatarCheck {
+            name: name.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
+    }
+
+    /// Gate de personal message (paridad sb0t `PersonalMessageReceived`): `false` → bloquear.
+    pub fn check_personal_message(&self, name: &str, text: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::PersonalMessageCheck {
+            name: name.to_string(),
+            text: text.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
+    }
+
+    /// Gate de registro (paridad sb0t `Registering`): `false` → rechazar.
+    pub fn check_registering(&self, name: &str, ip: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::RegisteringCheck {
+            name: name.to_string(),
+            ip: ip.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
+    }
+
+    /// Gate de cambio de nick (paridad sb0t `Nick`): `false` → bloquear.
+    pub fn check_nick(&self, name: &str, new_name: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::NickCheck {
+            name: name.to_string(),
+            new_name: new_name.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
+    }
+
+    /// Gate de ignore (paridad sb0t `Ignoring`): `false` → bloquear.
+    pub fn check_ignoring(&self, name: &str, target: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::IgnoringCheck {
+            name: name.to_string(),
+            target: target.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
+    }
+
+    /// Gate de PM del bot (paridad sb0t `BotPrivateSent`): `false` → bloquear.
+    pub fn check_bot_pm(&self, name: &str, text: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::BotPMCheck {
+            name: name.to_string(),
+            text: text.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, true)
+    }
+
+    /// Gate de detección de proxy (paridad sb0t `ProxyDetected`): `false` → rechazar.
+    pub fn check_proxy_detected(&self, name: &str, ip: &str) -> bool {
+        let (tx, rx) = std_mpsc::sync_channel::<bool>(1);
+        let request = ScriptRequest::ProxyDetectedCheck {
+            name: name.to_string(),
+            ip: ip.to_string(),
+            reply: tx,
+        };
+        self.send_and_wait(request, rx, false) // sb0t default: false (rechazar por default)
+    }
+
     /// Hook pre-PM. Retorna `true` si se debe proceder.
     pub fn check_pm_before(&self, from: &str, to: &str, text: &str) -> Option<String> {
         let (tx, rx) = std_mpsc::sync_channel::<Option<String>>(1);
@@ -303,6 +459,27 @@ impl ScriptHandle {
         }
         rx.recv_timeout(Duration::from_millis(500))
             .unwrap_or_else(|_| Err("eval timeout".to_string()))
+    }
+
+    /// Eval inline del room script (paridad sb0t `ScriptInRoom`):
+    /// evalúa `code` en el script "room" y retorna el resultado.
+    /// `Some(text)` = el resultado debe imprimirse en la sala.
+    /// `None` = el resultado fue `undefined` (no se imprime nada).
+    pub fn eval_room(&self, name: &str, code: &str) -> Option<String> {
+        let (tx, rx) = std_mpsc::sync_channel::<Option<String>>(1);
+        if self
+            .tx_req
+            .send(ScriptRequest::EvalRoom {
+                name: name.to_string(),
+                code: code.to_string(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.recv_timeout(Duration::from_millis(500))
+            .unwrap_or(None)
     }
 
     fn send_and_wait<T>(&self, request: ScriptRequest, rx: std_mpsc::Receiver<T>, fallback: T) -> T {
@@ -467,10 +644,16 @@ impl ScriptManager {
             // arriba: tiene que pasar aquí, no antes de mover `self`).
             let _ = manager.load_all_inner();
 
+            // sb0t parity: crear script "room" automático (contexto vacío con
+            // el prelude completo) si no existe uno cargado desde disco.
+            // Igual que `JSScript("room")` + `Scripts.Add(...)` en sb0t.
+            manager.ensure_room_script();
+
             // Loop principal: alterna entre events y requests.
             // Como ambos usan tokio::sync::mpsc con blocking_recv, podemos
             // usar un loop simple: si no hay events, intentar requests.
             let mut last_deferred = std::time::Instant::now();
+            let mut last_tick = std::time::Instant::now();
             loop {
                 let event = rx_events.try_recv();
                 match event {
@@ -487,6 +670,13 @@ impl ScriptManager {
                         if last_deferred.elapsed() >= Duration::from_millis(50) {
                             manager.drain_deferred();
                             last_deferred = std::time::Instant::now();
+                        }
+                        // sb0t parity: llamar onTimer() en cada script una vez
+                        // por segundo (tick per-second, sin args). Es independiente
+                        // de los timers explícitos setTimer/setTimeout.
+                        if last_tick.elapsed() >= Duration::from_secs(1) {
+                            manager.tick_timers();
+                            last_tick = std::time::Instant::now();
                         }
                         std::thread::sleep(Duration::from_millis(1));
                     }
@@ -698,7 +888,22 @@ impl ScriptManager {
         self.load_file(&path)
     }
 
-    /// Carga todos los scripts `.js` del directorio (método público para tests).
+    /// sb0t parity: asegura que exista un script "room" (contexto vacío con
+    /// el prelude completo), usado por `ScriptInRoom` para ejecutar JS inline
+    /// desde el chat. Si ya existe uno cargado desde disco, no lo reemplaza.
+    fn ensure_room_script(&self) {
+        let has_room = self.scripts.lock().values().any(|s| s.name == "room");
+        if has_room {
+            return;
+        }
+        let script = Arc::new(Script::new("room".to_string(), None));
+        let mut ctx = make_context(self.app.clone());
+        // El script room no tiene código propio — solo el prelude de sb0t.
+        // Se marca como Active para que eval_room pueda usarlo.
+        script.set_context(ctx);
+        script.set_state(ScriptLifecycle::Active);
+        self.scripts.lock().insert(script.id, script);
+    }
     #[cfg(test)]
     pub fn load_all(&self) -> usize {
         self.load_all_inner()
@@ -739,6 +944,28 @@ impl ScriptManager {
                 status: done.status,
                 error: done.error,
             });
+        }
+    }
+
+    /// sb0t parity: llama `onTimer()` (sin argumentos) en cada script activo
+    /// una vez por segundo. Es el heartbeat periódico de sb0t, independiente de
+    /// los timers explícitos `setTimer`/`setTimeout`.
+    fn tick_timers(&self) {
+        let scripts = self.scripts.lock().clone();
+        for (_, script) in scripts.iter() {
+            if script.state() != ScriptLifecycle::Active {
+                continue;
+            }
+            let mut ctx_guard = script.context.lock();
+            if let Some(ctx) = ctx_guard.as_mut() {
+                // sb0t llama onTimer() sin args; si el script no lo define, es neutro.
+                if let Err(e) = call_void_handler(ctx, "onTimer", &[], |_| crate::types::ArgKind::Str) {
+                    let msg = format!("error en handler 'onTimer': {}", e);
+                    warn!("script '{}': {}", script.name(), msg);
+                    script.set_error(msg.clone());
+                    notify_error_subscribers(&self.app, script.name(), &msg);
+                }
+            }
         }
     }
 
@@ -830,6 +1057,40 @@ impl ScriptManager {
                 let _ = reply.send(result);
                 return;
             }
+            ScriptRequest::EvalRoom { name, code, reply } => {
+                // Evaluar en el script "room" específicamente (sb0t parity:
+                // solo el room script ejecuta código inline desde la sala).
+                let scripts = self.scripts.lock().clone();
+                let room = scripts
+                    .values()
+                    .find(|s| s.name == "room" && s.state() == ScriptLifecycle::Active);
+                let result = if let Some(script) = room {
+                    let mut ctx_guard = script.context.lock();
+                    if let Some(ctx) = ctx_guard.as_mut() {
+                        let quoted = serde_json::to_string(&name).unwrap_or_else(|_| "\"\"".into());
+                        let js = format!("userobj = user({}); null; {}", quoted, code);
+                        match crate::api::eval_script_value(ctx, &js) {
+                            Ok(val) => {
+                                if val.is_empty() || val == "undefined" {
+                                    None
+                                } else {
+                                    Some(val)
+                                }
+                            }
+                            Err(e) => {
+                                warn!("room script eval error: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        Some("room script context not available".to_string())
+                    }
+                } else {
+                    Some("no room script loaded".to_string())
+                };
+                let _ = reply.send(result);
+                return;
+            }
             ScriptRequest::KillScript { name, reply } => {
                 // TODAS las instancias con ese nombre (no solo la primera:
                 // un bug previo de `load_source` podía dejar duplicados, y
@@ -914,13 +1175,22 @@ impl ScriptManager {
         }
 
         // Grupo 2: gates booleanos (ScribbleCheck/JoinCheck/VroomJoinCheck/
-        // FloodBefore): si algún script retorna false, se cancela.
+        // FloodBefore/AvatarCheck/PersonalMessageCheck/RegisteringCheck/
+        // NickCheck/IgnoringCheck/BotPMCheck/ProxyDetectedCheck):
+        // si algún script retorna false, se cancela.
         let args = request.args();
         let reply = match &request {
             ScriptRequest::ScribbleCheck { reply, .. } => reply.clone(),
             ScriptRequest::JoinCheck { reply, .. } => reply.clone(),
             ScriptRequest::VroomJoinCheck { reply, .. } => reply.clone(),
             ScriptRequest::FloodBefore { reply, .. } => reply.clone(),
+            ScriptRequest::AvatarCheck { reply, .. } => reply.clone(),
+            ScriptRequest::PersonalMessageCheck { reply, .. } => reply.clone(),
+            ScriptRequest::RegisteringCheck { reply, .. } => reply.clone(),
+            ScriptRequest::NickCheck { reply, .. } => reply.clone(),
+            ScriptRequest::IgnoringCheck { reply, .. } => reply.clone(),
+            ScriptRequest::BotPMCheck { reply, .. } => reply.clone(),
+            ScriptRequest::ProxyDetectedCheck { reply, .. } => reply.clone(),
             _ => unreachable!("ya se resolvió arriba"),
         };
 
@@ -1396,7 +1666,7 @@ mod tests {
             .unwrap();
 
         mgr.dispatch(&ScriptEvent::Idled { name: "Alice".into() });
-        mgr.dispatch(&ScriptEvent::Unidled { name: "Alice".into() });
+        mgr.dispatch(&ScriptEvent::Unidled { name: "Alice".into(), seconds: 42 });
     }
 
     #[test]
@@ -1406,10 +1676,10 @@ mod tests {
             .load_source(
                 "test",
                 None,
-                r#"function onProxyDetected(ip) {}"#,
+                r#"function onProxyDetected(userobj, reply) {}"#,
             )
             .unwrap();
-        mgr.dispatch(&ScriptEvent::ProxyDetected { ip: "5.6.7.8".into() });
+        mgr.dispatch(&ScriptEvent::ProxyDetected { name: "Alice".into(), ip: "5.6.7.8".into(), reply: false });
     }
 
     #[test]
@@ -1569,10 +1839,10 @@ mod tests {
             .load_source(
                 "test",
                 None,
-                r#"function onLinked(name) { /* notificar */ }"#,
+                r#"function onLinked() { /* notificar */ }"#,
             )
             .unwrap();
-        mgr.dispatch(&ScriptEvent::Linked { name: "hub.com".into() });
+        mgr.dispatch(&ScriptEvent::Linked);
     }
 
     #[test]
@@ -1582,10 +1852,10 @@ mod tests {
             .load_source(
                 "test",
                 None,
-                r#"function onUnlinked(name) { /* limpiar */ }"#,
+                r#"function onUnlinked() { /* limpiar */ }"#,
             )
             .unwrap();
-        mgr.dispatch(&ScriptEvent::Unlinked { name: "hub.com".into() });
+        mgr.dispatch(&ScriptEvent::Unlinked);
     }
 
     #[test]
@@ -1595,13 +1865,10 @@ mod tests {
             .load_source(
                 "test",
                 None,
-                r#"function onLinkError(name, error) { /* log */ }"#,
+                r#"function onLinkError(code) { /* log */ }"#,
             )
             .unwrap();
-        mgr.dispatch(&ScriptEvent::LinkError {
-            name: "hub.com".into(),
-            error: "connection refused".into(),
-        });
+        mgr.dispatch(&ScriptEvent::LinkError { code: 42 });
     }
 
     // ========== Tests Fase 20: Connect, Disconnect, UserList, UserListEnd ==========

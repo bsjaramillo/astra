@@ -183,12 +183,12 @@ pub enum ScriptEvent {
     PMBefore { from: String, to: String, text: String },
     /// PM recibido (alias)
     PM { from: String, to: String, text: String },
-    /// Tu PM fue ignorado por el receptor
-    BotPM { from: String, to: String, text: String },
-    /// Ignoraste/designoraste a un user
-    Ignoring { name: String },
-    /// Un user te ignoró/ya no te ignora
-    IgnoredStateChanged { name: String },
+    /// Bot PM enviado. Paridad sb0t: onBotPM(userobj, text) → (JSUser, String).
+    BotPM { name: String, text: String },
+    /// Ignoraste/designoraste a un user. Paridad sb0t: onIgnoring(userobj, target) → (JSUser, JSUser).
+    Ignoring { name: String, target: String },
+    /// Un user te ignoró/ya no te ignora. Paridad sb0t: onIgnoredStateChanged(userobj, target, ignored) → (JSUser, JSUser, bool).
+    IgnoredStateChanged { name: String, target: String, ignored: bool },
 
     // --- Avatar / pmsg ---
     /// Avatar actualizado. `name` es el nick, `png` son los bytes PNG (posiblemente
@@ -199,8 +199,8 @@ pub enum ScriptEvent {
     PersonalMessage { name: String, text: String },
 
     // --- Nick / admin ---
-    /// Nick cambiado
-    Nick { old: String, new: String },
+    /// Nick cambiado. Paridad sb0t: onNick(userobj, name) → (JSUser, String).
+    Nick { name: String, new_name: String },
     /// Nivel admin cambiado
     AdminLevelChanged { name: String },
     /// Login concedido
@@ -218,8 +218,8 @@ pub enum ScriptEvent {
     // --- Idle ---
     /// User pasó a idle
     Idled { name: String },
-    /// User salió de idle
-    Unidled { name: String },
+    /// User salió de idle. Paridad sb0t: onUnidled(userobj, seconds) → (JSUser, int).
+    Unidled { name: String, seconds: u32 },
 
     // --- Registration ---
     /// User se está registrando
@@ -232,14 +232,14 @@ pub enum ScriptEvent {
     // --- Bans / proxies ---
     /// Bans auto-limpios (ban expirado)
     BansAutoCleared,
-    /// Proxy detectado
-    ProxyDetected { ip: String },
+    /// Proxy detectado. Paridad sb0t: onProxyDetected(userobj, reply) → (JSUser, bool).
+    ProxyDetected { name: String, ip: String, reply: bool },
 
     // --- Flood ---
     /// User flood
     Flood { name: String },
-    /// Hook antes de flood-check (puede cancelar)
-    FloodBefore { name: String },
+    /// Hook antes de flood-check (puede cancelar). Paridad sb0t: onFloodBefore(userobj, msg) → (JSUser, int).
+    FloodBefore { name: String, msg: u8 },
 
     // --- File browse ---
     /// Archivo recibido (browse)
@@ -256,14 +256,14 @@ pub enum ScriptEvent {
     Help { from: String },
 
     // --- Link ---
-    /// Hub o leaf conectado
-    Linked { name: String },
-    /// Hub o leaf desconectado
-    Unlinked { name: String },
-    /// Error en el link
-    LinkError { name: String, error: String },
-    /// Admin del hub deshabilitado
-    LinkedAdminDisabled,
+    /// Hub o leaf conectado. Paridad sb0t: onLinked() — sin args.
+    Linked,
+    /// Hub o leaf desconectado. Paridad sb0t: onUnlinked() — sin args.
+    Unlinked,
+    /// Error en el link. Paridad sb0t: onLinkError(msg) → (int).
+    LinkError { code: i32 },
+    /// Admin del hub deshabilitado. Paridad sb0t: onLinkedAdminDisabled(leaf, userobj) → (JSLeaf, JSUser).
+    LinkedAdminDisabled { leaf: String, user: String },
     /// Leaf se unió
     LeafJoin { name: String },
     /// Leaf se fue
@@ -277,7 +277,8 @@ pub enum ScriptEvent {
 
     // --- Timer ---
     /// Timer one-shot disparado. `secs` es el id del timer (para correlación),
-    /// `name` es el nombre de la función JS a llamar (handler_name = "onTimer").
+    /// `name` es el nombre de la función JS a llamar (handler_name = "__onTimerCallback"
+    /// — sb0t parity: `onTimer()` se reserva para el tick por segundo).
     Timer { secs: u64, name: String },
 
     // --- HTTP async ---
@@ -376,10 +377,10 @@ impl ScriptEvent {
             Help { .. } => "onHelp",
 
             // Link
-            Linked { .. } => "onLinked",
-            Unlinked { .. } => "onUnlinked",
+            Linked => "onLinked",
+            Unlinked => "onUnlinked",
             LinkError { .. } => "onLinkError",
-            LinkedAdminDisabled => "onLinkedAdminDisabled",
+            LinkedAdminDisabled { .. } => "onLinkedAdminDisabled",
             LeafJoin { .. } => "onLeafJoin",
             LeafPart { .. } => "onLeafPart",
 
@@ -388,7 +389,7 @@ impl ScriptEvent {
             VroomJoinCheck { .. } => "onVroomJoinCheck",
 
             // Timer
-            Timer { .. } => "onTimer",
+            Timer { .. } => "__onTimerCallback",
             HttpComplete { .. } => "onHttpComplete",
         }
     }
@@ -403,17 +404,16 @@ impl ScriptEvent {
         match self {
             Connect { .. }
             | Disconnect { .. }
-            | ProxyDetected { .. }
-            | Nick { .. }
             | BansAutoCleared
-            | Linked { .. }
-            | Unlinked { .. }
+            | Linked
+            | Unlinked
             | LinkError { .. }
-            | LinkedAdminDisabled
             | LeafJoin { .. }
             | LeafPart { .. }
             | Timer { .. }
             | HttpComplete { .. } => None,
+            // LinkedAdminDisabled: leaf en 0 (str), user en 1 (JSUser).
+            LinkedAdminDisabled { .. } => Some(1),
             // El resto lleva el nombre del usuario en el argumento 0.
             _ => Some(0),
         }
@@ -432,12 +432,24 @@ impl ScriptEvent {
                 2 => ArgKind::Pm,
                 _ => ArgKind::Str,
             },
+            // onIgnoring(userobj, target_userobj) — ambos JSUser.
+            Ignoring { .. } => match idx {
+                0 | 1 => ArgKind::User,
+                _ => ArgKind::Str,
+            },
+            // onIgnoredStateChanged(userobj, target, ignored) — ambos JSUser + bool.
+            IgnoredStateChanged { .. } => match idx {
+                0 | 1 => ArgKind::User,
+                _ => ArgKind::Str,
+            },
             // onCommand(userobj, command, target, args): el target (arg 2)
             // también es un JSUser — o null si no se resolvió (string vacío).
             Command { .. } => match idx {
                 0 | 2 => ArgKind::User,
                 _ => ArgKind::Str,
             },
+            // onBotPM(userobj, text) — JSUser + String.
+            BotPM { .. } if idx == 0 => ArgKind::User,
             _ => {
                 if self.user_arg_index() == Some(idx) {
                     ArgKind::User
@@ -483,16 +495,18 @@ impl ScriptEvent {
             Private { from, to, text } => vec![from.clone(), to.clone(), text.clone()],
             PMBefore { from, to, text } => vec![from.clone(), to.clone(), text.clone()],
             PM { from, to, text } => vec![from.clone(), to.clone(), text.clone()],
-            BotPM { from, to, text } => vec![from.clone(), to.clone(), text.clone()],
-            Ignoring { name } => vec![name.clone()],
-            IgnoredStateChanged { name } => vec![name.clone()],
+            BotPM { name, text } => vec![name.clone(), text.clone()],
+            Ignoring { name, target } => vec![name.clone(), target.clone()],
+            IgnoredStateChanged { name, target, ignored } => {
+                vec![name.clone(), target.clone(), ignored.to_string()]
+            }
 
             // Avatar / pmsg
             Avatar { name, .. } => vec![name.clone()],
             PersonalMessage { name, text } => vec![name.clone(), text.clone()],
 
             // Nick / admin
-            Nick { old, new } => vec![old.clone(), new.clone()],
+            Nick { name, new_name } => vec![name.clone(), new_name.clone()],
             AdminLevelChanged { name } => vec![name.clone()],
             LoginGranted { name } => vec![name.clone()],
             Logout { name } => vec![name.clone()],
@@ -503,7 +517,7 @@ impl ScriptEvent {
 
             // Idle
             Idled { name } => vec![name.clone()],
-            Unidled { name } => vec![name.clone()],
+            Unidled { name, seconds } => vec![name.clone(), seconds.to_string()],
 
             // Registration
             Registering { name, ip } => vec![name.clone(), ip.clone()],
@@ -512,11 +526,11 @@ impl ScriptEvent {
 
             // Bans / proxies
             BansAutoCleared => vec![],
-            ProxyDetected { ip } => vec![ip.clone()],
+            ProxyDetected { name, ip, reply } => vec![name.clone(), ip.clone(), reply.to_string()],
 
             // Flood
             Flood { name } => vec![name.clone()],
-            FloodBefore { name } => vec![name.clone()],
+            FloodBefore { name, msg } => vec![name.clone(), msg.to_string()],
 
             // File browse
             FileReceived { name, filename } => vec![name.clone(), filename.clone()],
@@ -528,10 +542,10 @@ impl ScriptEvent {
             Help { from } => vec![from.clone()],
 
             // Link
-            Linked { name } => vec![name.clone()],
-            Unlinked { name } => vec![name.clone()],
-            LinkError { name, error } => vec![name.clone(), error.clone()],
-            LinkedAdminDisabled => vec![],
+            Linked => vec![],
+            Unlinked => vec![],
+            LinkError { code } => vec![code.to_string()],
+            LinkedAdminDisabled { leaf, user } => vec![leaf.clone(), user.clone()],
             LeafJoin { name } => vec![name.clone()],
             LeafPart { name } => vec![name.clone()],
 
@@ -596,7 +610,7 @@ mod tests {
             "onFileReceived", "onScribbleCheck", "onHelp", "onLinked",
             "onUnlinked", "onLinkError", "onLinkedAdminDisabled",
             "onLeafJoin", "onLeafPart", "onVroomJoin", "onVroomJoinCheck",
-            "onTimer",
+            "onHttpComplete",
         ];
         // 45 handler names (más onJoinCheck que está incluido, total 46 en la lista)
         assert!(expected.len() >= 45);
@@ -625,33 +639,33 @@ mod tests {
             ScriptEvent::Private { from: "".into(), to: "".into(), text: "".into() }.handler_name(),
             ScriptEvent::PMBefore { from: "".into(), to: "".into(), text: "".into() }.handler_name(),
             ScriptEvent::PM { from: "".into(), to: "".into(), text: "".into() }.handler_name(),
-            ScriptEvent::BotPM { from: "".into(), to: "".into(), text: "".into() }.handler_name(),
-            ScriptEvent::Ignoring { name: "".into() }.handler_name(),
-            ScriptEvent::IgnoredStateChanged { name: "".into() }.handler_name(),
+            ScriptEvent::BotPM { name: "".into(), text: "".into() }.handler_name(),
+            ScriptEvent::Ignoring { name: "".into(), target: "".into() }.handler_name(),
+            ScriptEvent::IgnoredStateChanged { name: "".into(), target: "".into(), ignored: false }.handler_name(),
             ScriptEvent::Avatar { name: "".into(), png: vec![] }.handler_name(),
             ScriptEvent::PersonalMessage { name: "".into(), text: "".into() }.handler_name(),
-            ScriptEvent::Nick { old: "".into(), new: "".into() }.handler_name(),
+            ScriptEvent::Nick { name: "".into(), new_name: "".into() }.handler_name(),
             ScriptEvent::AdminLevelChanged { name: "".into() }.handler_name(),
             ScriptEvent::LoginGranted { name: "".into() }.handler_name(),
             ScriptEvent::Logout { name: "".into() }.handler_name(),
             ScriptEvent::InvalidLoginAttempt { name: "".into(), ip: "".into() }.handler_name(),
             ScriptEvent::Command { from: "".into(), command: "".into(), target: "".into(), args: "".into() }.handler_name(),
             ScriptEvent::Idled { name: "".into() }.handler_name(),
-            ScriptEvent::Unidled { name: "".into() }.handler_name(),
+            ScriptEvent::Unidled { name: "".into(), seconds: 0 }.handler_name(),
             ScriptEvent::Registering { name: "".into(), ip: "".into() }.handler_name(),
             ScriptEvent::Registered { name: "".into(), ip: "".into() }.handler_name(),
             ScriptEvent::Unregistered { name: "".into() }.handler_name(),
             ScriptEvent::BansAutoCleared.handler_name(),
-            ScriptEvent::ProxyDetected { ip: "".into() }.handler_name(),
+            ScriptEvent::ProxyDetected { name: "".into(), ip: "".into(), reply: false }.handler_name(),
             ScriptEvent::Flood { name: "".into() }.handler_name(),
-            ScriptEvent::FloodBefore { name: "".into() }.handler_name(),
+            ScriptEvent::FloodBefore { name: "".into(), msg: 0 }.handler_name(),
             ScriptEvent::FileReceived { name: "".into(), filename: "".into() }.handler_name(),
             ScriptEvent::ScribbleCheck { name: "".into(), is_pm: false }.handler_name(),
             ScriptEvent::Help { from: "".into() }.handler_name(),
-            ScriptEvent::Linked { name: "".into() }.handler_name(),
-            ScriptEvent::Unlinked { name: "".into() }.handler_name(),
-            ScriptEvent::LinkError { name: "".into(), error: "".into() }.handler_name(),
-            ScriptEvent::LinkedAdminDisabled.handler_name(),
+            ScriptEvent::Linked.handler_name(),
+            ScriptEvent::Unlinked.handler_name(),
+            ScriptEvent::LinkError { code: 0 }.handler_name(),
+            ScriptEvent::LinkedAdminDisabled { leaf: "".into(), user: "".into() }.handler_name(),
             ScriptEvent::LeafJoin { name: "".into() }.handler_name(),
             ScriptEvent::LeafPart { name: "".into() }.handler_name(),
             ScriptEvent::VroomJoin { name: "".into(), vroom: 0 }.handler_name(),
@@ -690,7 +704,7 @@ mod tests {
 
         // Timer
         let ev = ScriptEvent::Timer { secs: 12345, name: "cb".into() };
-        assert_eq!(ev.handler_name(), "onTimer");
+        assert_eq!(ev.handler_name(), "__onTimerCallback");
         assert_eq!(ev.args(), vec!["12345", "cb"]);
     }
 }

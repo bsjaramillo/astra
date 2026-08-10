@@ -281,6 +281,9 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("__records_json"), 0, NativeFunction::from_fn_ptr(records_json_fn))
         .expect("__records_json should be registered");
     context
+        .register_global_builtin_callable(js_string!("__linked_users_json"), 0, NativeFunction::from_fn_ptr(linked_users_json_fn))
+        .expect("__linked_users_json should be registered");
+    context
         .register_global_builtin_callable(js_string!("__banned_json"), 0, NativeFunction::from_fn_ptr(banned_json_fn))
         .expect("__banned_json should be registered");
     context
@@ -590,7 +593,7 @@ var __USER_PROPS = ["name","orgName","id","level","vroom","externalIp","localIp"
   "dns","guid","version","age","gender","sex","country","region","fileCount","port",
   "muzzled","cloaked","registered","encrypted","owner","webClient","customClient",
   "browsable","fastPing","canHTML","personalMessage","customName","joinTime",
-  "captcha","idle","visible","ghost","localEP","linked","leaf"];
+  "captcha","idle","visible","ghost","localEP","linked","leaf","originalIp"];
 function __mkUser(name){
   if (name == null) return null;
   var u = { __name: "" + name };
@@ -666,8 +669,24 @@ function __mkUser(name){
   };
   // restoreAvatar() — vuelve al avatar original del cliente (sb0t OrgAvatar).
   u.restoreAvatar = function(){ return __user_do(u.__name, "restoreAvatar", ""); };
-  u.getASN = function(){ return null; };       // stub: sin base ASN (excepción acordada)
-  u.ignores = function(){ try { return JSON.parse(__user_get(u.__name, "ignoresJson") || "[]"); } catch (e) { return []; } };
+    // getASN() — número ASN o null si no está disponible.
+    u.getASN = function(){ return __user_get(u.__name, "asn"); };
+  // sb0t JSIgnoreCollection: objeto con .count e indexer de arrays.
+  Object.defineProperty(u, "ignores", {
+    enumerable: true, configurable: true,
+    get: function(){
+      var raw;
+      try { raw = JSON.parse(__user_get(u.__name, "ignoresJson") || "[]"); } catch (e) { return []; }
+      var col = {};
+      Object.defineProperty(col, "count", { get: function(){ return raw.length; }, enumerable: true });
+      for (var i = 0; i < raw.length; i++){
+        (function(idx){
+          Object.defineProperty(col, idx, { get: function(){ return raw[idx]; }, enumerable: true, configurable: true });
+        })(i);
+      }
+      return col;
+    }
+  });
   // En contexto string el objeto se comporta como su nombre: mantiene
   // compat con handlers "nativos" de Astra que usaban el nombre (string)
   // como primer argumento (concatenación, ==, plantillas).
@@ -703,31 +722,73 @@ var Room = {
 var Users = {
   count: Users_count, getUserByName: function(n){ return __mkUser(n); },
   exists: userExists, names: userNames,
-  local: function(){ var r = userNames(); return (r || []).map(__mkUser); },
+    // local([fn]) — compat: devuelve JSUser[] y, si se pasa callback,
+    // itera cada usuario local (estilo Users.local(function(u){ ... })).
+    local: function(fn){
+        var r = userNames();
+        var a = (r || []).map(__mkUser);
+        if (typeof fn === "function") {
+            try { for (var i = 0; i < a.length; i++) fn(a[i], i); } catch (e) {}
+        }
+        return a;
+    },
   // Historial de usuarios desconectados (JSRecord con ban()).
-  records: function(){
+    records: function(fn){
     var arr;
     try { arr = JSON.parse(__records_json()); } catch (e) { return []; }
-    return arr.map(function(r){
+        var out = arr.map(function(r){
       r.ban = function(){ return __record_ban(r.name, r.version, r.guid, r.externalIp, r.localIp, r.port); };
       return r;
     });
+        if (typeof fn === "function") {
+            try { for (var i = 0; i < out.length; i++) fn(out[i], i); } catch (e) {}
+        }
+        return out;
   },
   // JSBannedUser reales (con unban()), sobre la ban list del server.
-  banned: function(){
+    banned: function(fn){
     var arr;
     try { arr = JSON.parse(__banned_json()); } catch (e) { return []; }
-    return arr.map(function(b){
+        var out = arr.map(function(b){
       b.unban = function(){ return __unban_ident(b.ident); };
       return b;
     });
+        if (typeof fn === "function") {
+            try { for (var i = 0; i < out.length; i++) fn(out[i], i); } catch (e) {}
+        }
+        return out;
   },
-  // Usuarios remotos vía link: (linkName, userName) → objetos user.
-  linked: function(){
-    var arr;
-    try { arr = JSON.parse(Link_list()); } catch (e) { return []; }
-    return Array.isArray(arr) ? arr : [];
-  }
+    // Usuarios remotos vía link. Devuelve JSUser[] (cada uno con `leaf` y
+    // `linked` forzados para reflejar el snapshot remoto). Compat: si se pasa
+    // callback, itera `fn(user, i)`.
+    linked: function(fn){
+        var arr;
+        try { arr = JSON.parse(__linked_users_json()); } catch (e) { return []; }
+        if (!Array.isArray(arr)) return [];
+        var out = arr.map(function(e){
+            var link = e && e.link != null ? ("" + e.link) : "";
+            var name = e && e.name != null ? ("" + e.name) : "";
+            var u = __mkUser(name);
+            if (u == null) return null;
+            Object.defineProperty(u, "name", {
+                enumerable: true, configurable: true,
+                get: function(){ return name; }
+            });
+            Object.defineProperty(u, "linked", {
+                enumerable: true, configurable: true,
+                get: function(){ return true; }
+            });
+            Object.defineProperty(u, "leaf", {
+                enumerable: true, configurable: true,
+                get: function(){ return link; }
+            });
+            return u;
+        }).filter(function(x){ return x != null; });
+        if (typeof fn === "function") {
+            try { for (var i = 0; i < out.length; i++) fn(out[i], i); } catch (e) {}
+        }
+        return out;
+    }
 };
 var Channels = { create: Channels_create, "delete": Channels_delete,
                  // Extras de Astra (channels internos = vrooms).
@@ -737,7 +798,9 @@ var Channels = { create: Channels_create, "delete": Channels_delete,
                  // sb0t JSChannels: available/enabled = propiedades bool sobre la
                  // channel list de Ares; search(texto) = JSChannel[] con hashlink/
                  // language/etc (en Astra: tabla rooms del room-search UDP).
-                 get available(){ try { return JSON.parse(__channels_search("")).length > 0; } catch (e) { return false; } },
+                 // available = servicio de room-search disponible (no depende
+                 // de cuántas rooms haya indexadas en este instante).
+                 get available(){ return __room_get("roomsearch") === true; },
                  // sb0t: Enabled = Settings.Get<bool>("roomsearch").
                  get enabled(){ return __room_get("roomsearch") === true; },
                  search: function(text){ try { return JSON.parse(__channels_search(text == null ? "" : "" + text)); } catch (e) { return []; } } };
@@ -749,7 +812,24 @@ var Entities = {
   encode: function(s){ return ("" + (s == null ? "" : s)).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); },
   decode: function(s){ return ("" + (s == null ? "" : s)).replace(/&#0?39;/g,"'").replace(/&apos;/g,"'").replace(/&quot;/g,'"').replace(/&gt;/g,">").replace(/&lt;/g,"<").replace(/&amp;/g,"&"); }
 };
-var Spelling = { check: Spelling_check, suggest: Spelling_suggest, confirm: Spelling_confirm };
+var Spelling = {
+  // sb0t parity: check recibe texto completo y retorna string (vacío = OK,
+  // o el texto con palabras mal escritas en formato legible).
+  check: function(text){
+    if (text == null) return null;
+    var words = ("" + text).split(/\b/);
+    var out = [];
+    var hasErrors = false;
+    for (var i = 0; i < words.length; i++){
+      var w = words[i].trim();
+      if (w.length === 0 || !/[a-zA-Z]/.test(w)) { out.push(words[i]); continue; }
+      if (Spelling_check(w)) { out.push(words[i]); }
+      else { out.push("[-" + w + "-]"); hasErrors = true; }
+    }
+    return hasErrors ? out.join("") : null;
+  },
+  suggest: Spelling_suggest, confirm: Spelling_confirm
+};
 var Stats = {
   // Extras de Astra.
   addStat: Stats_addStat, getStat: Stats_getStat,
@@ -771,6 +851,9 @@ var Registry = {
   exists: Registry_exists, getValue: Registry_getValue, getKeys: Registry_getKeys,
   setValue: Registry_setValue, deleteValue: Registry_deleteValue, clear: Registry_clear
 };
+// sb0t expone Script.include(...) como estático; mantenemos también el global
+// include(...) por compat histórica de Astra.
+var Script = { include: include };
 // CryptoResult (sb0t JSCryptoResult): resultado de md5hash/sha1hash con
 // toHex()/toBase64()/toArray(). Se construye desde el hex que devuelven los
 // natives (los bytes se recuperan parseando pares hex).
@@ -805,17 +888,52 @@ var Crypto = {
   md5hash: function(s){ return s == null ? null : __mkCryptoResult(Crypto_hashMD5("" + s)); },
   sha1hash: function(s){ return s == null ? null : __mkCryptoResult(Crypto_hashSHA1("" + s)); }
 };
-var Link = { createLink: Link_createLink, connect: Link_createLink, disconnect: Link_disconnect,
+var Link = { createLink: Link_createLink,
+                         // sb0t: connect(arg) con un solo string.
+                         connect: function(a){
+                             if (a == null) return false;
+                             var s = "" + a;
+                             var p = Hashlink_parse(s);
+                             if (p != null) {
+                                 try {
+                                     var o = JSON.parse(p);
+                                     if (o && o.server && o.port) return Link_createLink(o.server, o.port);
+                                 } catch (e) {}
+                             }
+                             var i = s.lastIndexOf(":");
+                             if (i > 0) {
+                                 var host = s.substring(0, i), port = parseInt(s.substring(i + 1), 10);
+                                 if (host && port > 0) return Link_createLink(host, port);
+                             }
+                             return Link_createLink(s, 5009);
+                         },
+                         // sb0t: disconnect() sin args.
+                         disconnect: function(name){
+                             if (name != null) return Link_disconnect("" + name);
+                             var h = __linkHub();
+                             return (h && h.name) ? Link_disconnect(h.name) : false;
+                         },
              findHub: Link_findHub, findLeaf: Link_findLeaf, findUser: Link_findUser,
              getUserList: Link_getUserList, kickHub: Link_kickHub, list: Link_list,
              // Funciones sb0t: Leaf objects REALES (métodos ruteados por el link).
-             leaves: function(){
-               try { return JSON.parse(__link_leaves()).map(__mkLeaf); } catch (e) { return []; }
+                         leaves: function(fn){
+                             var out;
+                             try { out = JSON.parse(__link_leaves()).map(__mkLeaf); } catch (e) { out = []; }
+                             if (typeof fn === "function") {
+                                 try { for (var i = 0; i < out.length; i++) fn(out[i], i); } catch (e) {}
+                             }
+                             return out;
              },
              leaf: function(name){
                if (name == null) return null;
                var ls = Link.leaves();
-               for (var i = 0; i < ls.length; i++){ if (ls[i].name == ("" + name)) return ls[i]; }
+                             var q = "" + name;
+                             for (var i = 0; i < ls.length; i++){
+                                 if (ls[i].name == q) return ls[i];
+                             }
+                             for (var j = 0; j < ls.length; j++){
+                                 if (("" + ls[j].name).indexOf(q) === 0) return ls[j];
+                             }
                return null;
              },
              // sb0t JSLink: linked/name/externalIp/port/hashlink son PROPIEDADES
@@ -874,7 +992,27 @@ function tickCount(){ return Date.now(); }
 function byteLength(s){ s = (s == null ? "" : "" + s); var n = 0; for (var i = 0; i < s.length; i++){ var c = s.charCodeAt(i); n += c < 0x80 ? 1 : c < 0x800 ? 2 : 3; } return n; }
 function stripColors(s){ return ("" + (s == null ? "" : s)).replace(/\x03[0-9]{0,2}(,[0-9]{1,2})?/g, ""); }
 function escapeUtf(s){ return encodeURIComponent(s == null ? "" : "" + s); }
-function clrName(name){ return stripColors(name); }
+function clrName(obj){
+  // sb0t parity: returns CLR type name (a.GetType().ToString()).
+  // For JS objects we return sb0t-compatible type strings.
+  if (obj == null || obj === undefined) return null;
+  if (typeof obj !== "object" && typeof obj !== "function") return typeof obj;
+  if (obj.__name !== undefined) return "scripting.Objects.JSUser";
+  var cons = obj.constructor;
+  if (cons) {
+    var cn = cons.name;
+    if (cn === "Timer") return "scripting.Instances.JSTimer";
+    if (cn === "List") return "scripting.Instances.JSList";
+    if (cn === "Sql") return "scripting.Instances.JSSql";
+    if (cn === "HttpRequest") return "scripting.Instances.JSHttpRequest";
+    if (cn === "XmlParser") return "scripting.Instances.JSXmlParser";
+    if (cn === "Query") return "scripting.Instances.JSQuery";
+    if (cn === "Avatar") return "scripting.Instances.JSAvatar";
+    if (cn === "Scribble") return "scripting.Instances.JSScribble";
+    if (cn === "ProxyCheck") return "scripting.Instances.JSProxyCheck";
+  }
+  return Object.prototype.toString.call(obj).slice(8, -1);
+}
 
 // ---- List: colección tipada estilo sb0t (implementación pura JS) ----
 function List(){ this.__a = []; }
@@ -902,13 +1040,13 @@ List.prototype.findLastIndex = function(f){ for (var i = this.__a.length - 1; i 
 List.prototype.join = function(s){ return this.__a.join(s == null ? "," : s); };
 
 // ---- Timer: repetitivo con oncomplete, sobre setTimer/clearTimer nativos ----
-// setTimer() de Astra ya es repetitivo (el manager lo re-arma) y dispara el
-// handler global onTimer(id, name). Registramos el callback por 'name' y lo
-// enrutamos con un onTimer del prelude. Un script que defina su propio
-// onTimer lo sobreescribe (sólo relevante si además usa el objeto Timer).
+// setTimer()/setTimeout() disparan el handler global __onTimerCallback(id, name)
+// (el native cambió de "onTimer" a "__onTimerCallback" para sb0t parity).
+// Registramos el callback por 'name' y lo enrutamos aquí. El script puede
+// definir su propio onTimer() para el tick por segundo (sb0t parity).
 var __timerSeq = 0;
 var __timerCbs = {};
-function onTimer(id, name){ var f = __timerCbs[name]; if (typeof f === "function") { try { f(); } catch (e) {} } }
+function __onTimerCallback(id, name){ var f = __timerCbs[name]; if (typeof f === "function") { try { f(); } catch (e) {} } }
 function Timer(){ this.interval = 1000; this.oncomplete = null; this.__id = null; this.__key = "__timer_" + (++__timerSeq); }
 Timer.prototype.start = function(){
   var self = this;
@@ -1201,21 +1339,33 @@ Leaf.prototype.printAdmins = function(a, b){
   return __leaf_send(this.ident, "printLevel", "" + a, "" + b);
 };
 // users() — usuarios conocidos de ese leaf (los que el link atribuye a él).
-Leaf.prototype.users = function(){
+Leaf.prototype.users = function(fn){
   var self = this;
   var all = Users.linked();
   var out = [];
   for (var i = 0; i < all.length; i++){
-    var entry = "" + all[i];
-    var sep = entry.indexOf(":");
-    if (sep > 0 && entry.substring(0, sep) === self.name) out.push(__mkUser(entry.substring(sep + 1)));
+        var entry = all[i];
+        // Formato nuevo (JSUser con `leaf`) — paridad de objetos.
+        if (entry && typeof entry === "object" && entry.leaf != null) {
+            if (("" + entry.leaf) === self.name) out.push(entry);
+            continue;
+        }
+        // Compat retroactiva: string "link:user".
+        var s = "" + entry;
+        var sep = s.indexOf(":");
+        if (sep > 0 && s.substring(0, sep) === self.name) out.push(__mkUser(s.substring(sep + 1)));
   }
-  return out;
+    if (typeof fn === "function") {
+        try { for (var k = 0; k < out.length; k++) fn(out[k], k); } catch (e) {}
+    }
+    return out;
 };
 Leaf.prototype.user = function(name){
   if (name == null) return null;
+    var q = "" + name;
   var us = this.users();
-  for (var i = 0; i < us.length; i++){ if (us[i].__name == ("" + name)) return us[i]; }
+    for (var i = 0; i < us.length; i++){ if (("" + us[i]) == q) return us[i]; }
+    for (var j = 0; j < us.length; j++){ if (("" + us[j]).indexOf(q) === 0) return us[j]; }
   return null;
 };
 Leaf.prototype.sendText = function(sender, text){
@@ -1505,7 +1655,19 @@ fn user_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "name" => JsValue::from(js_string!(u.name.read().clone())),
         "orgName" => JsValue::from(js_string!(u.org_name.read().clone())),
         "id" => JsValue::from(u.id as f64),
-        "level" => JsValue::from(*u.level.read() as u8 as f64),
+        "level" => {
+            let raw = *u.level.read() as u8;
+            let sb = match raw {
+                0 => 0u8,
+                1 => 1u8,
+                2 => 1u8,   // Voice de Astra se expone como Moderator en API sb0t.
+                50 => 1u8,
+                80 => 2u8,
+                100 => 3u8,
+                _ => 0u8,
+            };
+            JsValue::from(sb as f64)
+        }
         "vroom" => JsValue::from(*u.vroom.read() as f64),
         "externalIp" => JsValue::from(js_string!(u.external_ip.to_string())),
         "localIp" => JsValue::from(js_string!(u.local_ip.to_string())),
@@ -1541,8 +1703,19 @@ fn user_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "visible" => JsValue::from(!u.cloaked.load(Relaxed)),
         "ghost" => JsValue::from(u.ghosting),
         "localEP" => JsValue::from(js_string!(format!("{}:{}", u.local_ip, u.data_port))),
+        "asn" => {
+            if let Some(asn) = *u.asn_cache.read() {
+                JsValue::from(asn as f64)
+            } else if let Some(asn) = app.geoip.lookup_asn(u.external_ip) {
+                *u.asn_cache.write() = Some(asn);
+                JsValue::from(asn as f64)
+            } else {
+                JsValue::null()
+            }
+        }
         "linked" => JsValue::from(false),
         "leaf" => JsValue::null(),
+        "originalIp" => JsValue::from(js_string!(u.original_ip.to_string())),
         "fontJson" => {
             let f = u.font.read().clone();
             JsValue::from(js_string!(serde_json::json!({
@@ -1728,9 +1901,14 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
                 return Ok(JsValue::from(false));
             };
             let new_level = match v {
-                0 => server_core::ILevel::Anonymous,
-                1 => server_core::ILevel::Regular,
-                2 => server_core::ILevel::Voice,
+                // sb0t: 0..3 = Regular/Moderator/Admin/Host
+                0 => server_core::ILevel::Regular,
+                1 => server_core::ILevel::Moderator,
+                2 => server_core::ILevel::Admin,
+                3 => server_core::ILevel::Owner,
+                // Compat legacy Astra (scripts viejos)
+                // Anonymous no existe en sb0t scripting; se conserva por retrocompat.
+                255 => server_core::ILevel::Anonymous,
                 50 => server_core::ILevel::Moderator,
                 80 => server_core::ILevel::Admin,
                 100 => server_core::ILevel::Owner,
@@ -1976,7 +2154,8 @@ fn room_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "botName" => JsValue::from(js_string!(app.settings.bot_name.clone())),
         "topic" => JsValue::from(js_string!(app.current_room_topic())),
         "port" => JsValue::from(app.settings.port as f64),
-        "version" => JsValue::from(js_string!(env!("CARGO_PKG_VERSION"))),
+        // sb0t `Room.version` = Server.SCRIPT_VERSION (numérico, 5009).
+        "version" => JsValue::from(5009.0),
         // IP externa real, reportada por la red Ares en el handshake UDP del
         // room-search (paridad sb0t Settings.ExternalIP). "" hasta que llegue.
         "externalIp" => JsValue::from(js_string!(app
@@ -1984,7 +2163,12 @@ fn room_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
             .read()
             .map(|ip| ip.to_string())
             .unwrap_or_default())),
-        "startTime" => JsValue::from(app.uptime_secs() as f64),
+        // sb0t guarda el instante de arranque como epoch seconds (uint).
+        "startTime" => {
+            let now = (server_core::time::unix_time() / 1000) as i64;
+            let start = now.saturating_sub(app.uptime_secs() as i64);
+            JsValue::from(start as f64)
+        }
         // sb0t `Room.customNames` (Settings "customnames"): ¿se permiten
         // custom names en la sala? Getter; el setter va por __room_set.
         "customNames" => JsValue::from(app.room_flags.get("customnames")),
@@ -2074,12 +2258,24 @@ fn room_set_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
 fn room_set_url_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let addr = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     let text = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
-    if addr.is_empty() {
-        return Ok(JsValue::from(false));
-    }
     let Some(app) = lookup_app(ctx) else {
         return Ok(JsValue::from(false));
     };
+    // sb0t SetUrl:
+    // - addr=="" && text=="" => clear
+    // - addr!="" && text!="" => set
+    // - cualquier otra combinación => no-op
+    if addr.is_empty() && text.is_empty() {
+        while !app.urls.is_empty() {
+            if app.urls.remove_at(0).is_none() {
+                break;
+            }
+        }
+        return Ok(JsValue::from(true));
+    }
+    if addr.is_empty() || text.is_empty() {
+        return Ok(JsValue::from(false));
+    }
     while !app.urls.is_empty() {
         if app.urls.remove_at(0).is_none() {
             break;
@@ -2128,20 +2324,26 @@ fn channels_search_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> R
     let Some(app) = lookup_app(ctx) else {
         return Ok(JsValue::from(js_string!("[]")));
     };
-    let rooms = app.db.list_rooms().unwrap_or_default();
+    let mut rooms = app.db.list_rooms().unwrap_or_default();
+    // sb0t: aplica filtro de nombre, ignora salas con 200+ users, ordena por
+    // cantidad de usuarios descendente y limita a 10.
+    rooms.retain(|r| r.users < 200 && (needle.is_empty() || r.name.to_uppercase().contains(&needle)));
+    rooms.sort_by(|a, b| b.users.cmp(&a.users));
+    if rooms.len() > 10 {
+        rooms.truncate(10);
+    }
     let out: Vec<serde_json::Value> = rooms
         .iter()
-        .filter(|r| needle.is_empty() || r.name.to_uppercase().contains(&needle))
         .map(|r| {
             let hashlink = r
                 .ip
                 .parse::<std::net::Ipv4Addr>()
                 .map(|ip| {
-                    server_core::hashlink::encode(&server_core::hashlink::HashlinkRoom {
+                    prefix_arlnk(&server_core::hashlink::encode(&server_core::hashlink::HashlinkRoom {
                         ip,
                         port: r.port,
                         name: r.name.clone(),
-                    })
+                    }))
                 })
                 .unwrap_or_default();
             serde_json::json!({
@@ -2203,6 +2405,25 @@ fn records_json_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Res
         ));
     }
     Ok(JsValue::from(js_string!(format!("[{}]", items.join(",")))))
+}
+
+/// `__linked_users_json()` — snapshot de usuarios remotos vía link para
+/// `Users.linked()`. Formato JSON array:
+/// `[{"link":"leafA","name":"Alice"}, ...]`.
+fn linked_users_json_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    let json = lookup_app(ctx)
+        .map(|app| {
+            let users = app.link_users.read();
+            let mut out: Vec<String> = Vec::with_capacity(users.len());
+            for (link, name) in users.iter() {
+                let l = link.replace('\\', "\\\\").replace('"', "\\\"");
+                let n = name.replace('\\', "\\\\").replace('"', "\\\"");
+                out.push(format!("{{\"link\":\"{}\",\"name\":\"{}\"}}", l, n));
+            }
+            format!("[{}]", out.join(","))
+        })
+        .unwrap_or_else(|| "[]".to_string());
+    Ok(JsValue::from(js_string!(json)))
 }
 
 /// `__record_ban(name, version, guidHex, externalIp, localIp, port)` — banea
@@ -2980,15 +3201,34 @@ fn entities_list_fn(_this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> Re
     Ok(JsValue::from(js_string!(json)))
 }
 
-/// `Link_createLink(name, server, port)` — crea una conexión link a otro server.
-/// Envía un `LinkRequest::CreateLink` al bus. Retorna `true` si se encoló.
+/// `Link_createLink(...)` — crea una conexión link a otro server.
+/// Acepta dos formas por compatibilidad:
+/// - `(server, port)` (sb0t): el `name` se deriva de `server`.
+/// - `(name, server, port)` (Astra extendido).
+/// Encola `LinkRequest::CreateLink` y retorna `true` cuando los argumentos son
+/// válidos (aunque no haya consumidores activos del bus en ese momento).
 fn link_create_link_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
-    let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
-    let server = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
-    let port = args.get(2)
-        .and_then(|v| v.as_number())
-        .map(|n| n as u16)
-        .unwrap_or(0);
+    let (name, server, port) = if args.len() >= 2
+        && args.get(1).and_then(|v| v.as_number()).is_some()
+        && args.get(2).is_none()
+    {
+        let server = args.first().and_then(jsvalue_to_string).unwrap_or_default();
+        let port = args
+            .get(1)
+            .and_then(|v| v.as_number())
+            .map(|n| n as u16)
+            .unwrap_or(0);
+        (server.clone(), server, port)
+    } else {
+        let name = args.first().and_then(jsvalue_to_string).unwrap_or_default();
+        let server = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
+        let port = args
+            .get(2)
+            .and_then(|v| v.as_number())
+            .map(|n| n as u16)
+            .unwrap_or(0);
+        (name, server, port)
+    };
     if name.is_empty() || server.is_empty() || port == 0 {
         return Ok(JsValue::from(false));
     }
@@ -2996,11 +3236,13 @@ fn link_create_link_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> 
         return Ok(JsValue::from(false));
     };
     let req = server_core::LinkRequest::CreateLink { name, server, port };
-    Ok(JsValue::from(app.link_requests.send(req).is_ok()))
+    let _ = app.link_requests.send(req);
+    Ok(JsValue::from(true))
 }
 
 /// `Link_disconnect(name)` — desconecta el link con ese nombre.
-/// Envía un `LinkRequest::DisconnectLink` al bus. Retorna `true` si se encoló.
+/// Retorna `true` cuando el argumento es válido (aunque no haya consumidores
+/// activos del bus en ese momento).
 fn link_disconnect_fn_real(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     if name.is_empty() {
@@ -3010,11 +3252,13 @@ fn link_disconnect_fn_real(_this: &JsValue, args: &[JsValue], ctx: &mut Context)
         return Ok(JsValue::from(false));
     };
     let req = server_core::LinkRequest::DisconnectLink { name };
-    Ok(JsValue::from(app.link_requests.send(req).is_ok()))
+    let _ = app.link_requests.send(req);
+    Ok(JsValue::from(true))
 }
 
 /// `Link_kickHub(name)` — fuerza la desconexión de un hub.
-/// Envía un `LinkRequest::KickHub` al bus. Retorna `true` si se encoló.
+/// Retorna `true` cuando el argumento es válido (aunque no haya consumidores
+/// activos del bus en ese momento).
 fn link_kick_hub_fn_real(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let name = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     if name.is_empty() {
@@ -3024,7 +3268,8 @@ fn link_kick_hub_fn_real(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -
         return Ok(JsValue::from(false));
     };
     let req = server_core::LinkRequest::KickHub { name };
-    Ok(JsValue::from(app.link_requests.send(req).is_ok()))
+    let _ = app.link_requests.send(req);
+    Ok(JsValue::from(true))
 }
 
 /// `Registry_createKey(name)` — virtual HKLM. Crea una "key" en memoria
@@ -4253,8 +4498,7 @@ pub fn eval_script(ctx: &mut Context, source: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Como `eval_script` pero devuelve el valor resultante como string (debug).
-#[cfg(test)]
+/// Como `eval_script` pero devuelve el valor resultante como string.
 pub fn eval_script_value(ctx: &mut Context, source: &str) -> Result<String, String> {
     let v = ctx
         .eval(boa_engine::Source::from_bytes(source.as_bytes()))
@@ -4442,7 +4686,11 @@ mod tests {
             if (lf.externalIp !== "10.1.1.1") throw "leaf ip: " + lf.externalIp;
             if (lf.port !== 5555) throw "leaf port";
             if (lf.hashlink.indexOf("arlnk://") !== 0) throw "leaf hashlink";
+            var seen = 0;
+            Link.leaves(function(x){ if (x && x.name === "OtraSala") seen++; });
+            if (seen !== 1) throw "Link.leaves(fn) bad: " + seen;
             if (Link.leaf("OtraSala") == null) throw "Link.leaf by name";
+            if (Link.leaf("Otra") == null) throw "Link.leaf by prefix";
             if (Link.leaf("NoExiste") !== null) throw "Link.leaf missing";
             if (lf.print("hola sala") !== true) throw "leaf.print";
             if (lf.printAdmins("solo mods") !== true) throw "leaf.printAdmins";
@@ -4579,7 +4827,7 @@ mod tests {
             var chans = Channels.search("");
             if (!Array.isArray(chans)) throw "search not array";
             if (chans.length !== 0) throw "search should be empty";
-            if (Channels.available !== false) throw "available (sin rooms) should be false";
+            if (Channels.available !== true) throw "available should be true when roomsearch enabled";
 
             // XmlAttrs: getValue/setValue/removeValue/length
             var xp = new XmlParser();
@@ -4702,13 +4950,15 @@ mod tests {
             // Room: PROPIEDADES (paridad sb0t JSRoom — sin paréntesis)
             if (typeof Room.name !== "string") throw "Room.name not string";
             if (typeof Room.port !== "number") throw "Room.port not number";
-            if (typeof Room.version !== "string") throw "Room.version not string";
+            if (typeof Room.version !== "number") throw "Room.version not number";
+            if (Room.version !== 5009) throw "Room.version != 5009: " + Room.version;
             if (typeof Room.startTime !== "number") throw "Room.startTime not number";
             if (typeof Room.topic !== "string") throw "Room.topic not string";
             if (typeof Room.customNames !== "boolean") throw "Room.customNames not bool";
             if (typeof Room.hashlink !== "string") throw "Room.hashlink not string";
             if (typeof Room.setUrl !== "function") throw "Room.setUrl not fn";
             if (typeof Room.clearUrl !== "function") throw "Room.clearUrl not fn";
+            if (typeof Script !== "object" || typeof Script.include !== "function") throw "Script.include missing";
 
             // Stats: PROPIEDADES (paridad sb0t JSStats)
             if (Stats.userCount !== 0) throw "Stats.userCount != 0";
@@ -4808,10 +5058,13 @@ mod tests {
             if (Entities.decode("&lt;b&gt;&amp;&quot;&#39;") !== "<b>&\"'")
                 throw "entities.decode: " + Entities.decode("&lt;b&gt;&amp;&quot;&#39;");
 
-            // Spelling.confirm agrega al diccionario runtime
-            if (Spelling.check("zzqqxx") !== false) throw "unknown word should be false";
+            // Spelling.check: sb0t parity — retorna null si OK, o string con errores.
+            // check usa palabras separadas por \b. Una palabra desconocida devuelve texto
+            // con [-palabra-]; confirmada devuelve null.
+            var chk = Spelling.check("zzqqxx");
+            if (chk === null || chk.indexOf("zzqqxx") < 0) throw "unknown word should show error: " + chk;
             Spelling.confirm("zzqqxx");
-            if (Spelling.check("zzqqxx") !== true) throw "confirmed word should be true";
+            if (Spelling.check("zzqqxx") !== null) throw "confirmed word should return null";
 
             // PM (JSPM): helpers + string-compat
             var pm = new PM("hello world");
@@ -4826,6 +5079,9 @@ mod tests {
             // Users colecciones sin datos → arrays vacíos
             if (Users.records().length !== 0) throw "records not empty";
             if (Users.banned().length !== 0) throw "banned not empty";
+            var bseen = 0;
+            Users.banned(function(b){ bseen++; });
+            if (bseen !== 0) throw "banned(fn) bad";
             if (Users.linked().length !== 0) throw "linked not empty";
 
             // Channels: list() extra de Astra; enabled/available PROPIEDADES
@@ -5082,6 +5338,9 @@ mod tests {
             if (recs[0].externalIp !== "10.0.0.2") throw "recs[0] ip: " + recs[0].externalIp;
             if (typeof recs[0].guid !== "string" || recs[0].guid.length !== 32) throw "guid hex";
             if (typeof recs[0].ban !== "function") throw "record.ban missing";
+            var seen = 0;
+            Users.records(function(r){ if (r && r.name) seen++; });
+            if (seen !== 2) throw "records(fn) bad: " + seen;
             // ban por record devuelve true (persiste)
             if (recs[1].ban() !== true) throw "record.ban should return true";
         "#,
@@ -5148,6 +5407,10 @@ mod tests {
             if (names.indexOf("Alice") < 0) throw "names missing Alice";
             var locals = Users.local();
             if (locals.length !== 1 || locals[0].name !== "Alice") throw "local() bad";
+            // Compat de ergonomía: Users.local(fn) itera usuarios locales.
+            var seen = [];
+            Users.local(function(x){ seen.push(x.name); });
+            if (seen.length !== 1 || seen[0] !== "Alice") throw "local(fn) bad";
             // sendText: el usuario "dice" el texto en público (paridad
             // sb0t IUser.SendText — mecanismo de #clone).
             if (u.sendText("hola") !== true) throw "sendText not true";
@@ -5166,6 +5429,7 @@ mod tests {
     fn user_setters_and_new_props() {
         let app = make_app();
         let (alice, _rx) = make_user(1, "Alice", "10.0.0.1");
+        *alice.asn_cache.write() = Some(64512);
         app.user_pool.add(alice.clone());
 
         let mut ctx = make_context(app.clone());
@@ -5183,18 +5447,18 @@ mod tests {
             if (u.customName !== "Alicia") throw "customName setter bad: " + u.customName;
             u.muzzled = true;
             if (u.muzzled !== true) throw "muzzled setter bad";
-            u.level = 50;
-            if (u.level !== 50) throw "level setter bad: " + u.level;
+            u.level = 1;
+            if (u.level !== 1) throw "level setter bad: " + u.level;
             u.vroom = 3;
             if (u.vroom !== 3) throw "vroom setter bad: " + u.vroom;
-            // getASN sigue stub (excepción acordada); setUrl ahora es REAL:
-            // manda el paquete URL a ese usuario y retorna true.
-            if (u.getASN() !== null) throw "getASN bad";
+            // getASN ahora usa cache/lookup real (si no hay base ASN → null).
+            if (u.getASN() !== 64512) throw "getASN bad: " + u.getASN();
             if (u.setUrl("http://x.example", "txt") !== true) throw "setUrl bad";
             // restoreAvatar real: sin avatar original limpia y retorna true.
             if (u.restoreAvatar() !== true) throw "restoreAvatar bad";
-            var ig = u.ignores();
-            if (!Array.isArray(ig)) throw "ignores bad";
+            // sb0t parity: ignores es propiedad (no función), colección con .count.
+            var ig = u.ignores;
+            if (ig.count !== 0) throw "ignores count bad: " + ig.count;
         "#,
         );
         assert!(result.is_ok(), "setters/props: {:?}", result);
@@ -5522,6 +5786,24 @@ mod tests {
     }
 
     #[test]
+    fn room_set_url_matches_sb0t_edge_cases() {
+        let mut ctx = make_context(make_app());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            // set válido
+            if (Room.setUrl("http://x.example", "texto") !== true) throw "set valid";
+            // clear vía SetUrl("", "") (paridad sb0t)
+            if (Room.setUrl("", "") !== true) throw "set clear";
+            // combinaciones inválidas -> no-op/false
+            if (Room.setUrl("http://x.example", "") !== false) throw "set missing text should be false";
+            if (Room.setUrl("", "solo texto") !== false) throw "set missing addr should be false";
+        "#,
+        );
+        assert!(result.is_ok(), "Room.setUrl edge-cases: {:?}", result);
+    }
+
+    #[test]
     fn channels_list_returns_array() {
         let mut ctx = make_context(make_app());
         let result = eval_script(
@@ -5623,17 +5905,16 @@ mod tests {
     }
 
     #[test]
-    fn link_create_link_is_stub() {
+    fn link_create_link_accepts_args_and_queues_request() {
         let mut ctx = make_context(make_app());
-        // Por ahora retorna false y loguea warning. Tests de "no implementado" honesto.
         let result = eval_script(
             &mut ctx,
             r#"
             const ok = Link_createLink("hub.example.com", 5009);
-            if (ok !== false) throw "expected false (not implemented), got " + ok;
+            if (ok !== true) throw "expected true for valid args, got " + ok;
         "#,
         );
-        assert!(result.is_ok(), "Link_createLink stub: {:?}", result);
+        assert!(result.is_ok(), "Link_createLink request: {:?}", result);
     }
 
     #[test]
@@ -5756,6 +6037,65 @@ mod tests {
     }
 
     #[test]
+    fn channels_search_matches_sb0t_semantics() {
+        let app = make_app();
+        let now = server_core::time::unix_time() as i64;
+
+        // 11 salas válidas (<200 users) + 1 inválida (>=200) para validar
+        // filtro, orden descendente y límite 10.
+        for i in 0..11u16 {
+            let users = 10 + i;
+            let name = format!("SalaMatch{}", i);
+            let topic = format!("Topic {}", i);
+            app.db
+                .upsert_room(
+                    "10.0.0.1",
+                    6000 + i,
+                    &name,
+                    &topic,
+                    "Ares 3.0",
+                    users,
+                    1,
+                    now,
+                )
+                .expect("upsert_room should succeed");
+        }
+        app.db
+            .upsert_room(
+                "10.0.0.2",
+                7000,
+                "SalaMatchFiltered",
+                "No debe aparecer",
+                "Ares 3.0",
+                250,
+                1,
+                now,
+            )
+            .expect("upsert_room filtered should succeed");
+
+        let mut ctx = make_context(app.clone());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            var chans = Channels.search("SalaMatch");
+            if (!Array.isArray(chans)) throw "search not array";
+            if (chans.length !== 10) throw "expected top 10, got " + chans.length;
+
+            for (var i = 0; i < chans.length; i++) {
+              if (chans[i].userCount >= 200) throw "must filter users>=200";
+              if (typeof chans[i].hashlink !== "string" || chans[i].hashlink.indexOf("arlnk://") !== 0) {
+                throw "hashlink prefix bad: " + chans[i].hashlink;
+              }
+              if (i > 0 && chans[i - 1].userCount < chans[i].userCount) {
+                throw "must be sorted desc by userCount";
+              }
+            }
+        "#,
+        );
+        assert!(result.is_ok(), "Channels.search sb0t semantics: {:?}", result);
+    }
+
+    #[test]
     fn channels_broadcast_only_to_vroom() {
         // Crear 2 users en vroom 0 y 1 user en vroom 1
         let app = make_app();
@@ -5862,29 +6202,80 @@ mod tests {
     }
 
     #[test]
-    fn link_create_link_returns_false_stub() {
+    fn users_linked_and_leaf_users_use_remote_snapshot() {
+        let app = make_app();
+        {
+            let mut lu = app.link_users.write();
+            lu.push(("LeafOne".to_string(), "RemA".to_string()));
+            lu.push(("LeafTwo".to_string(), "RemB".to_string()));
+        }
+
+        let mut ctx = make_context(app.clone());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            var all = Users.linked();
+            if (!Array.isArray(all) || all.length !== 2) throw "Users.linked length: " + all.length;
+            var got = [];
+            Users.linked(function(u){ got.push(u.name + "@" + u.leaf + ":" + u.linked); });
+            got.sort();
+            if (got[0] !== "RemA@LeafOne:true") throw "linked[0] bad: " + got[0];
+            if (got[1] !== "RemB@LeafTwo:true") throw "linked[1] bad: " + got[1];
+
+            var lf = new Leaf();
+            lf.name = "LeafOne";
+            var us = lf.users();
+            if (us.length !== 1) throw "Leaf.users length: " + us.length;
+            if (us[0].name !== "RemA") throw "Leaf.users[0].name: " + us[0].name;
+            if (us[0].leaf !== "LeafOne") throw "Leaf.users[0].leaf: " + us[0].leaf;
+            if (us[0].linked !== true) throw "Leaf.users[0].linked";
+            if (lf.user("Rem") == null) throw "Leaf.user by prefix";
+
+            var seen = 0;
+            lf.users(function(u){ if (u.name === "RemA") seen++; });
+            if (seen !== 1) throw "Leaf.users(fn) bad: " + seen;
+        "#,
+        );
+        assert!(result.is_ok(), "Users.linked/Leaf.users remote snapshot: {:?}", result);
+    }
+
+    #[test]
+    fn link_connect_accepts_single_string_like_sb0t() {
+        let mut ctx = make_context(make_app());
+        let result = eval_script(
+            &mut ctx,
+            r#"
+            const ok = Link.connect("hub.example.com:5009");
+            if (ok !== true) throw "Link.connect(one-arg) should be true, got " + ok;
+        "#,
+        );
+        assert!(result.is_ok(), "Link.connect one-arg: {:?}", result);
+    }
+
+    #[test]
+    fn link_create_link_accepts_sb0t_two_args() {
         let mut ctx = make_context(make_app());
         let result = eval_script(
             &mut ctx,
             r#"
             const ok = Link_createLink("hub.example.com", 5009);
-            if (ok !== false) throw "Link_createLink should be stub returning false, got " + ok;
+            if (ok !== true) throw "Link_createLink should accept (server,port), got " + ok;
         "#,
         );
-        assert!(result.is_ok(), "Link_createLink stub: {:?}", result);
+        assert!(result.is_ok(), "Link_createLink two-args: {:?}", result);
     }
 
     #[test]
-    fn link_disconnect_returns_false_stub() {
+    fn link_disconnect_returns_true_when_arg_valid() {
         let mut ctx = make_context(make_app());
         let result = eval_script(
             &mut ctx,
             r#"
             const ok = Link_disconnect("hub.example.com");
-            if (ok !== false) throw "Link_disconnect should be stub returning false";
+            if (ok !== true) throw "Link_disconnect should return true for valid arg";
         "#,
         );
-        assert!(result.is_ok(), "Link_disconnect stub: {:?}", result);
+        assert!(result.is_ok(), "Link_disconnect valid arg: {:?}", result);
     }
 
     // ========== Tests Fase 18: Avatar_new + Avatar_getSize ==========

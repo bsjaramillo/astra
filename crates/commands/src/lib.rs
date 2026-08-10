@@ -413,6 +413,7 @@ fn resolve_target_arg<'a>(ctx: &AppContext, args: &'a str) -> (Option<Arc<AresUs
 ///   (ej: `AdminLevelChanged` cuando /ban tiene éxito).
 pub fn dispatch_builtin(
     ctx: &AppContext,
+    scripting: &astra_scripting::ScriptHandle,
     user: &Arc<AresUser>,
     command: &str,
     args: &str,
@@ -468,6 +469,15 @@ pub fn dispatch_builtin(
             (true, vec![astra_scripting::ScriptEvent::Help { from }])
         }
         "nick" => {
+            // sb0t parity: gate onNick — si algún script retorna false, bloquear.
+            let new_name = args.trim();
+            let old_name = user.name.read().clone();
+            if !new_name.is_empty() && !new_name.eq_ignore_ascii_case(&old_name) {
+                if !scripting.check_nick(&old_name, new_name) {
+                    send_system_line(ctx, user, "Nickname change blocked.");
+                    return (true, vec![]);
+                }
+            }
             let events = handle_nick(ctx, user, args);
             (true, events)
         }
@@ -619,6 +629,12 @@ pub fn dispatch_builtin(
             (true, vec![])
         }
         "register" => {
+            // sb0t parity: gate onRegistering — si algún script retorna false, bloquear.
+            let name = user.name.read().clone();
+            if !scripting.check_registering(&name, &user.external_ip.to_string()) {
+                send_system_line(ctx, user, "Registration blocked.");
+                return (true, vec![]);
+            }
             let events = handle_register(ctx, user, args);
             (true, events)
         }
@@ -1240,8 +1256,8 @@ fn handle_nick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Vec<astra_
 
     send_system_line(ctx, user, "Nickname updated.");
     vec![astra_scripting::ScriptEvent::Nick {
-        old: old_name,
-        new: new_name.to_string(),
+        name: old_name,
+        new_name: new_name.to_string(),
     }]
 }
 
@@ -5293,6 +5309,10 @@ mod tests {
     use proto_ares::{PacketReader, TcpMsg};
     use server_core::db::Database;
 
+    fn dummy_scripting() -> astra_scripting::ScriptHandle {
+        astra_scripting::ScriptHandle::dummy()
+    }
+
     #[test]
     fn extract_script_folder_extracts_all_and_flattens_github_root() {
         // Arma un zip estilo zipball de GitHub: TODO bajo una carpeta raíz
@@ -5438,13 +5458,13 @@ mod tests {
         alice.needs_captcha.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Comando cualquiera: se ignora en silencio (handled, sin eventos).
-        let (handled, events) = dispatch_builtin(&ctx, &alice, "whois", "Bob");
+        let (handled, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "whois", "Bob");
         assert!(handled);
         assert!(events.is_empty());
         assert!(rx.try_recv().is_err(), "no debe responder nada");
 
         // /help sí responde, incluso con captcha pendiente (Events.cs:471).
-        let (handled, events) = dispatch_builtin(&ctx, &alice, "help", "");
+        let (handled, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "help", "");
         assert!(handled);
         assert!(matches!(
             events.as_slice(),
@@ -5467,7 +5487,7 @@ mod tests {
         let ctx = make_test_ctx();
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "help", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "help", "");
         assert!(handled);
         let mut lines = Vec::new();
         while let Ok(pkt) = alice_rx.try_recv() {
@@ -5480,7 +5500,7 @@ mod tests {
 
         let (owner, mut owner_rx) = make_test_user(2, "Owner");
         *owner.level.write() = ILevel::Owner;
-        let (handled, _) = dispatch_builtin(&ctx, &owner, "help", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "help", "");
         assert!(handled);
         for expected in DEFAULT_HELP_LINES {
             let pkt = owner_rx.try_recv().expect("expected help line for owner");
@@ -5498,7 +5518,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob);
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "users", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "users", "");
         assert!(handled);
 
         let line1 = alice_rx.try_recv().expect("users line 1");
@@ -5514,7 +5534,7 @@ mod tests {
     fn builtin_unknown_is_not_handled() {
         let ctx = make_test_ctx();
         let (user, _rx) = make_test_user(1, "Alice");
-        let (handled, _) = dispatch_builtin(&ctx, &user, "notreal", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &user, "notreal", "");
         assert!(!handled);
     }
 
@@ -5524,7 +5544,7 @@ mod tests {
         let (user, mut rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(user.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &user, "topic", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &user, "topic", "");
         assert!(handled);
 
         let msg = rx.try_recv().expect("topic response");
@@ -5538,7 +5558,7 @@ mod tests {
         let (user, mut rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(user.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &user, "topic", "nuevo topic");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &user, "topic", "nuevo topic");
         assert!(handled);
 
         let msg = rx.try_recv().expect("deny response");
@@ -5556,7 +5576,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "topic", "nuevo topic");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "topic", "nuevo topic");
         assert!(handled);
         assert_eq!(ctx.current_room_topic(), "nuevo topic");
 
@@ -5580,18 +5600,18 @@ mod tests {
         ctx.user_pool.add(user.clone());
 
         // Sin MOTD configurado.
-        let (handled, _) = dispatch_builtin(&ctx, &user, "motd", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &user, "motd", "");
         assert!(handled);
         let (_from, text) = decode_pvt(rx.try_recv().expect("no-motd response"));
         assert_eq!(text, "No MOTD is set.");
 
         // Setear un MOTD con placeholder y volver a verlo (sustituido para Alice).
-        let (handled, _) = dispatch_builtin(&ctx, &user, "motd", "Hola +n");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &user, "motd", "Hola +n");
         assert!(handled);
         let (_from, confirm) = decode_pvt(rx.try_recv().expect("set confirm"));
         assert_eq!(confirm, "MOTD updated.");
 
-        let (handled, _) = dispatch_builtin(&ctx, &user, "motd", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &user, "motd", "");
         assert!(handled);
         let (_from, view) = decode_pvt(rx.try_recv().expect("motd view"));
         assert_eq!(view, "Hola Alice");
@@ -5605,7 +5625,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "ban", "Bob");
         assert!(handled);
 
         let msg = alice_rx.try_recv().expect("deny");
@@ -5623,7 +5643,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let (ban_handled, _) = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let (ban_handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "ban", "Bob");
         assert!(ban_handled);
         assert!(ctx.bans.is_banned(&bob.guid, bob.external_ip));
         assert!(ctx.user_pool.get_by_name("Bob").is_none());
@@ -5636,7 +5656,7 @@ mod tests {
         let notice = next_pvt_text(&mut bob_rx);
         assert_eq!(notice, "You have been banned from this room.");
 
-        let (unban_handled, _) = dispatch_builtin(&ctx, &alice, "unban", "Bob");
+        let (unban_handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "unban", "Bob");
         assert!(unban_handled);
         assert!(!ctx.bans.is_banned(&bob.guid, bob.external_ip));
 
@@ -5652,7 +5672,7 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "unban", "ghost");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "unban", "ghost");
         assert!(handled);
 
         let msg = alice_rx.try_recv().expect("unban not found");
@@ -5669,11 +5689,11 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "ban", "Bob");
         let _ = next_pvt_text(&mut alice_rx); // ban ack
         let _ = next_pvt_text(&mut alice_rx); // anuncio "Bob was banned by Alice"
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "banlist", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "banlist", "");
         assert!(handled);
 
         let t1 = next_pvt_text(&mut alice_rx);
@@ -5697,7 +5717,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob);
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "kick", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "kick", "Bob");
         assert!(handled);
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Moderator+ required.");
         assert!(ctx.user_pool.get_by_name("Bob").is_some());
@@ -5712,7 +5732,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "kick", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "kick", "Bob");
         assert!(handled);
         assert!(ctx.user_pool.get_by_name("Bob").is_none());
         assert!(!ctx.bans.is_banned(&bob.guid, bob.external_ip), "kick must not ban");
@@ -5733,7 +5753,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob);
 
-        let _ = dispatch_builtin(&ctx, &alice, "kick", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "kick", "Bob");
         assert_eq!(
             next_pvt_text(&mut alice_rx),
             "your admin level is too low to use this command on Bob"
@@ -5750,7 +5770,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "muzzle", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "muzzle", "Bob");
         assert!(bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut bob_rx), "You have been muzzled.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Muzzled 'Bob'.");
@@ -5759,10 +5779,10 @@ mod tests {
         assert_eq!(next_pvt_text(&mut bob_rx), "Bob was muzzled by Alice");
 
         // Muzzle repetido no cambia nada
-        let _ = dispatch_builtin(&ctx, &alice, "muzzle", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "muzzle", "Bob");
         assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' is already muzzled.");
 
-        let _ = dispatch_builtin(&ctx, &alice, "unmuzzle", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "unmuzzle", "Bob");
         assert!(!bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut bob_rx), "You have been unmuzzled.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Unmuzzled 'Bob'.");
@@ -5779,7 +5799,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "muzzle", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "muzzle", "Bob");
         assert_eq!(
             next_pvt_text(&mut alice_rx),
             "your admin level is too low to use this command on Bob"
@@ -5794,7 +5814,7 @@ mod tests {
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "pmall", "hola");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "pmall", "hola");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
     }
 
@@ -5809,7 +5829,7 @@ mod tests {
         ctx.user_pool.add(bob);
         ctx.user_pool.add(carol);
 
-        let _ = dispatch_builtin(&ctx, &alice, "pmall", "hola a todos");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "pmall", "hola a todos");
 
         let (from_bob, text_bob) = decode_pvt(bob_rx.try_recv().expect("bob pm"));
         assert_eq!(from_bob, "Alice");
@@ -5831,7 +5851,7 @@ mod tests {
         ctx.user_pool.add(bob);
         ctx.user_pool.add(carol);
 
-        let _ = dispatch_builtin(&ctx, &alice, "opmsg", "reunión ya");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "opmsg", "reunión ya");
 
         assert_eq!(next_pvt_text(&mut alice_rx), "[ops] Alice: reunión ya");
         assert_eq!(next_pvt_text(&mut carol_rx), "[ops] Alice: reunión ya");
@@ -5844,11 +5864,11 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "uptime", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "uptime", "");
         assert!(next_pvt_text(&mut alice_rx).starts_with("Uptime: 0d 0h 0m"));
         assert!(next_pvt_text(&mut alice_rx).starts_with("Users: 1 online"));
 
-        let _ = dispatch_builtin(&ctx, &alice, "version", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "version", "");
         let v = next_pvt_text(&mut alice_rx);
         assert!(v.starts_with("Astra v"), "got: {}", v);
     }
@@ -5860,7 +5880,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
 
         // Sin update pendiente: versión + "estás en la última".
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "serverversion", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "serverversion", "");
         assert!(handled, "el comando debe estar registrado");
         let v = next_pvt_text(&mut alice_rx);
         assert!(v.starts_with("Astra v"), "got: {}", v);
@@ -5871,7 +5891,7 @@ mod tests {
 
         // Con una versión nueva descubierta por el chequeo periódico.
         *ctx.available_update.write() = Some("9.9.9".to_string());
-        let _ = dispatch_builtin(&ctx, &alice, "serverversion", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "serverversion", "");
         let _ = next_pvt_text(&mut alice_rx); // línea de versión
         let notice = next_pvt_text(&mut alice_rx);
         assert!(notice.contains("9.9.9"), "debe nombrar la versión nueva: {}", notice);
@@ -5884,35 +5904,35 @@ mod tests {
         ctx.user_pool.add(alice.clone());
 
         // Password muy corto
-        let _ = dispatch_builtin(&ctx, &alice, "register", "abc");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "register", "abc");
         assert_eq!(next_pvt_text(&mut alice_rx), "Usage: /register <password> (4+ chars)");
 
         // Registro OK
-        let _ = dispatch_builtin(&ctx, &alice, "register", "secret1");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "register", "secret1");
         assert_eq!(next_pvt_text(&mut alice_rx), "Account registered. Use /login <password>.");
         assert!(ctx.accounts.find_by_guid(&alice.guid).unwrap().is_some());
 
         // Doble registro rechazado
-        let _ = dispatch_builtin(&ctx, &alice, "register", "secret1");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "register", "secret1");
         assert_eq!(next_pvt_text(&mut alice_rx), "Already registered. Use /unregister first.");
 
         // Login con password incorrecto
-        let _ = dispatch_builtin(&ctx, &alice, "login", "wrong");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "login", "wrong");
         assert_eq!(next_pvt_text(&mut alice_rx), "Invalid password.");
 
         // Login correcto: sube de Anonymous a Regular (nivel de la cuenta)
-        let (_, events) = dispatch_builtin(&ctx, &alice, "login", "secret1");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "login", "secret1");
         assert_eq!(events.len(), 1);
         assert_eq!(*alice.level.read() as u8, ILevel::Regular as u8);
         assert_eq!(next_pvt_text(&mut alice_rx), "Logged in (level 1).");
 
         // Segundo login: mismo nivel → sin cambio, pero con feedback
-        let (_, events) = dispatch_builtin(&ctx, &alice, "login", "secret1");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "login", "secret1");
         assert!(events.is_empty());
         assert_eq!(next_pvt_text(&mut alice_rx), "Logged in (level unchanged).");
 
         // Unregister
-        let _ = dispatch_builtin(&ctx, &alice, "unregister", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "unregister", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Account deleted.");
         assert!(ctx.accounts.find_by_guid(&alice.guid).unwrap().is_none());
     }
@@ -5927,7 +5947,7 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "register", "secret1");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "register", "secret1");
         assert_eq!(next_pvt_text(&mut alice_rx), "Registration is disabled in this room.");
     }
 
@@ -5941,7 +5961,7 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(alice.clone());
 
-        let (_, events) = dispatch_builtin(&ctx, &alice, "login", "ownerpw");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "login", "ownerpw");
         assert_eq!(*alice.level.read() as u8, ILevel::Owner as u8);
         assert_eq!(events.len(), 1);
         assert_eq!(next_pvt_text(&mut alice_rx), "Logged in as Owner.");
@@ -5956,7 +5976,7 @@ mod tests {
             .register("Alice", &alice.guid, "secret1", ILevel::Moderator as u8)
             .unwrap();
 
-        let (_, events) = dispatch_builtin(&ctx, &alice, "login", "secret1");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "login", "secret1");
         assert_eq!(*alice.level.read() as u8, ILevel::Moderator as u8);
         assert_eq!(events.len(), 1);
         assert_eq!(next_pvt_text(&mut alice_rx), "Logged in (level 50).");
@@ -5974,7 +5994,7 @@ mod tests {
             .register("Bob", &bob.guid, "bobpw", ILevel::Regular as u8)
             .unwrap();
 
-        let (_, events) = dispatch_builtin(&ctx, &alice, "grant", "Bob moderator");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "grant", "Bob moderator");
         assert_eq!(*bob.level.read() as u8, ILevel::Moderator as u8);
         assert_eq!(events.len(), 1, "AdminLevelChanged expected");
 
@@ -5995,7 +6015,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let (_, events) = dispatch_builtin(&ctx, &alice, "grant", "Bob admin");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "grant", "Bob admin");
         assert!(events.is_empty());
         assert_eq!(
             next_pvt_text(&mut alice_rx),
@@ -6013,7 +6033,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob);
 
-        let (_, events) = dispatch_builtin(&ctx, &alice, "grant", "Bob voice");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "grant", "Bob voice");
         assert!(events.is_empty());
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
     }
@@ -6028,7 +6048,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let (_, events) = dispatch_builtin(&ctx, &alice, "revoke", "Bob");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "revoke", "Bob");
         assert_eq!(*bob.level.read() as u8, ILevel::Regular as u8);
         assert_eq!(events.len(), 1);
         assert_eq!(next_pvt_text(&mut bob_rx), "Your level has been reset to regular.");
@@ -6046,7 +6066,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "whois", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "whois", "Bob");
         assert!(handled);
 
         // Formato multilínea de sb0t (Category.Whois).
@@ -6071,7 +6091,7 @@ mod tests {
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "addgreet", "hola +n");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "addgreet", "hola +n");
         assert!(handled);
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
         assert!(ctx.greets.is_empty());
@@ -6084,19 +6104,19 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "addgreet", "welcome +n to +rn");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "addgreet", "welcome +n to +rn");
         assert_eq!(next_pvt_text(&mut alice_rx), "Greet #0 added.");
         assert_eq!(ctx.greets.list(), vec!["welcome +n to +rn"]);
 
-        let _ = dispatch_builtin(&ctx, &alice, "listgreets", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "listgreets", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Greets (1):");
         assert_eq!(next_pvt_text(&mut alice_rx), "0 - welcome +n to +rn");
 
-        let _ = dispatch_builtin(&ctx, &alice, "remgreet", "0");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "remgreet", "0");
         assert_eq!(next_pvt_text(&mut alice_rx), "Removed greet: welcome +n to +rn");
         assert!(ctx.greets.is_empty());
 
-        let _ = dispatch_builtin(&ctx, &alice, "remgreet", "5");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "remgreet", "5");
         assert_eq!(next_pvt_text(&mut alice_rx), "No greet at that index.");
     }
 
@@ -6107,11 +6127,11 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "greets", "off");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "greets", "off");
         assert_eq!(next_pvt_text(&mut alice_rx), "Greets disabled.");
         assert!(!ctx.greets.is_enabled());
 
-        let _ = dispatch_builtin(&ctx, &alice, "greets", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "greets", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Greets are off (0 configured).");
     }
 
@@ -6122,7 +6142,7 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "addfilter", "badword ban");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "addfilter", "badword ban");
         assert_eq!(next_pvt_text(&mut alice_rx), "Filter 'badword' → ban added.");
         assert_eq!(
             ctx.word_filter.check("this is a badword").unwrap(),
@@ -6130,20 +6150,20 @@ mod tests {
         );
 
         // Sin acción explícita → block
-        let _ = dispatch_builtin(&ctx, &alice, "addfilter", "spammy");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "addfilter", "spammy");
         assert_eq!(next_pvt_text(&mut alice_rx), "Filter 'spammy' → block added.");
 
-        let _ = dispatch_builtin(&ctx, &alice, "listfilters", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "listfilters", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Word filters (2):");
         // Dos líneas de detalle (ordenadas por patrón): badword, spammy
         assert_eq!(next_pvt_text(&mut alice_rx), "0 - badword → ban");
         assert_eq!(next_pvt_text(&mut alice_rx), "1 - spammy → block");
 
-        let _ = dispatch_builtin(&ctx, &alice, "remfilter", "badword");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "remfilter", "badword");
         assert_eq!(next_pvt_text(&mut alice_rx), "Filter 'badword' removed.");
         assert!(ctx.word_filter.check("badword").is_none());
 
-        let _ = dispatch_builtin(&ctx, &alice, "remfilter", "nope");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "remfilter", "nope");
         assert_eq!(next_pvt_text(&mut alice_rx), "No matching filter.");
     }
 
@@ -6154,7 +6174,7 @@ mod tests {
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "addfilter", "x ban");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "addfilter", "x ban");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
         assert!(ctx.word_filter.is_empty());
     }
@@ -6166,17 +6186,17 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "addurl", "https://astra.dev Astra site");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "addurl", "https://astra.dev Astra site");
         assert_eq!(next_pvt_text(&mut alice_rx), "URL #0 added.");
         let list = ctx.urls.list();
         assert_eq!(list[0].address, "https://astra.dev");
         assert_eq!(list[0].text, "Astra site");
 
-        let _ = dispatch_builtin(&ctx, &alice, "listurl", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "listurl", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room URLs (1):");
         assert_eq!(next_pvt_text(&mut alice_rx), "0 - Astra site [https://astra.dev]");
 
-        let _ = dispatch_builtin(&ctx, &alice, "remurl", "0");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "remurl", "0");
         assert_eq!(next_pvt_text(&mut alice_rx), "Removed URL: Astra site");
         assert!(ctx.urls.is_empty());
     }
@@ -6191,12 +6211,12 @@ mod tests {
         ctx.user_pool.add(alice.clone());
 
         assert!(!ctx.room_flags.get("history"));
-        let _ = dispatch_builtin(&ctx, &alice, "history", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "history", "on");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'history' enabled.");
         // + anuncio a la sala (Category.EnableDisable#24/#25).
         assert_eq!(next_pvt_text(&mut alice_rx), "Alice has enabled chat history feature");
         assert!(ctx.room_flags.get("history"));
-        let _ = dispatch_builtin(&ctx, &alice, "history", "off");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "history", "off");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'history' disabled.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Alice has disabled chat history feature");
         assert!(!ctx.room_flags.get("history"));
@@ -6208,7 +6228,7 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
-        let _ = dispatch_builtin(&ctx, &alice, "history", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "history", "on");
         let reply = next_pvt_text(&mut alice_rx);
         assert!(reply.contains("denied") || reply.contains("required"), "reply: {reply}");
         assert!(!ctx.room_flags.get("history"));
@@ -6228,7 +6248,7 @@ mod tests {
             port: 2500,
             name: "Otra Sala".to_string(),
         });
-        let _ = dispatch_builtin(&ctx, &alice, "redirect", &format!("Bob arlnk://{}", link));
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "redirect", &format!("Bob arlnk://{}", link));
 
         // Bob recibe el paquete de redirect al ip:port decodificado.
         let pkt = bob_rx.try_recv().expect("redirect pkt");
@@ -6250,13 +6270,13 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "shout", "hola sala");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "shout", "hola sala");
         assert_eq!(next_pvt_text(&mut bob_rx), "Alice> [SHOUT] hola sala");
         assert_eq!(next_pvt_text(&mut a_rx), "Alice> [SHOUT] hola sala");
 
         // Regular sin flag general: silencio.
         ctx.room_flags.set("general", false);
-        let _ = dispatch_builtin(&ctx, &bob, "shout", "yo tambien");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &bob, "shout", "yo tambien");
         assert!(a_rx.try_recv().is_err());
     }
 
@@ -6267,7 +6287,7 @@ mod tests {
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "stats", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "stats", "");
         let header = next_pvt_text(&mut a_rx);
         assert!(header.starts_with("Stats for "), "header: {header}");
         let _blank = next_pvt_text(&mut a_rx);
@@ -6287,7 +6307,7 @@ mod tests {
         ctx.user_pool.add(carol.clone());
 
         // Mod fija el custom name de otro usuario + anuncio público.
-        let _ = dispatch_builtin(&ctx, &alice, "customname", "Bob Bobby");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "customname", "Bob Bobby");
         assert_eq!(bob.custom_name.read().clone(), Some("Bobby".to_string()));
         assert_eq!(
             next_pvt_text(&mut a_rx),
@@ -6296,23 +6316,23 @@ mod tests {
 
         // El espacio final del argumento es parte del custom name (se
         // concatena en crudo delante del mensaje), así que NO se recorta.
-        let _ = dispatch_builtin(&ctx, &alice, "customname", "Bob (T) ");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "customname", "Bob (T) ");
         assert_eq!(bob.custom_name.read().clone(), Some("(T) ".to_string()));
         let _ = next_pvt_text(&mut a_rx);
 
         // Y lo limpia con uncustomname <nick>.
-        let _ = dispatch_builtin(&ctx, &alice, "uncustomname", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "uncustomname", "Bob");
         assert_eq!(bob.custom_name.read().clone(), None);
 
         // Regular sin flag `general`: self-service denegado en silencio.
         ctx.room_flags.set("general", false);
-        let _ = dispatch_builtin(&ctx, &carol, "customname", "Cazadora");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &carol, "customname", "Cazadora");
         assert_eq!(carol.custom_name.read().clone(), None);
 
         // Con `general` on pero custom names deshabilitados en la sala
         // (default sb0t `customnames`=false): self-service sigue bloqueado.
         ctx.room_flags.set("general", true);
-        let _ = dispatch_builtin(&ctx, &carol, "customname", "Cazadora");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &carol, "customname", "Cazadora");
         assert_eq!(carol.custom_name.read().clone(), None);
 
         // `#customnames on` (Host, paridad Eval.cs:919) habilita y el regular
@@ -6320,13 +6340,13 @@ mod tests {
         let (host, _h_rx) = make_test_user(4, "Hosty");
         *host.level.write() = ILevel::Owner;
         ctx.user_pool.add(host.clone());
-        let _ = dispatch_builtin(&ctx, &host, "customnames", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &host, "customnames", "on");
         assert!(ctx.room_flags.get("customnames"));
-        let _ = dispatch_builtin(&ctx, &carol, "customname", "Cazadora");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &carol, "customname", "Cazadora");
         assert_eq!(carol.custom_name.read().clone(), Some("Cazadora".to_string()));
 
         // Substrings vetados (paridad sb0t): no se aplican.
-        let _ = dispatch_builtin(&ctx, &carol, "customname", "visit www.spam.com");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &carol, "customname", "visit www.spam.com");
         assert_eq!(carol.custom_name.read().clone(), Some("Cazadora".to_string()));
     }
 
@@ -6344,25 +6364,25 @@ mod tests {
         ctx.user_pool.add(bob.clone());
 
         // Sobre uno mismo por id: self-service, el nombre es lo que sigue al id.
-        let _ = dispatch_builtin(&ctx, &alice, "customname", "52 (T) ");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "customname", "52 (T) ");
         assert_eq!(alice.custom_name.read().clone(), Some("(T) ".to_string()));
 
         // Sobre otro usuario por id.
-        let _ = dispatch_builtin(&ctx, &alice, "customname", "7 [VIP] ");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "customname", "7 [VIP] ");
         assert_eq!(bob.custom_name.read().clone(), Some("[VIP] ".to_string()));
 
         // Y se limpia por id.
-        let _ = dispatch_builtin(&ctx, &alice, "uncustomname", "7");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "uncustomname", "7");
         assert_eq!(bob.custom_name.read().clone(), None);
 
         // Nick entre comillas (forma con args de sb0t) y nick con prefijo.
-        let _ = dispatch_builtin(&ctx, &alice, "customname", "\"Bob\" (M) ");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "customname", "\"Bob\" (M) ");
         assert_eq!(bob.custom_name.read().clone(), Some("(M) ".to_string()));
 
         // Id inexistente: avisa en vez de tragárselo como custom name.
         let (_h, mut a_rx) = (0, _a_rx);
         while a_rx.try_recv().is_ok() {}
-        let _ = dispatch_builtin(&ctx, &alice, "customname", "999 (T) ");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "customname", "999 (T) ");
         assert_eq!(next_pvt_text(&mut a_rx), ctx.templates.get("error.user_not_found"));
         assert_eq!(alice.custom_name.read().clone(), Some("(T) ".to_string()));
     }
@@ -6379,7 +6399,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "customname", "Bob (VIP) ");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "customname", "Bob (VIP) ");
         assert_eq!(bob.custom_name.read().clone(), Some("(VIP) ".to_string()));
 
         // Reconexión: mismo guid + mismo nick, sesión nueva y limpia.
@@ -6389,7 +6409,7 @@ mod tests {
         assert_eq!(bob2.custom_name.read().clone(), Some("(VIP) ".to_string()));
 
         // Al limpiarlo, deja de reaplicarse.
-        let _ = dispatch_builtin(&ctx, &alice, "uncustomname", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "uncustomname", "Bob");
         let (bob3, _rx) = make_test_user(2, "Bob");
         ctx.load_custom_name(&bob3);
         assert!(bob3.custom_name.read().is_none());
@@ -6406,7 +6426,7 @@ mod tests {
         ctx.user_pool.add(admin.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &admin, "mtimeout", "5");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "mtimeout", "5");
         assert_eq!(ctx.muzzle_timeout.load(std::sync::atomic::Ordering::Relaxed), 5);
         assert_eq!(
             next_pvt_text(&mut a_rx),
@@ -6414,15 +6434,15 @@ mod tests {
         );
 
         // El muzzle nace con caducidad = ahora + 5 min.
-        let _ = dispatch_builtin(&ctx, &admin, "muzzle", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "muzzle", "Bob");
         let until = bob.muzzle_until.load(std::sync::atomic::Ordering::Relaxed);
         let now = server_core::time::unix_time();
         assert!(until > now && until <= now + 5 * 60 * 1000, "until={until} now={now}");
 
         // 0 = ilimitado: sin caducidad.
-        let _ = dispatch_builtin(&ctx, &admin, "mtimeout", "0");
-        let _ = dispatch_builtin(&ctx, &admin, "unmuzzle", "Bob");
-        let _ = dispatch_builtin(&ctx, &admin, "muzzle", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "mtimeout", "0");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "unmuzzle", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "muzzle", "Bob");
         assert_eq!(bob.muzzle_until.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
@@ -6438,24 +6458,24 @@ mod tests {
         ctx.user_pool.add(bob.clone());
 
         // Target-only por id.
-        let _ = dispatch_builtin(&ctx, &admin, "muzzle", "42");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "muzzle", "42");
         assert!(bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
 
         // Target-only con nick con espacios (sin comillas: argumento entero).
-        let _ = dispatch_builtin(&ctx, &admin, "unmuzzle", "Bob Smith");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "unmuzzle", "Bob Smith");
         assert!(!bob.muzzled.load(std::sync::atomic::Ordering::Relaxed));
 
         // `<target> <args>` por id.
-        let _ = dispatch_builtin(&ctx, &admin, "changemessage", "42 hola mundo");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "changemessage", "42 hola mundo");
         assert_eq!(bob.personal_message.lock().clone(), "hola mundo");
 
         // `<target> <args>` con nick entre comillas.
-        let _ = dispatch_builtin(&ctx, &admin, "changemessage", "\"Bob Smith\" otro");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "changemessage", "\"Bob Smith\" otro");
         assert_eq!(bob.personal_message.lock().clone(), "otro");
 
         // Whisper por id.
         while b_rx.try_recv().is_ok() {}
-        let _ = dispatch_builtin(&ctx, &admin, "whisper", "42 psst");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "whisper", "42 psst");
         assert_eq!(decode_pvt(b_rx.try_recv().expect("pm")), ("Admin".into(), "psst".into()));
     }
 
@@ -6470,19 +6490,19 @@ mod tests {
         ctx.user_pool.add(owner.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &owner, "colors", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "colors", "on");
         let _ = next_pvt_text(&mut rx); // ack privado
         assert_eq!(next_pvt_text(&mut rx), "Owner has enabled colors");
         // Y lo ve toda la sala, no solo quien lo ejecutó.
         assert_eq!(next_pvt_text(&mut bob_rx), "Owner has enabled colors");
 
-        let _ = dispatch_builtin(&ctx, &owner, "customnames", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "customnames", "on");
         let _ = next_pvt_text(&mut rx);
         assert_eq!(next_pvt_text(&mut rx), "Owner has enabled custom names");
 
         // Con stealth, la sala firma el anuncio.
         ctx.room_flags.set("stealth", true);
-        let _ = dispatch_builtin(&ctx, &owner, "sharefiles", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "sharefiles", "on");
         let _ = next_pvt_text(&mut rx);
         assert_eq!(
             next_pvt_text(&mut rx),
@@ -6491,7 +6511,7 @@ mod tests {
 
         // Un flag que solo existe en Astra no inventa anuncio.
         while rx.try_recv().is_ok() {}
-        let _ = dispatch_builtin(&ctx, &owner, "avatars", "off");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "avatars", "off");
         assert_eq!(next_pvt_text(&mut rx), "Room flag 'avatars' disabled.");
         assert!(rx.try_recv().is_err());
     }
@@ -6551,14 +6571,14 @@ mod tests {
         ctx.user_pool.add(admin.clone());
 
         // DB vacía → "Channel database is empty".
-        let _ = dispatch_builtin(&ctx, &admin, "roomsearch", "chat");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "roomsearch", "chat");
         assert_eq!(next_pvt_text(&mut a_rx), "Channel database is empty, try again later");
 
         // Con rooms: matchea por substring case-insensitive, ordena por users.
         ctx.db.upsert_room("1.2.3.4", 5100, "Mega Chat", "topic A", "Ares 2.1", 50, 23, 0).unwrap();
         ctx.db.upsert_room("5.6.7.8", 5200, "chatty room", "topic B", "Ares 2.2", 90, 10, 0).unwrap();
         ctx.db.upsert_room("9.9.9.9", 5300, "Other", "topic C", "Ares 2.3", 10, 10, 0).unwrap();
-        let _ = dispatch_builtin(&ctx, &admin, "roomsearch", "chat");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "roomsearch", "chat");
         assert_eq!(next_pvt_text(&mut a_rx), "Results for chat as follows:");
         let _blank = next_pvt_text(&mut a_rx);
         // Primero el de MÁS usuarios (90): "chatty room".
@@ -6576,12 +6596,12 @@ mod tests {
         // Sin matches → "Unable to find...".
         // (drenar lo que queda del resultado anterior primero)
         while a_rx.try_recv().is_ok() {}
-        let _ = dispatch_builtin(&ctx, &admin, "roomsearch", "zzzz");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "roomsearch", "zzzz");
         assert_eq!(next_pvt_text(&mut a_rx), "Unable to find any channels containing zzzz");
 
         // Room search deshabilitado (flag off) → "not enabled".
         ctx.room_flags.set("roomsearch", false);
-        let _ = dispatch_builtin(&ctx, &admin, "roomsearch", "chat");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "roomsearch", "chat");
         assert_eq!(next_pvt_text(&mut a_rx), "Room search service is not enabled");
     }
 
@@ -6597,7 +6617,7 @@ mod tests {
         // Escala sb0t: 1 = MODERATOR (no "regular", como interpretaba
         // /grant). Este era el bug: `#addautologin Bob 1` dejaba a Bob en
         // Regular y, al no cambiar el nivel, no se le enviaba nada.
-        let (handled, _) = dispatch_builtin(&ctx, &owner, "addautologin", "Bob 1");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "addautologin", "Bob 1");
         assert!(handled);
         assert_eq!(*bob.level.read(), ILevel::Moderator, "1 debe ser moderator");
 
@@ -6633,9 +6653,9 @@ mod tests {
         assert_eq!(level, ILevel::Moderator);
 
         // 2 = admin, 3 = host (escala sb0t).
-        let _ = dispatch_builtin(&ctx, &owner, "addautologin", "Bob 2");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "addautologin", "Bob 2");
         assert_eq!(*bob.level.read(), ILevel::Admin);
-        let _ = dispatch_builtin(&ctx, &owner, "addautologin", "Bob 3");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "addautologin", "Bob 3");
         assert_eq!(*bob.level.read(), ILevel::Owner);
     }
 
@@ -6650,7 +6670,7 @@ mod tests {
         let (bob, _b_rx) = make_test_user(2, "Bob");
         ctx.user_pool.add(owner.clone());
         ctx.user_pool.add(bob.clone());
-        let _ = dispatch_builtin(&ctx, &owner, "addautologin", "Bob 2");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "addautologin", "Bob 2");
 
         // Bob se reconecta (mismo guid/IP, nueva sesión regular).
         ctx.user_pool.remove(bob.id);
@@ -6680,7 +6700,7 @@ mod tests {
         ctx.user_pool.add(bob.clone());
 
         // 1 = moderator, 2 = admin, 3 = owner, 0 = regular (escala sb0t).
-        let (_, events) = dispatch_builtin(&ctx, &owner, "setlevel", "Bob 2");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "setlevel", "Bob 2");
         assert!(matches!(
             events.as_slice(),
             [astra_scripting::ScriptEvent::AdminLevelChanged { name }] if name == "Bob"
@@ -6688,12 +6708,12 @@ mod tests {
         assert_eq!(*bob.level.read(), ILevel::Admin);
         let _ = owner_rx.try_recv();
 
-        let (_, _) = dispatch_builtin(&ctx, &owner, "setlevel", "Bob 0");
+        let (_, _) = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "setlevel", "Bob 0");
         assert_eq!(*bob.level.read(), ILevel::Regular);
 
         // No-Owner: denegado.
         *bob.level.write() = ILevel::Admin;
-        let (_, events) = dispatch_builtin(&ctx, &bob, "setlevel", "Owner 0");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &bob, "setlevel", "Owner 0");
         assert!(events.is_empty());
         assert_eq!(*owner.level.read(), ILevel::Owner);
     }
@@ -6705,7 +6725,7 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let (handled, events) = dispatch_builtin(&ctx, &alice, "logout", "");
+        let (handled, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "logout", "");
         assert!(handled);
         assert!(matches!(
             events.as_slice(),
@@ -6714,7 +6734,7 @@ mod tests {
         assert_eq!(*alice.level.read(), ILevel::Regular);
 
         // Sin sesión elevada: logoff no hace nada.
-        let (_, events) = dispatch_builtin(&ctx, &alice, "logoff", "");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "logoff", "");
         assert!(events.is_empty());
     }
 
@@ -6727,9 +6747,9 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "addkewltext", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "addkewltext", "Bob");
         assert!(handled);
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "remkewltext", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "remkewltext", "Bob");
         assert!(handled);
     }
 
@@ -6741,7 +6761,7 @@ mod tests {
         ctx.user_pool.add(owner.clone());
 
         assert!(!ctx.room_flags.get("adminannounce"));
-        let _ = dispatch_builtin(&ctx, &owner, "adminannounce", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "adminannounce", "on");
         assert_eq!(next_pvt_text(&mut rx), "Room flag 'adminannounce' enabled.");
         assert!(ctx.room_flags.get("adminannounce"));
     }
@@ -6756,15 +6776,15 @@ mod tests {
         // pmgreetmsg default on (comportamiento histórico); greetmsg off.
         assert!(ctx.room_flags.get("pmgreetmsg"));
         assert!(!ctx.room_flags.get("greetmsg"));
-        let _ = dispatch_builtin(&ctx, &owner, "pmgreetmsg", "off");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "pmgreetmsg", "off");
         assert_eq!(next_pvt_text(&mut rx), "Room flag 'pmgreetmsg' disabled.");
         // + anuncio a la sala (Category.EnableDisable#9).
         assert_eq!(next_pvt_text(&mut rx), "Owner has disabled the PM greet message");
-        let _ = dispatch_builtin(&ctx, &owner, "greetmsg", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "greetmsg", "on");
         assert_eq!(next_pvt_text(&mut rx), "Room flag 'greetmsg' enabled.");
         assert_eq!(next_pvt_text(&mut rx), "Owner has enabled the greet message");
         // addgreetmsg sigue siendo "agregar greet", no un toggle.
-        let _ = dispatch_builtin(&ctx, &owner, "addgreetmsg", "hola +n");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "addgreetmsg", "hola +n");
         assert_eq!(ctx.greets.len(), 1);
     }
 
@@ -6778,11 +6798,11 @@ mod tests {
         ctx.user_pool.add(bob.clone());
 
         // Bob se registra.
-        let _ = dispatch_builtin(&ctx, &bob, "register", "secreto1");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &bob, "register", "secreto1");
         assert_eq!(ctx.db.list_accounts().unwrap().len(), 1);
 
         // El Host lo borra por nick.
-        let _ = dispatch_builtin(&ctx, &owner, "rempassword", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "rempassword", "Bob");
         assert_eq!(next_pvt_text(&mut rx), "Password removed for 'Bob'.");
         assert!(ctx.db.list_accounts().unwrap().is_empty());
     }
@@ -6797,7 +6817,7 @@ mod tests {
         ctx.room_flags.set("idle", true);
 
         // Marcarse ausente: dispara onIdled y anuncia a la sala.
-        let (handled, events) = dispatch_builtin(&ctx, &alice, "idles", "");
+        let (handled, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "idles", "");
         assert!(handled);
         assert!(matches!(
             events.as_slice(),
@@ -6808,7 +6828,7 @@ mod tests {
         assert!(announce.starts_with("Alice idles at "), "announce: {announce}");
 
         // Ya idle: reintento silencioso, sin evento.
-        let (_, events) = dispatch_builtin(&ctx, &alice, "idle", "");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "idle", "");
         assert!(events.is_empty());
 
         // Unidle al hablar: anuncia el tiempo ausente.
@@ -6817,7 +6837,7 @@ mod tests {
         assert!(ret.starts_with("Alice returned at "), "ret: {ret}");
         assert!(ret.contains("away time ["), "ret: {ret}");
         // Cooldown de 5 min: no puede volver a idlear ya mismo.
-        let (_, events) = dispatch_builtin(&ctx, &alice, "idles", "");
+        let (_, events) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "idles", "");
         assert!(events.is_empty());
         let _ = alice_rx.try_recv();
     }
@@ -6829,12 +6849,12 @@ mod tests {
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "idle", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "idle", "on");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Host required.");
         assert!(!ctx.room_flags.get("idle"));
 
         *alice.level.write() = ILevel::Owner;
-        let _ = dispatch_builtin(&ctx, &alice, "idle", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "idle", "on");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'idle' enabled.");
         // + anuncio a la sala (Category.EnableDisable#2).
         assert_eq!(next_pvt_text(&mut alice_rx), "Alice has enabled Idle Monitoring");
@@ -6852,7 +6872,7 @@ mod tests {
         ctx.user_pool.add(bob.clone());
         ctx.user_pool.add(carol.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "info", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "info", "");
         assert!(handled);
         // Encabezado = nombre de la sala, luego línea en blanco.
         let header = next_pvt_text(&mut alice_rx);
@@ -6905,7 +6925,7 @@ mod tests {
         ctx.user_pool.add(bob.clone());
 
         // Bob online
-        let _ = dispatch_builtin(&ctx, &alice, "lastseen", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "lastseen", "Bob");
         assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' is online now.");
 
         // Usuario en historial (offline)
@@ -6913,12 +6933,12 @@ mod tests {
             .add_user_history("Ghost", "Ares 2.5", &[7u8; 16],
                 "5.6.7.8".parse().unwrap(), "5.6.7.8".parse().unwrap(), 1234, 1000)
             .unwrap();
-        let _ = dispatch_builtin(&ctx, &alice, "lastseen", "Ghost");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "lastseen", "Ghost");
         let line = next_pvt_text(&mut alice_rx);
         assert!(line.starts_with("'Ghost' [5.6.7.8] last seen "), "got: {}", line);
 
         // No existe
-        let _ = dispatch_builtin(&ctx, &alice, "lastseen", "nadie");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "lastseen", "nadie");
         assert_eq!(next_pvt_text(&mut alice_rx), "No matching history.");
     }
 
@@ -6934,13 +6954,13 @@ mod tests {
                 "9.9.9.9".parse().unwrap(), "9.9.9.9".parse().unwrap(), 5009, 2000)
             .unwrap();
 
-        let _ = dispatch_builtin(&ctx, &alice, "whowas", "char");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "whowas", "char");
         // Formato sb0t WhoWas#0: "whowas: +n +ip +v +t".
         let line = next_pvt_text(&mut alice_rx);
         assert!(line.starts_with("whowas: Charlie 9.9.9.9 Ares 2.5 "), "got: {}", line);
 
         // Sin resultados: WhoWas#1.
-        let _ = dispatch_builtin(&ctx, &alice, "whowas", "nadie");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "whowas", "nadie");
         assert_eq!(
             next_pvt_text(&mut alice_rx),
             "no results were found containing nadie"
@@ -6954,7 +6974,7 @@ mod tests {
         *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "roominfo", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "roominfo", "");
         // Bloque con los textos de sb0t (RoomInfo #0-5).
         assert_eq!(next_pvt_text(&mut alice_rx), "Room Information");
         let _blank = next_pvt_text(&mut alice_rx);
@@ -6965,10 +6985,10 @@ mod tests {
         assert!(next_pvt_text(&mut alice_rx).starts_with("Host status:"));
 
         // set status → confirma + anuncia la actualización (RoomInfo#6)
-        let _ = dispatch_builtin(&ctx, &alice, "status", "under maintenance");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "status", "under maintenance");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room status set to 'under maintenance'.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Alice has updated the host status");
-        let _ = dispatch_builtin(&ctx, &alice, "status", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "status", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Status: under maintenance");
     }
 
@@ -6982,10 +7002,10 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "id", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "id", "Bob");
         assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' has id 2.");
 
-        let _ = dispatch_builtin(&ctx, &alice, "customnames", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "customnames", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob → BobbyTables");
     }
 
@@ -6998,7 +7018,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "ipsend", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "ipsend", "on");
         assert!(alice.sub_ipsend.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut alice_rx), "ipsend feed enabled.");
         // Volcado inicial: incluye a Bob
@@ -7023,11 +7043,11 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "bansend", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "bansend", "on");
         assert_eq!(next_pvt_text(&mut alice_rx), "bansend feed enabled.");
 
         // Alice banea a Bob → recibe el aviso bansend + el ack del ban.
-        let _ = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "ban", "Bob");
         let mut got_bansend = false;
         while let Ok(pkt) = alice_rx.try_recv() {
             if pkt[0] == TcpMsg::Pmt as u8 {
@@ -7054,12 +7074,12 @@ mod tests {
         ctx.user_pool.add(alice.clone());
 
         // Regular user → denegado
-        let _ = dispatch_builtin(&ctx, &alice, "define", "word");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "define", "word");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Moderator+ required.");
 
         // Moderator sin args → usage
         *alice.level.write() = ILevel::Moderator;
-        let _ = dispatch_builtin(&ctx, &alice, "define", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "define", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Usage: /define <word>");
     }
 
@@ -7073,7 +7093,7 @@ mod tests {
         let (alice, _rx) = make_test_user(1, "Alice");
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "define", "xyzzy");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "define", "xyzzy");
         assert!(handled);
     }
 
@@ -7084,7 +7104,7 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "trace", "8.8.8.8");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "trace", "8.8.8.8");
         assert!(next_pvt_text(&mut alice_rx).contains("requires a GeoIP database"));
     }
 
@@ -7095,10 +7115,10 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "vspy", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "vspy", "");
         assert!(alice.sub_vspy.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut alice_rx), "vspy feed enabled.");
-        let _ = dispatch_builtin(&ctx, &alice, "vspy", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "vspy", "");
         assert!(!alice.sub_vspy.load(std::sync::atomic::Ordering::Relaxed));
     }
 
@@ -7112,11 +7132,11 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "listquarantined", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "listquarantined", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Quarantined (1):");
         assert_eq!(next_pvt_text(&mut alice_rx), "0 - Bob");
 
-        let _ = dispatch_builtin(&ctx, &alice, "unquarantine", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "unquarantine", "Bob");
         assert!(!bob.quarantined.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut alice_rx), "Un-quarantined 'Bob'.");
     }
@@ -7127,12 +7147,12 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         *alice.level.write() = ILevel::Admin; // no alcanza (owner)
         ctx.user_pool.add(alice.clone());
-        let _ = dispatch_builtin(&ctx, &alice, "listpasswords", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "listpasswords", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Owner required.");
 
         *alice.level.write() = ILevel::Owner;
         ctx.accounts.register("Bob", &[9u8; 16], "pw", ILevel::Moderator as u8).unwrap();
-        let _ = dispatch_builtin(&ctx, &alice, "listpasswords", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "listpasswords", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Accounts (1):");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob (level 50)");
     }
@@ -7144,12 +7164,12 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "joinfilter", "add spam*");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "joinfilter", "add spam*");
         assert_eq!(next_pvt_text(&mut alice_rx), "join filter added: spam*");
         assert!(ctx.join_filters.matches("SpamBot99"));
         assert!(!ctx.join_filters.matches("Alice"));
 
-        let _ = dispatch_builtin(&ctx, &alice, "joinfilter", "list");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "joinfilter", "list");
         assert_eq!(next_pvt_text(&mut alice_rx), "join filters (1):");
     }
 
@@ -7162,10 +7182,10 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "locate", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "locate", "Bob");
         assert!(next_pvt_text(&mut alice_rx).starts_with("'Bob' ip=10.0.0.2"));
 
-        let _ = dispatch_builtin(&ctx, &alice, "clearscreen", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "clearscreen", "");
         // Muchas líneas en blanco + el ack final "Screen cleared."
         let last = {
             let mut t = String::new();
@@ -7187,7 +7207,7 @@ mod tests {
         *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
 
-        let (handled, _) = dispatch_builtin(&ctx, &alice, "loadtemplate", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "loadtemplate", "");
         assert!(handled);
         assert!(next_pvt_text(&mut alice_rx).contains("built-in messages"));
     }
@@ -7203,13 +7223,13 @@ mod tests {
 
         // Admin no alcanza el gate Owner (ahora aplicado centralizadamente
         // por `command_levels` antes de llegar a `require_host`).
-        let (handled, _) = dispatch_builtin(&ctx, &admin, "hostban", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "hostban", "Bob");
         assert!(handled);
         assert!(next_pvt_text(&mut admin_rx).contains("Owner required"));
 
         // Como Owner, hostban banea a Bob.
         *admin.level.write() = ILevel::Owner;
-        let (handled, _) = dispatch_builtin(&ctx, &admin, "hostban", "Bob");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &admin, "hostban", "Bob");
         assert!(handled);
         assert!(ctx.bans.len() >= 1);
     }
@@ -7226,7 +7246,7 @@ mod tests {
         ctx.user_pool.add(bob.clone());
         ctx.range_bans.add("10.0.0.");
 
-        let (handled, _) = dispatch_builtin(&ctx, &owner, "hostcban", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "hostcban", "");
         assert!(handled);
         assert!(!bob.muzzled.load(Relaxed));
         assert_eq!(ctx.range_bans.len(), 0);
@@ -7242,23 +7262,23 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "lower", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "lower", "Bob");
         assert!(bob.lowered.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut alice_rx), "lower enabled for 'Bob'.");
         // Anuncio público AdminAction#9.
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob has been lowered by Alice");
 
-        let _ = dispatch_builtin(&ctx, &alice, "kewltext", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "kewltext", "Bob");
         assert!(bob.kewl.load(std::sync::atomic::Ordering::Relaxed));
         let _ = next_pvt_text(&mut alice_rx);
         let _ = next_pvt_text(&mut alice_rx);
 
-        let _ = dispatch_builtin(&ctx, &alice, "unlower", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "unlower", "Bob");
         assert!(!bob.lowered.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut alice_rx), "lower disabled for 'Bob'.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob has been unlowered by Alice");
 
-        let _ = dispatch_builtin(&ctx, &alice, "paint", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "paint", "Bob");
         assert!(bob.painted.load(std::sync::atomic::Ordering::Relaxed));
     }
 
@@ -7270,18 +7290,18 @@ mod tests {
         ctx.user_pool.add(alice.clone());
 
         // caps default off
-        let _ = dispatch_builtin(&ctx, &alice, "caps", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "caps", "on");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'caps' enabled.");
         // + anuncio a la sala (Category.EnableDisable#10).
         assert_eq!(next_pvt_text(&mut alice_rx), "Alice has enabled CAPS monitoring");
         assert!(ctx.room_flags.get("caps"));
 
-        let _ = dispatch_builtin(&ctx, &alice, "scribbles", "off");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "scribbles", "off");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'scribbles' disabled.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Alice has disabled scribbles");
         assert!(!ctx.room_flags.get("scribbles"));
 
-        let _ = dispatch_builtin(&ctx, &alice, "audios", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "audios", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room flag 'audios' is on.");
     }
 
@@ -7298,7 +7318,7 @@ mod tests {
         ctx.user_pool.add(bob.clone());
         *bob.avatar.lock() = Some(vec![1, 2, 3]);
 
-        let _ = dispatch_builtin(&ctx, &alice, "disableavatar", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "disableavatar", "Bob");
         assert!(bob.avatar.lock().is_none());
         assert_eq!(
             next_pvt_text(&mut alice_rx),
@@ -7315,7 +7335,7 @@ mod tests {
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "roomflags", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "roomflags", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room flags:");
         // Una línea por cada flag definido.
         let mut count = 0;
@@ -7332,7 +7352,7 @@ mod tests {
         *alice.level.write() = ILevel::Owner;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "cloak", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "cloak", "on");
         assert!(alice.cloaked.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut alice_rx), "Cloak enabled.");
     }
@@ -7343,7 +7363,7 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
-        let _ = dispatch_builtin(&ctx, &alice, "caps", "on");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "caps", "on");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
     }
 
@@ -7356,7 +7376,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "move", "Bob 5");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "move", "Bob 5");
         assert_eq!(*bob.vroom.read(), 5);
         let _ = next_pvt_text(&mut alice_rx); // "You were moved..." goes to bob; alice gets ack
     }
@@ -7370,7 +7390,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "changename", "Bob Roberto");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "changename", "Bob Roberto");
         assert_eq!(*bob.name.read(), "Roberto");
         assert!(ctx.user_pool.get_by_name("Roberto").is_some());
         assert!(ctx.user_pool.get_by_name("Bob").is_none());
@@ -7390,7 +7410,7 @@ mod tests {
         ctx.user_pool.add(bob);
         ctx.user_pool.add(carol);
 
-        let _ = dispatch_builtin(&ctx, &alice, "admins", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "admins", "");
         // Paridad sb0t: se difunde a TODA la sala con los textos AdminList.
         assert_eq!(next_pvt_text(&mut alice_rx), "ADMIN LIST REQUESTED BY [Alice]");
         assert_eq!(next_pvt_text(&mut alice_rx), "Level 80 : Bob");
@@ -7407,7 +7427,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob);
 
-        let _ = dispatch_builtin(&ctx, &alice, "announce", "server reboot soon");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "announce", "server reboot soon");
         // Alice (mod) ve el texto y el aviso de autor (Notification#19).
         assert_eq!(next_pvt_text(&mut a_rx), "server reboot soon");
         assert_eq!(next_pvt_text(&mut a_rx), "Alice announced");
@@ -7425,17 +7445,17 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "kiddy", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "kiddy", "Bob");
         assert!(bob.kiddied.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(next_pvt_text(&mut alice_rx), "Kiddy mode on for 'Bob'.");
         // Anuncio público AdminAction#11.
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob has been kiddied by Alice");
 
-        let _ = dispatch_builtin(&ctx, &alice, "echo", "Bob you smell");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "echo", "Bob you smell");
         assert_eq!(bob.echo_text.read().as_deref(), Some("you smell"));
         assert_eq!(next_pvt_text(&mut alice_rx), "Echo set on 'Bob'.");
         assert_eq!(next_pvt_text(&mut alice_rx), "Bob has been echoed by Alice");
-        let _ = dispatch_builtin(&ctx, &alice, "echo", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "echo", "Bob");
         assert!(bob.echo_text.read().is_none());
     }
 
@@ -7448,7 +7468,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
         ctx.user_pool.add(bob.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "mtimeout", "Bob 60");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "mtimeout", "Bob 60");
         assert!(bob.is_muzzled());
         assert!(bob.muzzle_until.load(std::sync::atomic::Ordering::Relaxed) > 0);
         let _ = next_pvt_text(&mut alice_rx); // bob notice; alice ack next
@@ -7464,20 +7484,20 @@ mod tests {
         ctx.user_pool.add(owner.clone());
         ctx.user_pool.add(mod_u.clone());
 
-        let _ = dispatch_builtin(&ctx, &owner, "disableadmins", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "disableadmins", "");
         assert_eq!(next_pvt_text(&mut owner_rx), "Admin commands disabled.");
 
         // Un moderador ya no puede usar comandos admin (silencioso, sb0t).
-        let (handled, _) = dispatch_builtin(&ctx, &mod_u, "kiddy", "Owner");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &mod_u, "kiddy", "Owner");
         assert!(handled);
         assert!(mod_rx.try_recv().is_err(), "el gate es silencioso");
 
         // Pero sí comandos de usuario
-        let (handled, _) = dispatch_builtin(&ctx, &mod_u, "help", "");
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &mod_u, "help", "");
         assert!(handled);
 
         // El owner re-habilita
-        let _ = dispatch_builtin(&ctx, &owner, "enableadmins", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "enableadmins", "");
         assert_eq!(next_pvt_text(&mut owner_rx), "Admin commands enabled.");
     }
 
@@ -7488,7 +7508,7 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "rangeban", "1.2.3.*");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "rangeban", "1.2.3.*");
         assert_eq!(next_pvt_text(&mut alice_rx), "Range ban added: 1.2.3.");
         // Anuncio público AdminAction#17 (sujeto = el rango).
         assert_eq!(
@@ -7497,11 +7517,11 @@ mod tests {
         );
         assert!(ctx.range_bans.is_banned("1.2.3.55".parse().unwrap()));
 
-        let _ = dispatch_builtin(&ctx, &alice, "listrangebans", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "listrangebans", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Range bans (1):");
         assert_eq!(next_pvt_text(&mut alice_rx), "0 - 1.2.3.");
 
-        let _ = dispatch_builtin(&ctx, &alice, "rangeunban", "0");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "rangeunban", "0");
         assert_eq!(next_pvt_text(&mut alice_rx), "Range ban removed.");
         assert_eq!(next_pvt_text(&mut alice_rx), "0 has been range unbanned by Alice");
         assert!(!ctx.range_bans.is_banned("1.2.3.55".parse().unwrap()));
@@ -7514,16 +7534,16 @@ mod tests {
         *alice.level.write() = ILevel::Admin;
         ctx.user_pool.add(alice.clone());
 
-        let _ = dispatch_builtin(&ctx, &alice, "asnban", "64500");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "asnban", "64500");
         assert_eq!(next_pvt_text(&mut alice_rx), "ASN 64500 banned.");
         // Anuncio público AdminAction#25.
         assert_eq!(next_pvt_text(&mut alice_rx), "64500 has been ASN banned by Alice");
         assert!(ctx.asn_bans.is_banned(64500));
 
-        let _ = dispatch_builtin(&ctx, &alice, "listasnbans", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "listasnbans", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "ASN bans (1): 64500");
 
-        let _ = dispatch_builtin(&ctx, &alice, "asnunban", "64500");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "asnunban", "64500");
         assert_eq!(next_pvt_text(&mut alice_rx), "ASN 64500 unbanned.");
         assert_eq!(next_pvt_text(&mut alice_rx), "64500 has been unbanned by Alice");
         assert!(!ctx.asn_bans.is_banned(64500));
@@ -7539,16 +7559,16 @@ mod tests {
         ctx.user_pool.add(bob.clone());
 
         // Ban de Bob → registra acción
-        let _ = dispatch_builtin(&ctx, &alice, "ban", "Bob");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "ban", "Bob");
         let _ = next_pvt_text(&mut alice_rx); // "Banned 'Bob'..."
         let _ = next_pvt_text(&mut alice_rx); // anuncio público
         assert_eq!(ctx.bans.len(), 1);
 
-        let _ = dispatch_builtin(&ctx, &alice, "banstats", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "banstats", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Active bans: 1 | recent actions: 1");
         assert_eq!(next_pvt_text(&mut alice_rx), "Alice banned Bob [10.0.0.2]");
 
-        let _ = dispatch_builtin(&ctx, &alice, "clearbans", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "clearbans", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Cleared 1 ban(s).");
         assert_eq!(next_pvt_text(&mut alice_rx), "Alice has cleared the ban list");
         assert_eq!(ctx.bans.len(), 0);
@@ -7560,7 +7580,7 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         *alice.level.write() = ILevel::Moderator;
         ctx.user_pool.add(alice.clone());
-        let _ = dispatch_builtin(&ctx, &alice, "rangeban", "1.2.3");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "rangeban", "1.2.3");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
         assert!(ctx.range_bans.is_empty());
     }
@@ -7573,16 +7593,16 @@ mod tests {
         ctx.user_pool.add(alice.clone());
 
         // Moderator no alcanza
-        let _ = dispatch_builtin(&ctx, &alice, "addurl", "u t");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "addurl", "u t");
         assert_eq!(next_pvt_text(&mut alice_rx), "Access denied. Admin+ required.");
 
         *alice.level.write() = ILevel::Owner;
-        let _ = dispatch_builtin(&ctx, &alice, "url", "off");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "url", "off");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room URLs disabled.");
         // + anuncio a la sala (Category.EnableDisable#19).
         assert_eq!(next_pvt_text(&mut alice_rx), "dynamic url tag was disabled by Alice");
         assert!(!ctx.urls.is_enabled());
-        let _ = dispatch_builtin(&ctx, &alice, "url", "");
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "url", "");
         assert_eq!(next_pvt_text(&mut alice_rx), "Room URLs are off (0 configured).");
     }
 }

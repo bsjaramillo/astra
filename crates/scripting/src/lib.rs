@@ -5,7 +5,7 @@
 //! ## Componentes
 //!
 //! - [`types`]: `Script`, `ScriptId`, `ScriptState`, `ScriptEvent`
-//! - [`api`]: bindings JS (`print`, `astra.sendPublic`, `astra.sendPM`, etc.)
+//! - [`api`]: bindings JS (`print`, `sendPublic`, `sendPM`, etc.)
 //! - [`manager`]: `ScriptManager` (load, unload, dispatch)
 //!
 //! ## Uso
@@ -34,18 +34,18 @@
 //! ```javascript
 //! // Se ejecuta al cargar
 //! function onLoad() {
-//!     astra.log("script loaded!");
+//!     log("script loaded!");
 //! }
 //!
 //! // Se ejecuta cuando un usuario se une
-//! function onUserJoin(name, ip) {
-//!     print(name + " joined from " + ip);
+//! function onJoin(user, ip) {
+//!     print(user + " joined from " + ip);
 //! }
 //!
 //! // Se ejecuta cuando hay un mensaje público
 //! function onPublic(from, text) {
 //!     if (text === "!hello") {
-//!         astra.sendPublic("Bot", "Hello " + from + "!");
+//!         sendPublic("Bot", "Hello " + from + "!");
 //!     }
 //! }
 //! ```

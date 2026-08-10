@@ -491,7 +491,9 @@ async fn process_handshake(
                         match issue {
                             server_core::security::DetectedIssue::Proxy => {
                                 scripting.dispatch(astra_scripting::ScriptEvent::ProxyDetected {
+                                    name: login.org_name.clone(),
                                     ip: peer.ip().to_string(),
+                                    reply: false,
                                 });
                             }
                         }
@@ -857,16 +859,18 @@ async fn dispatch_message(
                 );
                 return Ok(false);
             }
+            // sb0t parity: gate onAvatar — si algún script retorna false, bloquear.
+            if !scripting.check_avatar(&user.name.read()) {
+                debug!("avatar de '{}' bloqueado por script", user.name.read());
+                return Ok(false);
+            }
             let cleared = png.len() < 10;
             *user.avatar.lock() = if cleared { None } else { Some(png.clone()) };
             // Avatar propio del cliente → stash para user.restoreAvatar().
             *user.org_avatar.lock() = if cleared { None } else { Some(png.clone()) };
             *user.full_avatar.lock() = None;
             user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
-            scripting.dispatch(astra_scripting::ScriptEvent::Avatar {
-                name: user.name.read().clone(),
-                png: png.clone(),
-            });
+            // Gate onAvatar ya se ejecutó vía check_avatar (sb0t parity).
             // Difundir a la sala (Ares nativos + web/inbizier), paridad del
             // setter de `AresClient.Avatar`: sin esto, nadie más ve el avatar
             // hasta que se reconecten (nunca, en la práctica).
@@ -1280,7 +1284,7 @@ fn route_command_text(
         format!("/{}", text)
     };
     if let Some((cmd, args)) = astra_commands::parse_command_raw(&slashed) {
-        let (_handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
+        let (_handled, events) = astra_commands::dispatch_builtin(ctx, scripting, user, cmd, args);
         // Eventos side-effect del builtin (ej. AdminLevelChanged tras /ban).
         for ev in events {
             scripting.dispatch(ev);
@@ -1373,7 +1377,7 @@ async fn handle_public(
     if let Some(rest) = text.strip_prefix('#') {
         let hides_text = rest.starts_with("login") || rest.starts_with("register");
         if let Some((cmd, args)) = astra_commands::parse_command_raw(&text) {
-            let (handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, args);
+            let (handled, events) = astra_commands::dispatch_builtin(ctx, scripting, user, cmd, args);
             debug!("comando de '{}' (builtin={}): #{} {}", name, handled, cmd, args);
             // Disparar los side-effects de scripting que el comando generó
             // (incluye onVroomJoin, onNick, onRegistered, etc., que ahora
@@ -1437,6 +1441,20 @@ async fn handle_public(
         text = text.to_lowercase();
     }
 
+    // sb0t parity: ScriptInRoom — eval inline de JS desde la sala.
+    // Solo Owner tiene permiso. Si no hay room script cargado, no pasa nada.
+    if ctx.settings.script_in_room && (*user.level.read() as u8) >= server_core::ILevel::Owner as u8 {
+        if let Some(rest) = text.strip_prefix('@') {
+            let _ = scripting.eval_room(&name, rest);
+            return; // @-prefixed: suprimir salida, cancelar texto (sb0t parity)
+        }
+        if let Some(out) = scripting.eval_room(&name, &text) {
+            // Imprimir resultado de la evaluación en la sala (sb0t parity)
+            let bot = ctx.settings.bot_name.clone();
+            broadcast_to_room(ctx, user, |c| outbound::build_public_c(&bot, &out, c));
+        }
+    }
+
     // Hook onTextBefore: un script puede cancelar el mensaje (None) o
     // REESCRIBIRLO (Some(texto)) — paridad sb0t TextSending.
     let text = match scripting.check_text_before(&name, &text) {
@@ -1449,8 +1467,11 @@ async fn handle_public(
 
     // Hablar en público saca del idle y anuncia el tiempo ausente
     // (paridad sb0t TCPProcessor: unidle dentro del path de TextSending).
-    if ctx.unidle_user(user).is_some() {
-        scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
+    if let Some(seconds_away) = ctx.unidle_user(user) {
+        scripting.dispatch(astra_scripting::ScriptEvent::Unidled {
+            name: name.clone(),
+            seconds: seconds_away as u32,
+        });
     }
 
     // Con custom name activo el mensaje sale como línea `NoSuch` con el
@@ -1532,8 +1553,11 @@ async fn handle_emote(
     // Paridad sb0t TCPProcessor (emote path): primero el unidle si estaba
     // idle, luego un emote que empiece con "idles" marca al usuario como
     // ausente (`#me idles almorzando`), y el emote se difunde igual.
-    if ctx.unidle_user(user).is_some() {
-        scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
+    if let Some(seconds_away) = ctx.unidle_user(user) {
+        scripting.dispatch(astra_scripting::ScriptEvent::Unidled {
+            name: name.clone(),
+            seconds: seconds_away as u32,
+        });
     }
     if text.starts_with("idles") && ctx.mark_user_idle(user) {
         scripting.dispatch(astra_scripting::ScriptEvent::Idled { name: name.clone() });
@@ -1816,12 +1840,12 @@ async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_
         Ok(s) => s,
         Err(_) => return,
     };
+    // sb0t parity: gate onPersonalMessage — si algún script retorna false, bloquear.
+    if !scripting.check_personal_message(&user.name.read(), &text) {
+        debug!("personal message de '{}' bloqueado por script", user.name.read());
+        return;
+    }
     *user.personal_message.lock() = text.clone();
-    // Evento onPersonalMessage.
-    scripting.dispatch(astra_scripting::ScriptEvent::PersonalMessage {
-        name: user.name.read().clone(),
-        text: text.clone(),
-    });
 
     // Broadcast a la sala: cada uno recibe un "MSG_CHAT_SERVER_PERSONAL_MESSAGE"
     // con el nuevo PM. Lo simplificamos: el server reenvía a cada user.

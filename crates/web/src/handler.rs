@@ -884,7 +884,7 @@ fn handle_ws_command(
         Some((c, a)) => (c, a.trim_start()),
         None => (raw, ""),
     };
-    let (_handled, events) = astra_commands::dispatch_builtin(ctx, user, cmd, cargs);
+    let (_handled, events) = astra_commands::dispatch_builtin(ctx, scripting, user, cmd, cargs);
     // Eventos side-effect del builtin (ej. AdminLevelChanged tras /ban).
     for ev in events {
         scripting.dispatch(ev);
@@ -917,14 +917,29 @@ fn handle_ws_public(
         return;
     }
     // Eval inline `@código` (paridad sb0t, gated a Owner): no se difunde.
-    if let Some(code) = text.strip_prefix('@') {
-        if (*user.level.read() as u8) >= server_core::ILevel::Owner as u8 {
-            let name = user.name.read().clone();
-            if let Err(e) = scripting.eval_chat(&name, code) {
-                let _ = user.print(&ctx.settings.bot_name, &format!("eval error: {}", e));
-            }
+    // sb0t parity: ScriptInRoom — eval inline de JS desde la sala.
+    if ctx.settings.script_in_room && (*user.level.read() as u8) >= server_core::ILevel::Owner as u8 {
+        let name = user.name.read().clone();
+        if let Some(code) = text.strip_prefix('@') {
+            let _ = scripting.eval_room(&name, code);
+            return; // @-prefixed: suprimir salida, cancelar texto (sb0t parity)
         }
-        return;
+        if let Some(out) = scripting.eval_room(&name, text) {
+            let bot = ctx.settings.bot_name.clone();
+            broadcast_to_room(ctx, user, |c| outbound::build_public_c(&bot, &out, c));
+        }
+    }
+    // Legacy: @code sin script_in_room → eval_chat (Owner only).
+    if !ctx.settings.script_in_room {
+        if let Some(code) = text.strip_prefix('@') {
+            if (*user.level.read() as u8) >= server_core::ILevel::Owner as u8 {
+                let name = user.name.read().clone();
+                if let Err(e) = scripting.eval_chat(&name, code) {
+                    let _ = user.print(&ctx.settings.bot_name, &format!("eval error: {}", e));
+                }
+            }
+            return;
+        }
     }
     // Comando por el canal público: paridad `WebProcessor.Text` de sb0t —
     // solo el prefijo `#`, y salvo `#login`/`#register` (que llevan
@@ -967,8 +982,11 @@ fn handle_ws_public(
     };
     let text = text.as_str();
     // Hablar en público saca del idle (paridad sb0t WebProcessor).
-    if ctx.unidle_user(user).is_some() {
-        scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
+    if let Some(seconds_away) = ctx.unidle_user(user) {
+        scripting.dispatch(astra_scripting::ScriptEvent::Unidled {
+            name: name.clone(),
+            seconds: seconds_away as u32,
+        });
     }
     // Evento de scripting (onPublic), paridad con el path TCP nativo.
     ctx.stats.on_message();
@@ -1108,6 +1126,10 @@ fn handle_ws_permsg(
     if text.chars().count() > 50 {
         text = text.chars().take(50).collect();
     }
+    // sb0t parity: gate onPersonalMessage — si algún script retorna false, bloquear.
+    if !scripting.check_personal_message(&user.name.read(), &text) {
+        return;
+    }
     {
         let mut pmsg = user.personal_message.lock();
         if *pmsg == text {
@@ -1116,11 +1138,6 @@ fn handle_ws_permsg(
         *pmsg = text.clone();
     }
     let name = user.name.read().clone();
-    // Evento de scripting (onPersonalMessage).
-    scripting.dispatch(astra_scripting::ScriptEvent::PersonalMessage {
-        name: name.clone(),
-        text: text.clone(),
-    });
     let vroom = *user.vroom.read();
     let ws_msg = protocol::build_persmsg(&name, &text);
     for u in ctx.user_pool.users() {
@@ -1169,11 +1186,10 @@ fn handle_ws_avatar(
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
         return;
     };
-    // Evento de scripting (onAvatar), paridad con el path TCP nativo.
-    scripting.dispatch(astra_scripting::ScriptEvent::Avatar {
-        name: user.name.read().clone(),
-        png: bytes.clone(),
-    });
+    // sb0t parity: gate onAvatar — si algún script retorna false, bloquear.
+    if !scripting.check_avatar(&user.name.read()) {
+        return;
+    }
     // `full_avatar` es el que ven los clientes web (base64, sin límite de
     // tamaño). `avatar` es el que viaja por el canal binario Ares, que sí
     // tiene tope: sb0t descarta los de 4064 bytes o más
@@ -1551,8 +1567,11 @@ fn handle_ws_emote(
     let text = text.as_str();
     // Paridad sb0t WebProcessor: unidle si estaba idle; un emote que empieza
     // con "idles" marca ausente (`#me idles almorzando`), y se difunde igual.
-    if ctx.unidle_user(user).is_some() {
-        scripting.dispatch(astra_scripting::ScriptEvent::Unidled { name: name.clone() });
+    if let Some(seconds_away) = ctx.unidle_user(user) {
+        scripting.dispatch(astra_scripting::ScriptEvent::Unidled {
+            name: name.clone(),
+            seconds: seconds_away as u32,
+        });
     }
     if text.starts_with("idles") && ctx.mark_user_idle(user) {
         scripting.dispatch(astra_scripting::ScriptEvent::Idled { name: name.clone() });
