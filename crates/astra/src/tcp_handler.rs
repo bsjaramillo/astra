@@ -490,10 +490,13 @@ async fn process_handshake(
                     for issue in &issues {
                         match issue {
                             server_core::security::DetectedIssue::Proxy => {
+                                // sb0t parity: gate onProxyDetected — usa el retorno
+                                // del script (default: false = rechazar).
+                                let allowed = scripting.check_proxy_detected(&login.org_name, &peer.ip().to_string());
                                 scripting.dispatch(astra_scripting::ScriptEvent::ProxyDetected {
                                     name: login.org_name.clone(),
                                     ip: peer.ip().to_string(),
-                                    reply: false,
+                                    reply: allowed,
                                 });
                             }
                         }
@@ -670,7 +673,7 @@ async fn process_handshake(
                             "Welcome! Please type this code to enter: {}  (PM it back to {})",
                             visual, ctx.settings.bot_name
                         );
-                        let _ = user_arc.send_pvt(&ctx.settings.bot_name, &prompt);
+                        send_bot_pm(&user_arc, &ctx.settings.bot_name, &prompt, scripting);
                         info!(
                             "CAPTCHA issued: id={} ip={} word={}",
                             user_arc.id, peer.ip(), challenge.word
@@ -836,7 +839,7 @@ async fn dispatch_message(
             let _ = user.send(outbound::build_update_user_status_c(user, user.ares_crypto));
         }
         TcpMsg::ClientIgnorelist => {
-            handle_ignore_list(user, &pkt.data[1..]);
+            handle_ignore_list(user, &pkt.data[1..], scripting);
         }
         TcpMsg::Avatar => {
             // Gate de sala: si los avatares están deshabilitados, se ignora.
@@ -1339,10 +1342,7 @@ async fn handle_public(
     if user.needs_captcha.load(std::sync::atomic::Ordering::Relaxed)
         && !text.trim_start().starts_with(['/', '#'])
     {
-        let _ = user.send_pvt(
-            &ctx.settings.bot_name,
-            "Please solve the captcha before chatting. Check your PMs.",
-        );
+        send_bot_pm(user, &ctx.settings.bot_name, "Please solve the captcha before chatting. Check your PMs.", scripting);
         return;
     }
 
@@ -1400,10 +1400,7 @@ async fn handle_public(
     // Muzzled: puede ejecutar comandos pero no hablar en público.
     // (is_muzzled auto-expira los muzzles temporales de /mtimeout)
     if user.is_muzzled() {
-        let _ = user.send_pvt(
-            &ctx.settings.bot_name,
-            "You are muzzled and cannot chat in public.",
-        );
+        send_bot_pm(user, &ctx.settings.bot_name, "You are muzzled and cannot chat in public.", scripting);
         return;
     }
 
@@ -1429,7 +1426,7 @@ async fn handle_public(
 
     // Echo heckle (/echo): reenvía el texto configurado solo a este usuario.
     if let Some(echo) = user.echo_text.read().clone() {
-        let _ = user.send_pvt(&ctx.settings.bot_name, &echo);
+        send_bot_pm(user, &ctx.settings.bot_name, &echo, scripting);
     }
 
     // Efectos de castigo por-usuario (/kiddy, /lower).
@@ -1534,10 +1531,7 @@ async fn handle_emote(
     }
     // Muzzled: sin voz en público (aplica también a emotes).
     if user.is_muzzled() {
-        let _ = user.send_pvt(
-            &ctx.settings.bot_name,
-            "You are muzzled and cannot chat in public.",
-        );
+        send_bot_pm(user, &ctx.settings.bot_name, "You are muzzled and cannot chat in public.", scripting);
         return;
     }
 
@@ -1814,8 +1808,20 @@ fn handle_custom_data(
 }
 
 /// Maneja MSG_CHAT_CLIENT_IGNORELIST (45).
+
+/// Envía un PM del bot a un usuario, con gate onBotPM (sb0t parity).
+/// Si el script retorna false, el PM se bloquea.
+fn send_bot_pm(user: &Arc<server_core::user_pool::AresUser>, bot_name: &str, text: &str, scripting: &ScriptHandle) {
+    let name = user.name.read().clone();
+    if scripting.check_bot_pm(&name, text) {
+        let _ = user.send_pvt(bot_name, text);
+        scripting.dispatch(astra_scripting::ScriptEvent::BotPM { name, text: text.to_string() });
+    }
+}
+
+/// Maneja MSG_CHAT_CLIENT_IGNORELIST (45).
 /// Formato: lista de strings Ares consecutivas.
-fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) {
+fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8], scripting: &ScriptHandle) {
     let mut r = PacketReader::new_crypto(data, user.ares_crypto);
     let mut list = Vec::new();
     while r.remaining() > 0 {
@@ -1828,6 +1834,30 @@ fn handle_ignore_list(user: &Arc<server_core::user_pool::AresUser>, data: &[u8])
         }
         if !list.iter().any(|e: &String| e.eq_ignore_ascii_case(trimmed)) {
             list.push(trimmed.to_string());
+        }
+    }
+    // sb0t parity: gates de ignore (onIgnoring/onIgnoredStateChanged)
+    let uname = user.name.read().clone();
+    let old = user.ignore_list.read().clone();
+    // Nuevos ignores (agregados): gate onIgnoring + dispatch Ignoring
+    for target in &list {
+        if !old.iter().any(|x| x.eq_ignore_ascii_case(target)) {
+            if scripting.check_ignoring(&uname, target) {
+                scripting.dispatch(astra_scripting::ScriptEvent::Ignoring {
+                    name: uname.clone(),
+                    target: target.clone(),
+                });
+            }
+        }
+    }
+    // Ignores removidos: dispatch IgnoredStateChanged
+    for old_target in &old {
+        if !list.iter().any(|x| x.eq_ignore_ascii_case(old_target)) {
+            scripting.dispatch(astra_scripting::ScriptEvent::IgnoredStateChanged {
+                name: uname.clone(),
+                target: old_target.clone(),
+                ignored: false,
+            });
         }
     }
     *user.ignore_list.write() = list;
