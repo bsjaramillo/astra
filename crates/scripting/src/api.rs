@@ -557,6 +557,11 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
         .register_global_builtin_callable(js_string!("__http_download"), 8, NativeFunction::from_fn_ptr(http_download_fn))
         .expect("__http_download should be registered");
 
+    // ============ tickCount (sb0t parity: monotonic server tick) ============
+    context
+        .register_global_builtin_callable(js_string!("__tickCount"), 0, NativeFunction::from_fn_ptr(tick_count_fn))
+        .expect("__tickCount should be registered");
+
     // ============ Sql (DB propia del script, paridad sb0t) ============
     for (name, arity, f) in [
         ("__Sql_new", 0usize, sql_new_fn as fn(&JsValue, &[JsValue], &mut Context) -> Result<JsValue, boa_engine::JsError>),
@@ -588,9 +593,9 @@ pub fn make_context(app: Arc<AppContext>) -> Context {
 /// Prelude JS de compatibilidad con la API de scripts de sb0t. Se evalúa en
 /// cada context antes del código del script.
 const SB0T_COMPAT_PRELUDE: &str = r#"
-// ---- Objeto user (JSUser): propiedades vivas + métodos ----
+var __COUNTRY_NAMES = {0:"Unknown",1:"Afghanistan",2:"Albania",3:"Algeria",4:"Andorra",5:"Angola",6:"Anguilla",7:"Antarctia",8:"Antigua and Barbuda",9:"Argentina",10:"Armenia",11:"Aruba",12:"Australia",13:"Austria",14:"Azerbaijan",15:"Bahamas",16:"Bahrain",17:"Bangladesh",18:"Barbados",19:"Belarus",20:"Belgium",21:"Belize",22:"Berin",23:"Bermuda",24:"Bhutan",25:"Bolivia",26:"Bosnia and Herzegovina",27:"Botswana",28:"Brazil",29:"Brunei",30:"Bulgaria",31:"Burkina Faso",32:"Burundi",33:"Cambodia",34:"Cameroon",35:"Canada",36:"Cape Verde",37:"Cayman Islands",38:"Central African Republic",39:"Chad",40:"Chile",41:"China",42:"Christmas Islands",43:"Cocos Islands",44:"Colombia",45:"Comoros",46:"Congo",47:"Congo",48:"Cook Islands",49:"Costa Rica",50:"Croatia",51:"Cuba",52:"Cyprus",53:"Czech Republic",54:"Denmark",55:"Fjibouti",56:"Dominica",57:"Dominican Republic",58:"Dutch antilles",59:"East Timor",60:"Ecuador",61:"Egypt",62:"El Salvador",63:"Equatorial Guinea",64:"Entea",65:"Estonia",66:"Ethiopia",67:"Falkland Islands",68:"Faroe Islands",69:"Fiji Islands",70:"Finland",71:"France",72:"French Polynesia",73:"Gabon",74:"Gambia",75:"Gaza",76:"Georgia",77:"Germany",78:"Ghana",79:"Gibraltar",80:"Greece",81:"Greenland",82:"Grenada",83:"Geuadaloupe",84:"Guatemala",85:"Guernsey",86:"Guinea",87:"Guinea-Bissau",88:"Guyana",89:"Guyana",90:"Haiti",91:"Honduras",92:"Hong Kong",93:"Hungary",94:"Iceland",95:"India",96:"Indonesia",97:"Iran",98:"Iraq",99:"Ireland",100:"Isle of Man",101:"Israel",102:"Italy",103:"Ivory Coast",104:"Jamaica",105:"Japan",106:"Jersey",107:"Jordan",108:"Kazakhstan",109:"Kenya",110:"Kiribati",111:"Kuwwait",112:"Kyrgyzstan",113:"Laos",114:"Latvia",115:"Lebanon",116:"Lesotho",117:"Liberia",118:"Libya",119:"Liechtenstein",120:"Lithuania",121:"Luxembourg",122:"Macao",123:"Macedonia",124:"Madagascar",125:"Malawi",126:"Malaysia",127:"Maldives",128:"Mali",129:"Malta",130:"Marshall Islands",131:"Martinique",132:"Mauritania",133:"Mauritius",134:"Mayotte",135:"Mexico",136:"Micronesia",137:"Moldova",138:"Monaco",139:"Mongolia",140:"Montserrat",141:"Morocco",142:"Mozambique",143:"Myanmar",144:"Namibia",145:"Nauru",146:"Nepal",147:"Netherlands",148:"New Caledonia",149:"New Zealand",150:"Nicaragua",151:"Niger",152:"Nigeria",153:"Niue",154:"Norfolk Island",155:"North Korea",156:"Norway",157:"Oman",158:"Pakistan",159:"Palau",160:"Panama",161:"Papua New Guinea",162:"Paraguay",163:"Peru",164:"Phillippines",165:"Pitcairn Island",166:"Poland",167:"Portugal",168:"Puerto Rico",169:"Qatar",170:"Reunion",171:"Romania",172:"Russia",173:"Rwanda",174:"Samoa",175:"San Marino",176:"Sao Tome and Principe",177:"Saudi Arabia",178:"Senegal",179:"Seychelles",180:"Sierra Leone",181:"Singapore",182:"Slovakia",183:"Slovenia",184:"Solomon Island",185:"Somalia",186:"South Africa",187:"South Georgia Island",188:"South Korea",189:"Spain",190:"Sri Lanka",191:"St Helens",192:"St Kitts and Nevis",193:"St Lucia",194:"St Pierre and Miquelon",195:"St Vicent",196:"Sudan",197:"Suriname",198:"Svalbard",199:"Swaziland",200:"Sweden",201:"Switzerland",202:"Syria",203:"Taiwan",204:"Tajikistan",205:"Tanzania",206:"Thailand",207:"Togo",208:"Tokelau",209:"Tonga",210:"Trinidad and Tobago",211:"Tunisia",212:"Turkey",213:"Turkmenistan",214:"Turks and Caicos Islands",215:"Tuvalu",216:"Uganda",217:"Ukraine",218:"United Arab Emirates",219:"United Kingdom",220:"United States",221:"Uruguay",222:"Uzbekistan",223:"Vanuatu",224:"Venezuela",225:"Vietnam",226:"Virgin Islands",227:"Wallis and Futuna Islands",228:"Western Sahara",229:"Western Samoa",230:"Yemen",231:"Zambia",232:"Zimbabwe",233:"Zaire",234:"Serbia",239:"Unknown"};
 var __USER_PROPS = ["name","orgName","id","level","vroom","externalIp","localIp",
-  "dns","guid","version","age","gender","sex","country","region","fileCount","port",
+  "dns","guid","version","age","gender","sex","region","fileCount","port",
   "muzzled","cloaked","registered","encrypted","owner","webClient","customClient",
   "browsable","fastPing","canHTML","personalMessage","customName","joinTime",
   "captcha","idle","visible","ghost","localEP","linked","leaf","originalIp"];
@@ -690,6 +695,11 @@ function __mkUser(name){
   // En contexto string el objeto se comporta como su nombre: mantiene
   // compat con handlers "nativos" de Astra que usaban el nombre (string)
   // como primer argumento (concatenación, ==, plantillas).
+  // Country: sb0t devuelve nombre de país (string), no código numérico.
+  Object.defineProperty(u, "country", {
+    enumerable: true, configurable: true,
+    get: function(){ var c = __user_get(u.__name, "countryCode"); return __COUNTRY_NAMES[c] || __COUNTRY_NAMES[0] || "Unknown"; }
+  });
   u.toString = function(){ return u.__name; };
   u.valueOf = function(){ return u.__name; };
   return u;
@@ -988,10 +998,20 @@ sendPM = function(a, b, c){
   return __sendPMRaw(a == null ? "" : "" + a, b == null ? "" : "" + b, c == null ? "" : "" + c);
 };
 function scriptName(){ return (typeof __SCRIPT_DIR__ === "string") ? __SCRIPT_DIR__.replace(/[\\/]+$/,"").split(/[\\/]/).pop() : ""; }
-function tickCount(){ return Date.now(); }
-function byteLength(s){ s = (s == null ? "" : "" + s); var n = 0; for (var i = 0; i < s.length; i++){ var c = s.charCodeAt(i); n += c < 0x80 ? 1 : c < 0x800 ? 2 : 3; } return n; }
-function stripColors(s){ return ("" + (s == null ? "" : s)).replace(/\x03[0-9]{0,2}(,[0-9]{1,2})?/g, ""); }
-function escapeUtf(s){ return encodeURIComponent(s == null ? "" : "" + s); }
+function tickCount(){ return __tickCount(); }
+function byteLength(s){ if (s == null || s === undefined) return -1; s = "" + s; var n = 0; for (var i = 0; i < s.length; i++){ var c = s.charCodeAt(i); n += c < 0x80 ? 1 : c < 0x800 ? 2 : 3; } return n; }
+function stripColors(s){ if (s == null || s === undefined) return null; var r = "" + s; // sb0t parity: \x02..\x09 codes + soft hyphen + color codes
+  r = r.replace(/(\x03|\x05)[0-9]{2}/g, "");
+  r = r.replace(/\x06/g, ""); r = r.replace(/\x07/g, ""); r = r.replace(/\x09/g, "");
+  r = r.replace(/\x02/g, ""); r = r.replace(/\xAD/g, "");
+  return r; }
+function escapeUtf(s){ if (s == null || s === undefined) return null; // sb0t parity: \xNN / \uNNNN hex escapes
+  var result = ""; var str = "" + s;
+  for (var i = 0; i < str.length; i++){ var c = str.charCodeAt(i);
+    if ((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)){ result += str.charAt(i); }
+    else { var h = c.toString(16).toUpperCase(); if (h.length % 2 !== 0) h = "0" + h;
+      result += h.length === 2 ? "\\x" + h : "\\u" + h; } }
+  return result; }
 function clrName(obj){
   // sb0t parity: returns CLR type name (a.GetType().ToString()).
   // For JS objects we return sb0t-compatible type strings.
@@ -1733,7 +1753,7 @@ fn user_get_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<J
         "version" => JsValue::from(js_string!(u.version.clone())),
         "age" => JsValue::from(u.age as f64),
         "gender" | "sex" => JsValue::from(u.sex as f64),
-        "country" => JsValue::from(u.country as f64),
+        "country" | "countryCode" => JsValue::from(u.country as f64),
         "region" => JsValue::from(js_string!(u.region.clone())),
         "fileCount" => JsValue::from(u.file_count as f64),
         "port" => JsValue::from(u.data_port as f64),
@@ -2596,7 +2616,11 @@ fn file_creation_time_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -
 fn file_read_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let arg = args.get(0).and_then(jsvalue_to_string).unwrap_or_default();
     match resolve_script_data_path(ctx, &arg, false).and_then(|p| std::fs::read_to_string(p).ok()) {
-        Some(s) => Ok(JsValue::from(js_string!(s))),
+        // sb0t parity: eliminar líneas en blanco/whitespace, unir con \n
+        Some(s) => {
+            let filtered: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+            Ok(JsValue::from(js_string!(filtered.join("\n"))))
+        }
         None => Ok(JsValue::null()),
     }
 }
@@ -4358,6 +4382,14 @@ pub fn drain_http_completions() -> Vec<HttpCompletion> {
 /// `__http_download(method, url, body, userAgent, accept, utf, key)` — lanza
 /// la petición en background. `utf` = true → cuerpo como texto; false → base64.
 /// Devuelve true si se pudo lanzar.
+/// Contador monotónico del server, paridad con sb0t `Server.Ticks`.
+static SERVER_TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `__tickCount()` — devuelve el contador monotónico del server (sb0t parity).
+fn tick_count_fn(_this: &JsValue, _args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
+    Ok(JsValue::from(SERVER_TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as f64))
+}
+
 fn http_download_fn(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> Result<JsValue, boa_engine::JsError> {
     let method = args.get(0).and_then(jsvalue_to_string).unwrap_or_else(|| "GET".to_string());
     let url = args.get(1).and_then(jsvalue_to_string).unwrap_or_default();
@@ -5032,7 +5064,7 @@ mod tests {
             if (L.count !== 0) throw "List.clear bad";
 
             // Globals
-            if (escapeUtf("a b") !== "a%20b") throw "escapeUtf bad: " + escapeUtf("a b");
+            if (escapeUtf("a b") !== "a\\x20b") throw "escapeUtf bad: " + escapeUtf("a b");
             if (typeof clrName("test") !== "string") throw "clrName not string";
 
             // Timer: construible, start/stop no lanzan
