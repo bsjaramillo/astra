@@ -342,6 +342,20 @@ pub fn build_scribble_block(data: &str) -> String {
     format!("SCRIBBLE_BLOCK:{}:{}", clen(data), data)
 }
 
+/// `SCRIBBLE_GIF:{senderLen},{dataLen}:{sender}{data}` — paridad sb0t
+/// `WebOutbound.ScribbleGifTo`. Envía la imagen completa como base64 en un
+/// solo paquete (sin chunking). Para imágenes grandes usar
+/// `SCRIBBLE_HEAD`/`SCRIBBLE_BLOCK`.
+pub fn build_scribble_gif(sender: &str, data: &str) -> String {
+    format!(
+        "SCRIBBLE_GIF:{},{}:{}{}",
+        clen(sender),
+        clen(data),
+        sender,
+        data
+    )
+}
+
 /// `AUDIO_HEAD:{senderLen},{countLen}:{sender}{count}`.
 pub fn build_audio_head(sender: &str, count: usize) -> String {
     let count_s = count.to_string();

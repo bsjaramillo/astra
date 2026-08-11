@@ -108,7 +108,8 @@ for (var i = 0; i < u.ignores.count; i++) {
 | `setTopic(topic)` | Set the topic for that user |
 | `nudge([sender])` | Send a cb0t nudge (default sender = bot) |
 | `setUrl(addr, text)` | Send a URL only to this user; no args = clear |
-| `scribble(img)` / `scribble(sender, img)` | Send a directed scribble (works for cb0t and web clients) |
+| `scribble(img)` / `scribble(sender, img)` | Send a directed scribble (cb0t: `cb0t_scribble_once`, web: `SCRIBBLE_HEAD`/`SCRIBBLE_BLOCK` chunked) |
+| `scribbleGif(img)` / `scribbleGif(sender, img)` | Send a scribble as a single base64 media URL via `SCRIBBLE_GIF` packet (web clients only) |
 | `restoreAvatar()` | Restore the avatar the client originally sent |
 | `getASN()` | ASN number or `null` |
 

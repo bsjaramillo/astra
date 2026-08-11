@@ -672,6 +672,17 @@ function __mkUser(name){
     if (img == null || typeof img.__id !== "number" || img.__id < 0) return false;
     return __user_do(u.__name, "scribble", JSON.stringify({ id: img.__id, s: sender }));
   };
+  // scribbleGif(img) o scribbleGif(sender, img) — envía la URL multimedia
+  // como SCRIBBLE_GIF a web clients (paridad sb0t WebOutbound.ScribbleGifTo).
+  // El src del scribble debe ser una URL http/https; no usa base64.
+  u.scribbleGif = function(a, b){
+    var sender = "", img = a;
+    if (b != null) { sender = a == null ? "" : "" + a; img = b; }
+    if (img == null) return false;
+    var url = img.src;
+    if (url == null || ("" + url).length < 5) return false;
+    return __user_do(u.__name, "scribbleGif", JSON.stringify({ u: "" + url, s: sender }));
+  };
   // restoreAvatar() — vuelve al avatar original del cliente (sb0t OrgAvatar).
   u.restoreAvatar = function(){ return __user_do(u.__name, "restoreAvatar", ""); };
     // getASN() — número ASN o null si no está disponible.
@@ -2157,6 +2168,35 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
                     }
                 }
                 _ => false,
+            }
+        }
+        "scribbleGif" => {
+            // Envía la URL multimedia directa como SCRIBBLE_GIF a web clients
+            // (paridad sb0t WebOutbound.ScribbleGifTo). No usa base64.
+            let parsed = serde_json::from_str::<serde_json::Value>(&arg).ok();
+            let url = parsed
+                .as_ref()
+                .and_then(|v| v["u"].as_str())
+                .unwrap_or("");
+            let sender = parsed
+                .as_ref()
+                .and_then(|v| v["s"].as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| bot.clone());
+            if url.len() < 5 || u.ws_text_sender.is_none() {
+                false
+            } else {
+                let tx = u.ws_text_sender.as_ref().unwrap();
+                let gif = format!(
+                    "SCRIBBLE_GIF:{},{}:{}{}",
+                    sender.len(),
+                    url.len(),
+                    sender,
+                    url
+                );
+                let _ = tx.send(gif);
+                true
             }
         }
         _ => false,

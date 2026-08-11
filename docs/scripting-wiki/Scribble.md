@@ -39,6 +39,25 @@ function sendScribble(url) {
 
 You can also set `scribble.src = url` and call `scribble.download()` without arguments — both patterns work.
 
+## `scribbleGif` (web clients only)
+
+Sends the scribble URL directly as a `SCRIBBLE_GIF` packet — the sb0t `WebOutbound.ScribbleGifTo` wire format. The scribble's `src` must be an `http://` or `https://` URL. Only supported for web clients.
+
+Wire format: `SCRIBBLE_GIF:senderLen,urlLen:sender+url`
+
+```javascript
+var sc = new Scribble();
+sc.src = "https://example.com/drawing.png";
+
+// Envía la URL como SCRIBBLE_GIF a un web client específico
+Users.byName("WebUser").scribbleGif(sc);
+
+// O con sender personalizado:
+Users.byName("WebUser").scribbleGif("Anon", sc);
+```
+
+If the scribble has no URL (base64 only), use `scribble()` instead — `scribbleGif` requires a URL.
+
 ## Converting to/from avatar
 
 ```javascript
