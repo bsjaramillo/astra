@@ -18,7 +18,7 @@ if (File.exists("count.txt")) print("count file exists");
 ```
 
 ### `load(name)` / `read(name)`
-Reads the file contents as a string.
+Reads the file contents as a string. **Blank/whitespace-only lines are stripped** (sb0t parity), and the remaining lines are joined with `\n`.
 
 ```javascript
 var n = File.load("count.txt") || "0";

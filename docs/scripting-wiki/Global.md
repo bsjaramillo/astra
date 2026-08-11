@@ -131,11 +131,11 @@ function onLoad() {
 
 ```javascript
 scriptName();   // name of this script's folder
-tickCount();    // Date.now() in ms
-byteLength(s);  // length of s in UTF-8 bytes
-stripColors(s); // removes IRC color codes
-escapeUtf(s);   // encodeURIComponent(s)
-clrName(obj);   // CLR-style type name, e.g. "scripting.Objects.JSUser"
+tickCount();    // server monotonic tick counter (NOT Date.now())
+byteLength(s);  // length of s in UTF-8 bytes; -1 if null/undefined
+stripColors(s); // removes Ares/IRC color codes (\x02-\x09, \xAD)
+escapeUtf(s);   // \xNN / \uNNNN hex escapes for non-alphanumeric chars
+clrName(obj);   // type info string, e.g. "scripting.Objects.JSUser"
 ```
 
 ## Hashing / encoding
@@ -147,11 +147,13 @@ astraBase64Encode("hello"); // base64
 astraBase64Decode("aGVsbG8=");
 ```
 
-## @eval
+## ScriptInRoom (eval from chat)
 
-Code typed in chat prefixed with `@` is evaluated in the first loaded script (Owner only). `userobj` is preset to the sender.
+When `script_in_room = true` in the server config, Owners can execute JS directly from the chat. `userobj` is preset to the sender.
 
 ```
-@print("1+1 = " + (1+1))
-@userobj.sendPM("hi from eval")
+@print("silent eval, text cancelled")
+1+2           → prints "3" to the room (if result is not undefined)
 ```
+
+Text starting with `@` runs silently (the original chat text is cancelled). Any other text is evaluated as JS; if the result is not `undefined`, it's printed to the room from the bot.

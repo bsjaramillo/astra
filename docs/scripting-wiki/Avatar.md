@@ -10,7 +10,7 @@ var av = new Avatar(base64string);
 
 | Property | What it does |
 |---|---|
-| `src` | Base64 data (get/set) |
+| `src` | Base64 data (get/set). Also accepts `http://`/`https://` URLs for `download()`. |
 | `size` | Image size in bytes (-1 if empty) |
 | `oncomplete` | Callback used with `download()` |
 

@@ -1,6 +1,6 @@
 # Scribble
 
-A scribble (drawn image) object, created from a base64 string.
+A scribble (drawn image) object, created from a base64 string or downloaded from a URL.
 
 ```javascript
 var s = new Scribble(base64string);
@@ -10,7 +10,7 @@ var s = new Scribble(base64string);
 
 | Property | What it does |
 |---|---|
-| `src` | Base64 data (get/set) |
+| `src` | Base64 data (get/set). Also accepts `http://`/`https://` URLs for `download()`. |
 | `size` | Image size in bytes (-1 if empty) |
 | `oncomplete` | Callback used with `download()` |
 
@@ -20,18 +20,24 @@ var s = new Scribble(base64string);
 |---|---|
 | `save(path)` | Save to `<script>/data/<path>` |
 | `load(path)` | Load from a file into the object |
-| `download(url)` | Fetch the image from a URL (async) |
+| `download(url?)` | Fetch the image from a URL (async). If no URL is given, uses `scribble.src`. |
 
-## Example: relay a scribble to a user
+## Download and send to all users
 
 ```javascript
-function onCommand(user, command, target, args) {
-    if (command === "scrib") {
-        var img = new Scribble(Base64.encode("...")); // a drawn image
-        target.scribble(img);
-    }
+function sendScribble(url) {
+  var scribble = new Scribble();
+  scribble.oncomplete = function (e) {
+    if (!e || e.__id < 0) return;
+    Users.local(function (u) {
+      u.scribble(e);
+    });
+  };
+  scribble.download(url);
 }
 ```
+
+You can also set `scribble.src = url` and call `scribble.download()` without arguments — both patterns work.
 
 ## Converting to/from avatar
 

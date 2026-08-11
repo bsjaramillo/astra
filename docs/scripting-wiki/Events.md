@@ -189,4 +189,4 @@ function onVroomJoinCheck(user, vroom) {
 ## Not wired (sb0t parity only)
 
 These handlers exist in the engine but the server does not dispatch them yet:
-`onPartBefore`, `onUserUpdate`, `onTextAfter`, `onEmoteAfter`, `onIgnoredStateChanged`, `onLinked`, `onUnlinked`, `onLinkError`, `onLinkedAdminDisabled`.
+`onPartBefore`, `onUserUpdate`, `onTextAfter`, `onEmoteAfter`, `onLinked`, `onUnlinked`, `onLinkError`, `onLinkedAdminDisabled`.

@@ -18,7 +18,7 @@ user.version         // client version
 user.age             // age
 user.gender          // gender ("M"/"F")
 user.sex             // alias of gender
-user.country         // country code
+user.country         // country name (string, e.g. "Argentina")
 user.region          // region
 user.fileCount       // shared files
 user.port            // client port
@@ -108,7 +108,7 @@ for (var i = 0; i < u.ignores.count; i++) {
 | `setTopic(topic)` | Set the topic for that user |
 | `nudge([sender])` | Send a cb0t nudge (default sender = bot) |
 | `setUrl(addr, text)` | Send a URL only to this user; no args = clear |
-| `scribble(img)` / `scribble(sender, img)` | Send a directed scribble |
+| `scribble(img)` / `scribble(sender, img)` | Send a directed scribble (works for cb0t and web clients) |
 | `restoreAvatar()` | Restore the avatar the client originally sent |
 | `getASN()` | ASN number or `null` |
 
