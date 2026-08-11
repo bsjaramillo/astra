@@ -1030,10 +1030,20 @@ pub fn dispatch_builtin(
             handle_addgreet(ctx, user, args);
             (true, vec![])
         }
-        // `/pmgreetmsg on|off` (Host, paridad Eval.PMGreetMsg): toggle del
-        // greet por PM al entrar. Distinto de /addgreetmsg (añade un greet).
+        // `/pmgreetmsg on|off|<text>` (Host, paridad Eval.PMGreetMsg): toggle del
+        // greet por PM al entrar o setear el texto personalizado.
         "pmgreetmsg" => {
-            handle_room_flag(ctx, user, &cmd, args);
+            let a = args.trim();
+            let cmd_lower = a.to_ascii_lowercase();
+            if cmd_lower == "on" || cmd_lower == "off" {
+                handle_room_flag(ctx, user, &cmd, args);
+            } else if !a.is_empty() {
+                // Setter de texto (paridad Greets.SetPM de sb0t).
+                handle_pmgreetmsg_text(ctx, user, a);
+            } else {
+                // Sin args: mostrar estado.
+                handle_room_flag(ctx, user, &cmd, "");
+            }
             (true, vec![])
         }
         "remgreetmsg" => {
@@ -1551,8 +1561,30 @@ fn send_level_too_low(ctx: &AppContext, user: &Arc<AresUser>, target: &Arc<AresU
     );
 }
 
+/// Gate de link de sb0t: si el admin viene de un link (leaf) y el target es
+/// local al hub y no es Regular, la acción se bloquea. Evita que admins de
+/// hojas linkeadas moderen a admins del hub.
+fn check_link_gate(ctx: &AppContext, admin: &Arc<AresUser>, target: &Arc<AresUser>) -> bool {
+    let admin_name = admin.name.read().clone();
+    let target_name = target.name.read().clone();
+    let admin_is_linked = ctx.link_users.read().iter().any(|(_, n)| n == &admin_name);
+    let target_is_linked = ctx.link_users.read().iter().any(|(_, n)| n == &target_name);
+    // sb0t: if (!target.Link.IsLinked && admin.Link.IsLinked)
+    //          if (target.Level != ILevel.Regular) return;
+    if admin_is_linked && !target_is_linked {
+        if *target.level.read() > ILevel::Regular {
+            return false; // bloquear
+        }
+    }
+    true
+}
+
 fn announce_admin_action(ctx: &AppContext, issuer: &Arc<AresUser>, key: &str, target: &str) {
-    announce_admin_action_as(ctx, issuer, key, "+n", target);
+    announce_admin_action_as(ctx, issuer, key, "+n", target, None);
+}
+
+fn announce_admin_action_with_reason(ctx: &AppContext, issuer: &Arc<AresUser>, key: &str, target: &str, reason: &str) {
+    announce_admin_action_as(ctx, issuer, key, "+n", target, Some(reason));
 }
 
 /// Igual que [`announce_admin_action`] pero eligiendo el placeholder del
@@ -1563,6 +1595,7 @@ fn announce_admin_action_as(
     key: &str,
     placeholder: &str,
     subject: &str,
+    reason: Option<&str>,
 ) {
     let signer = if ctx.room_flags.get("stealth")
         || issuer.cloaked.load(std::sync::atomic::Ordering::Relaxed)
@@ -1571,10 +1604,16 @@ fn announce_admin_action_as(
     } else {
         issuer.name.read().clone()
     };
-    ctx.broadcast_print(
-        &ctx.templates
-            .render(key, &[(placeholder, subject), ("+a", &signer)]),
-    );
+    let mut text = ctx.templates
+        .render(key, &[(placeholder, subject), ("+a", &signer)]);
+    if let Some(reason) = reason {
+        if !reason.is_empty() {
+            text.push_str(" [");
+            text.push_str(reason);
+            text.push(']');
+        }
+    }
+    ctx.broadcast_print(&text);
 }
 
 fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
@@ -1583,14 +1622,14 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
         return false;
     }
 
-    let target_name = args.trim();
-    if target_name.is_empty() {
-        send_system_line(ctx, user, "Usage: /ban <nick>");
-        return false;
-    }
-
-    let Some(target) = find_target(ctx, target_name) else {
-        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
+    let (target, reason) = find_target_and_args(ctx, args);
+    let reason = reason.trim();
+    let Some(target) = target else {
+        if args.trim().is_empty() {
+            send_system_line(ctx, user, "Usage: /ban <nick> [reason]");
+        } else {
+            send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
+        }
         return false;
     };
 
@@ -1599,6 +1638,11 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     // Owner. Lo mismo cubre a `#hostban`, que delega aquí.
     if !outranks(user, &target) {
         send_level_too_low(ctx, user, &target);
+        return false;
+    }
+
+    // sb0t gate de link: evita que admin de leaf modere a no-Regulars del hub.
+    if !check_link_gate(ctx, user, &target) {
         return false;
     }
 
@@ -1625,7 +1669,9 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
         ),
     );
     send_system_line(ctx, &target, &ctx.templates.get("ban.target"));
-
+    if !reason.is_empty() {
+        send_system_line(ctx, &target, &format!("Reason: {}", reason));
+    }
     // Registrar la acción para /banstats.
     ctx.record_ban(
         &user.name.read(),
@@ -1645,7 +1691,7 @@ fn handle_ban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
     });
 
     // Anuncio público (AdminAction#0 de sb0t).
-    announce_admin_action(ctx, user, "adminaction.ban", &target.name.read().clone());
+    announce_admin_action_with_reason(ctx, user, "adminaction.ban", &target.name.read().clone(), reason);
 
     // Expulsión inmediata del pool para reflejar el ban en runtime.
     force_part_user(ctx, &target);
@@ -1658,18 +1704,22 @@ fn handle_ban_timed(ctx: &AppContext, user: &Arc<AresUser>, args: &str, secs: i6
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
         return;
     }
-    let target_name = args.trim();
-    if target_name.is_empty() {
-        send_system_line(ctx, user, &format!("Usage: /ban{} <nick>", secs / 60));
-        return;
-    }
-    let Some(target) = find_target(ctx, target_name) else {
-        send_system_line(ctx, user, "User not found.");
+    let (target, reason) = find_target_and_args(ctx, args);
+    let reason = reason.trim();
+    let Some(target) = target else {
+        if args.trim().is_empty() {
+            send_system_line(ctx, user, &format!("Usage: /ban{} <nick> [reason]", secs / 60));
+        } else {
+            send_system_line(ctx, user, "User not found.");
+        }
         return;
     };
     // sb0t Eval.Ban10:96 / Ban60:117 — mismo gate de nivel que `#ban`.
     if !outranks(user, &target) {
         send_level_too_low(ctx, user, &target);
+        return;
+    }
+    if !check_link_gate(ctx, user, &target) {
         return;
     }
     let ident = ctx.bans.ban_with_expiry(
@@ -1696,8 +1746,11 @@ fn handle_ban_timed(ctx: &AppContext, user: &Arc<AresUser>, args: &str, secs: i6
         &target,
         &format!("You have been banned from this room for {} minutes.", mins),
     );
+    if !reason.is_empty() {
+        send_system_line(ctx, &target, &format!("Reason: {}", reason));
+    }
     let key = if secs <= 600 { "adminaction.ban10" } else { "adminaction.ban60" };
-    announce_admin_action(ctx, user, key, &target.name.read().clone());
+    announce_admin_action_with_reason(ctx, user, key, &target.name.read().clone(), reason);
     ctx.record_ban(
         &user.name.read(),
         &target.name.read(),
@@ -1723,6 +1776,8 @@ fn handle_unkiddy(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     };
     target.kiddied.store(false, std::sync::atomic::Ordering::Relaxed);
     send_system_line(ctx, user, &format!("Kiddy mode off for '{}'.", target_name));
+    // Persistir a disco.
+    let _ = ctx.db.remove_user_state(target_name, "kiddy");
 }
 
 fn handle_unban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> bool {
@@ -1802,14 +1857,27 @@ fn handle_whois(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     // Formato multilínea de sb0t (Category.Whois #0-9).
     let registered = matches!(ctx.accounts.find_by_guid(&target.guid), Ok(Some(_)));
     let name = target.name.read().clone();
+    let org_name = {
+        let org = target.org_name.read().clone();
+        if org.is_empty() { name.clone() } else { org }
+    };
+    let asn = ctx.geoip.lookup_asn(target.external_ip)
+        .map(|a| format!("AS{}", a))
+        .unwrap_or_else(|| "N/A".to_string());
+    let is_linked = ctx.link_users.read().iter().any(|(_, n)| n == &name);
+    let link_display = if is_linked { "True" } else { "False" };
+    let id_display = if is_linked { "linked".to_string() } else { target.id.to_string() };
     let lines = [
         ctx.templates.render("whois.name", &[("+n", &name)]),
+        ctx.templates.render("whois.orgname", &[("+n", &org_name)]),
+        ctx.templates.render("whois.asn", &[("+n", &asn)]),
         ctx.templates.render("whois.extip", &[("+n", &target.external_ip.to_string())]),
         ctx.templates.render("whois.localip", &[("+n", &target.local_ip.to_string())]),
         ctx.templates.render("whois.dataport", &[("+n", &target.data_port.to_string())]),
         ctx.templates.render("whois.version", &[("+n", &target.version)]),
         ctx.templates.render("whois.vroom", &[("+n", &target.vroom.read().to_string())]),
-        ctx.templates.render("whois.id", &[("+n", &target.id.to_string())]),
+        ctx.templates.render("whois.id", &[("+n", &id_display)]),
+        ctx.templates.render("whois.linked", &[("+n", &link_display)]),
         ctx.templates.render("whois.registered", &[("+n", if registered { "True" } else { "False" })]),
     ];
     for line in lines {
@@ -1834,14 +1902,14 @@ fn handle_kick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         return;
     }
 
-    let target_name = args.trim();
-    if target_name.is_empty() {
-        send_system_line(ctx, user, "Usage: /kick <nick>");
-        return;
-    }
-
-    let Some(target) = find_target(ctx, target_name) else {
-        send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
+    let (target, reason) = find_target_and_args(ctx, args);
+    let reason = reason.trim();
+    let Some(target) = target else {
+        if args.trim().is_empty() {
+            send_system_line(ctx, user, "Usage: /kick <nick> [reason]");
+        } else {
+            send_system_line(ctx, user, &ctx.templates.get("error.user_not_found"));
+        }
         return;
     };
 
@@ -1850,10 +1918,18 @@ fn handle_kick(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         return;
     }
 
+    if !check_link_gate(ctx, user, &target) {
+        return;
+    }
+
+    let target_name = target.name.read().clone();
     send_system_line(ctx, &target, &ctx.templates.get("kick.target"));
+    if !reason.is_empty() {
+        send_system_line(ctx, &target, &format!("Reason: {}", reason));
+    }
     force_part_user(ctx, &target);
-    send_system_line(ctx, user, &ctx.templates.render("kick.confirm", &[("+n", target_name)]));
-    announce_admin_action(ctx, user, "adminaction.kick", target_name);
+    send_system_line(ctx, user, &ctx.templates.render("kick.confirm", &[("+n", &target_name)]));
+    announce_admin_action_with_reason(ctx, user, "adminaction.kick", &target_name, reason);
 }
 
 fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: bool) {
@@ -1876,6 +1952,9 @@ fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: boo
 
     if muzzle && !outranks(user, &target) {
         send_level_too_low(ctx, user, &target);
+        return;
+    }
+    if muzzle && !check_link_gate(ctx, user, &target) {
         return;
     }
 
@@ -1916,6 +1995,8 @@ fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: boo
         send_system_line(ctx, user, &ctx.templates.render("unmuzzle.confirm", &[("+n", target_name)]));
         announce_admin_action(ctx, user, "adminaction.unmuzzle", target_name);
     }
+    // Persistir a disco (paridad sb0t: Muzzles persiste en archivo).
+    let _ = ctx.db.set_user_state(target_name, "muzzle", if muzzle { "1" } else { "0" });
 }
 
 fn handle_pmall(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
@@ -2847,6 +2928,29 @@ fn handle_listgreets(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
 }
 
+/// `/pmgreetmsg <texto>`: activa el PM greet y guarda el texto
+/// personalizado (paridad `Greets.SetPM` de sb0t).
+fn handle_pmgreetmsg_text(ctx: &AppContext, user: &Arc<AresUser>, text: &str) {
+    if *user.level.read() < ILevel::Owner {
+        send_system_line(ctx, user, "Access denied. Owner required.");
+        return;
+    }
+    ctx.room_flags.set("pmgreetmsg", true);
+    *ctx.pm_greet_text.write() = text.to_string();
+    let signer = if ctx.room_flags.get("stealth")
+        || user.cloaked.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        ctx.settings.room_name.clone()
+    } else {
+        user.name.read().clone()
+    };
+    ctx.broadcast_print(
+        &ctx.templates
+            .render("greetings.pmgreet.set", &[("+n", &signer)]),
+    );
+    send_system_line(ctx, user, &format!("PM greet message set."));
+}
+
 // ============================================================================
 // Word filters — requiere Admin+
 // ============================================================================
@@ -3428,15 +3532,16 @@ fn handle_rangeban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Access denied. Admin+ required.");
         return;
     }
-    let prefix = args.trim();
+    // sb0t sanitiza: quita comillas y asteriscos del prefijo (Eval.RangeBan:437).
+    let prefix = args.trim().replace('"', "").replace('*', "").trim().to_string();
     if prefix.is_empty() {
         send_system_line(ctx, user, "Usage: /rangeban <ip-prefix>");
         return;
     }
-    if ctx.range_bans.add(prefix) {
-        send_system_line(ctx, user, &format!("Range ban added: {}", prefix.replace('*', "")));
+    if ctx.range_bans.add(&prefix) {
+        send_system_line(ctx, user, &format!("Range ban added: {}", prefix));
         // AdminAction #17 (sujeto = el rango, placeholder +r).
-        announce_admin_action_as(ctx, user, "adminaction.rangeban", "+r", prefix);
+        announce_admin_action_as(ctx, user, "adminaction.rangeban", "+r", &prefix, None);
     } else {
         send_system_line(ctx, user, "Range ban already exists (or invalid).");
     }
@@ -3461,7 +3566,7 @@ fn handle_rangeunban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     if removed {
         send_system_line(ctx, user, "Range ban removed.");
         // AdminAction #18.
-        announce_admin_action_as(ctx, user, "adminaction.rangeunban", "+r", arg);
+        announce_admin_action_as(ctx, user, "adminaction.rangeunban", "+r", arg, None);
     } else {
         send_system_line(ctx, user, "No matching range ban.");
     }
@@ -3488,14 +3593,31 @@ fn handle_asnban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Access denied. Admin+ required.");
         return;
     }
-    let Ok(asn) = args.trim().parse::<u32>() else {
-        send_system_line(ctx, user, "Usage: /asnban <asn>");
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_system_line(ctx, user, "Usage: /asnban <asn|nick>");
+        return;
+    }
+    // Modo 1: número directo (ASN explícito).
+    let asn = if let Ok(n) = arg.parse::<u32>() {
+        n
+    } else if let Some(target) = find_target(ctx, arg) {
+        // Modo 2: target online — extraer ASN de su IP (paridad sb0t).
+        match ctx.geoip.lookup_asn(target.external_ip) {
+            Some(a) => a,
+            None => {
+                send_system_line(ctx, user, &format!("Could not determine ASN for '{}'.", arg));
+                return;
+            }
+        }
+    } else {
+        send_system_line(ctx, user, "User not found. To ban an ASN directly use the number (e.g. /asnban 12345).");
         return;
     };
     if ctx.asn_bans.add(asn) {
         send_system_line(ctx, user, &format!("ASN {} banned.", asn));
         // AdminAction #25.
-        announce_admin_action_as(ctx, user, "adminaction.asnban", "+r", &asn.to_string());
+        announce_admin_action_as(ctx, user, "adminaction.asnban", "+r", &asn.to_string(), None);
     } else {
         send_system_line(ctx, user, "ASN already banned (or invalid).");
     }
@@ -3506,16 +3628,38 @@ fn handle_asnunban(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Access denied. Admin+ required.");
         return;
     }
-    let Ok(asn) = args.trim().parse::<u32>() else {
-        send_system_line(ctx, user, "Usage: /asnunban <asn>");
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_system_line(ctx, user, "Usage: /asnunban <asn|index>");
+        return;
+    }
+    // Modo 1: si el argumento es un índice válido dentro de la lista,
+    // eliminar por índice (paridad sb0t `AsnBans.RemoveIndex`).
+    // Modo 2: si no, intentar como número de ASN.
+    let removed = if let Ok(index) = arg.parse::<usize>() {
+        let list = ctx.asn_bans.list();
+        if index < list.len() {
+            ctx.asn_bans.remove_at(index)
+        } else {
+            // No es un índice válido, intentar como ASN.
+            let asn = arg.parse::<u32>().unwrap_or(0);
+            if asn > 0 && ctx.asn_bans.remove(asn) {
+                Some(asn)
+            } else {
+                None
+            }
+        }
+    } else {
+        send_system_line(ctx, user, "Invalid ASN.");
         return;
     };
-    if ctx.asn_bans.remove(asn) {
-        send_system_line(ctx, user, &format!("ASN {} unbanned.", asn));
-        // AdminAction #26.
-        announce_admin_action_as(ctx, user, "adminaction.asnunban", "+r", &asn.to_string());
-    } else {
-        send_system_line(ctx, user, "ASN not banned.");
+    match removed {
+        Some(asn) => {
+            send_system_line(ctx, user, &format!("ASN {} unbanned.", asn));
+            // AdminAction #26.
+            announce_admin_action_as(ctx, user, "adminaction.asnunban", "+r", &asn.to_string(), None);
+        }
+        None => send_system_line(ctx, user, "ASN not banned or invalid index."),
     }
 }
 
@@ -3685,8 +3829,8 @@ fn handle_changename(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 }
 
 fn handle_oldname(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
-    if !can_edit_topic(user) {
-        send_system_line(ctx, user, "Access denied. Moderator+ required.");
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
         return;
     }
     let target_name = args.trim();
@@ -3694,14 +3838,51 @@ fn handle_oldname(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Usage: /oldname <nick>");
         return;
     }
-    match find_target(ctx, target_name) {
-        Some(t) => {
-            let org = t.org_name.read().clone();
-            let org = if org.is_empty() { t.name.read().clone() } else { org };
-            send_system_line(ctx, user, &format!("'{}' original name: {}", target_name, org));
-        }
-        None => send_system_line(ctx, user, "User not found."),
+    let Some(target) = find_target(ctx, target_name) else {
+        send_system_line(ctx, user, "User not found.");
+        return;
+    };
+    let org_name = {
+        let org = target.org_name.read().clone();
+        if org.is_empty() { target.name.read().clone() } else { org }
+    };
+    if org_name.is_empty() {
+        send_system_line(ctx, user, "No original name recorded for this user.");
+        return;
     }
+    if ctx.user_pool.get_by_name(&org_name).is_some() {
+        send_system_line(ctx, user, "That name is already in use.");
+        return;
+    }
+    let old_name = target.name.read().clone();
+    *target.name.write() = org_name.clone();
+    ctx.user_pool.rename(target.id, &old_name, &org_name);
+
+    let mut part_user = AresUser::new(target.id, target.external_ip, target.guid);
+    part_user.logged_in = true;
+    *part_user.name.write() = old_name.clone();
+    for other in ctx.user_pool.users() {
+        if other.logged_in
+            && *other.vroom.read() == *target.vroom.read()
+            && !other.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = other.send(outbound::build_part_c(&part_user, other.ares_crypto));
+            let _ = other.send(outbound::build_join_or_userlist_c(&target, other.ares_crypto));
+        }
+    }
+    ctx.publish_link_event(server_core::LinkEvent::NickChanged {
+        origin: None,
+        old_name: old_name.clone(),
+        user: server_core::LinkUserSnapshot::from_user(&target),
+    });
+    let issuer_name = user.name.read().clone();
+    let is_stealth = ctx.room_flags.get("stealth");
+    let display = if is_stealth { &ctx.settings.room_name } else { &issuer_name };
+    notify_mods(
+        ctx,
+        &ctx.templates.render("oldname.by", &[("+n", &org_name), ("+a", display)]),
+    );
+    send_system_line(ctx, user, &format!("Restored '{}' original name to '{}'.", old_name, org_name));
 }
 
 fn handle_changemessage(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
@@ -3725,6 +3906,8 @@ fn handle_changemessage(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     }
     let target_name = target.name.read().clone();
     *target.personal_message.lock() = text.to_string();
+    // Persistir para futuros reconnects (paridad `AvatarPMManager.AddPM` de sb0t).
+    ctx.forced_pms.write().insert(target.guid, text.to_string());
     ctx.publish_link_event(server_core::LinkEvent::PersonalMessage {
         origin: None,
         name: target_name.clone(),
@@ -3807,10 +3990,12 @@ fn handle_echo(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         *target.echo_text.write() = None;
         send_system_line(ctx, user, &format!("Cleared echo on '{}'.", target_name));
         announce_admin_action(ctx, user, "adminaction.unecho", &target_name);
+        let _ = ctx.db.remove_user_state(&target_name, "echo");
     } else {
         *target.echo_text.write() = Some(text.to_string());
         send_system_line(ctx, user, &format!("Echo set on '{}'.", target_name));
         announce_admin_action(ctx, user, "adminaction.echo", &target_name);
+        let _ = ctx.db.set_user_state(&target_name, "echo", text);
     }
 }
 
@@ -3833,22 +4018,18 @@ fn handle_clone(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_system_line(ctx, user, "Usage: /clone <nick|id> <text>");
         return;
     }
-    // Difunde un mensaje público/emote como si lo dijera el target.
     let name = target.name.read().clone();
     let issuer_name = user.name.read().clone();
+    let is_stealth = ctx.room_flags.get("stealth");
+    let display = if is_stealth { &ctx.settings.room_name } else { &issuer_name };
     notify_mods(
         ctx,
-        &ctx.templates.render("clone.by", &[("+n", &name), ("+a", &issuer_name)]),
+        &ctx.templates.render("clone.by", &[("+n", &name), ("+a", display)]),
     );
-    let emote = text.strip_prefix("/me ");
-    let vroom = *target.vroom.read();
-    for u in ctx.user_pool.users() {
-        if u.logged_in && *u.vroom.read() == vroom && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
-            match emote {
-                Some(e) => { let _ = u.send_emote(&name, e); }
-                None => { let _ = u.send_public(&name, text); }
-            }
-        }
+    if let Some(emote) = text.strip_prefix("/me ") {
+        let _ = target.send_emote(&name, emote);
+    } else {
+        let _ = target.send_public(&name, text);
     }
     send_system_line(ctx, user, &format!("Cloned message as '{}'.", name));
 }
@@ -3871,16 +4052,12 @@ fn handle_kiddy(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
         send_level_too_low(ctx, user, &target);
         return;
     }
-    let now_on = !target.kiddied.load(std::sync::atomic::Ordering::Relaxed);
-    target.kiddied.store(now_on, std::sync::atomic::Ordering::Relaxed);
-    send_system_line(
-        ctx,
-        user,
-        &format!("Kiddy mode {} for '{}'.", if now_on { "on" } else { "off" }, target_name),
-    );
-    // AdminAction #11/#12.
-    let key = if now_on { "adminaction.kiddy" } else { "adminaction.unkiddy" };
-    announce_admin_action(ctx, user, key, &target.name.read().clone());
+    target.kiddied.store(true, std::sync::atomic::Ordering::Relaxed);
+    send_system_line(ctx, user, &format!("Kiddy mode on for '{}'.", target_name));
+    // Persistir a disco (paridad sb0t: Kiddied persiste en archivo).
+    let _ = ctx.db.set_user_state(target_name, "kiddy", "1");
+    // AdminAction #11.
+    announce_admin_action(ctx, user, "adminaction.kiddy", &target.name.read().clone());
 }
 
 /// `/mtimeout`. **Paridad sb0t (`Eval.MTimeout`): NO es por usuario** — fija
@@ -4158,15 +4335,22 @@ fn handle_clearscreen(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
         return;
     }
-    // Paridad sb0t Eval.ClearScreen: 500 líneas vacías a cada cliente y
-    // anuncio "screen cleared by +n" (stealth-aware).
+    // Paridad sb0t Eval.ClearScreen: para clientes Ares con HTML, 400 líneas
+    // de `\x000500\x000300.` (separador invisible + punto negro); para el
+    // resto, 500 líneas vacías.
     let bot = ctx.settings.bot_name.clone();
     for u in ctx.user_pool.users() {
         if !u.logged_in || u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
             continue;
         }
-        for _ in 0..500 {
-            let _ = u.print(&bot, "");
+        if u.supports_html {
+            for _ in 0..400 {
+                let _ = u.print(&bot, "\x000500\x000300.");
+            }
+        } else {
+            for _ in 0..500 {
+                let _ = u.print(&bot, "");
+            }
         }
     }
     let by = if ctx.room_flags.get("stealth") {
@@ -5192,6 +5376,14 @@ fn handle_text_effect(
         TextEffect::Paint => (&target.painted, "paint", "adminaction.unpaint"),
     };
     flag.store(enable, std::sync::atomic::Ordering::Relaxed);
+    // Persistir a disco lowered (paridad sb0t: Lowered persiste en archivo).
+    if matches!(effect, TextEffect::Lower) {
+        if enable {
+            let _ = ctx.db.set_user_state(target_name, "lowered", "1");
+        } else {
+            let _ = ctx.db.remove_user_state(target_name, "lowered");
+        }
+    }
     send_system_line(
         ctx,
         user,
@@ -6071,12 +6263,15 @@ mod tests {
 
         // Formato multilínea de sb0t (Category.Whois).
         assert_eq!(next_pvt_text(&mut alice_rx), "Name: Bob");
+        assert_eq!(next_pvt_text(&mut alice_rx), "Original Name: Bob");
+        assert_eq!(next_pvt_text(&mut alice_rx), "ASN: N/A");
         assert_eq!(next_pvt_text(&mut alice_rx), "External IP: 10.0.0.2");
         assert_eq!(next_pvt_text(&mut alice_rx), "Local IP: 10.0.0.2");
         let _dataport = next_pvt_text(&mut alice_rx);
         let _version = next_pvt_text(&mut alice_rx);
         assert_eq!(next_pvt_text(&mut alice_rx), "Vroom: 0");
         assert_eq!(next_pvt_text(&mut alice_rx), "ID: 2");
+        let _linked = next_pvt_text(&mut alice_rx);
         assert_eq!(next_pvt_text(&mut alice_rx), "Registered: False");
         // Línea extra de Astra con level/files/guid.
         let extra = next_pvt_text(&mut alice_rx);
@@ -7510,10 +7705,10 @@ mod tests {
 
         let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "rangeban", "1.2.3.*");
         assert_eq!(next_pvt_text(&mut alice_rx), "Range ban added: 1.2.3.");
-        // Anuncio público AdminAction#17 (sujeto = el rango).
+        // Anuncio público AdminAction#17 (sujeto = el rango, sanitizado).
         assert_eq!(
             next_pvt_text(&mut alice_rx),
-            "1.2.3.* has been range banned by Alice"
+            "1.2.3. has been range banned by Alice"
         );
         assert!(ctx.range_bans.is_banned("1.2.3.55".parse().unwrap()));
 

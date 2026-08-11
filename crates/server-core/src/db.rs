@@ -276,6 +276,13 @@ impl Database {
                 text TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS user_state (
+                name TEXT NOT NULL,
+                effect TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (name, effect)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -1505,6 +1512,43 @@ impl Database {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Persiste un estado de usuario por nombre (paridad sb0t: `Muzzles` /
+    /// `Kiddied` / `Lowered` / `Echo` en disco). `effect` es "muzzle",
+    /// "lowered", "kiddy", "echo"; `value` es "1"/"0" o el texto de echo.
+    pub fn set_user_state(&self, name: &str, effect: &str, value: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO user_state (name, effect, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name, effect) DO UPDATE SET value = excluded.value",
+            params![name, effect, value],
+        )?;
+        Ok(())
+    }
+
+    /// Obtiene un estado de usuario por nombre y efecto.
+    pub fn get_user_state(&self, name: &str, effect: &str) -> DbResult<Option<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT value FROM user_state WHERE name = ?1 AND effect = ?2"
+        )?;
+        let result = stmt.query_row(params![name, effect], |row| row.get::<_, String>(0));
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Elimina un estado de usuario.
+    pub fn remove_user_state(&self, name: &str, effect: &str) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM user_state WHERE name = ?1 AND effect = ?2",
+            params![name, effect],
+        )?;
+        Ok(())
     }
 }
 

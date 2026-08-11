@@ -516,6 +516,13 @@ pub struct AppContext {
     /// `Users.records()` del scripting, paridad sb0t). Cap 50, más reciente
     /// al frente.
     pub user_records: parking_lot::RwLock<std::collections::VecDeque<UserRecord>>,
+    /// Mensajes personales forzados (paridad `AvatarPMManager` de sb0t).
+    /// `/changemessage` almacena aquí el texto por GUID; en cada login se
+    /// reaplica automáticamente aunque el cliente mande otro PM.
+    pub forced_pms: parking_lot::RwLock<std::collections::HashMap<[u8; 16], String>>,
+    /// Texto del PM greet (paridad `Greets.SetPM` de sb0t). Cuando no está
+    /// vacío, `/pmgreetmsg` usa este texto fijo en vez del greet rotativo.
+    pub pm_greet_text: parking_lot::RwLock<String>,
 }
 
 /// Registro histórico de un usuario que estuvo conectado (para
@@ -638,6 +645,8 @@ impl AppContext {
             message_history: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             link_events,
             user_records: parking_lot::RwLock::new(std::collections::VecDeque::new()),
+            forced_pms: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            pm_greet_text: parking_lot::RwLock::new(String::new()),
         }
     }
 

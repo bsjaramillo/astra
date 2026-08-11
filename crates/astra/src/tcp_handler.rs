@@ -674,6 +674,22 @@ async fn process_handshake(
                         name: user_arc.name.read().clone(),
                     });
 
+                    // Restaurar estados persistidos (paridad sb0t: Muzzles /
+                    // Kiddied / Lowered / Echo en disco, sobreviven reinicio).
+                    let name = user_arc.name.read().clone();
+                    if let Ok(Some(_)) = ctx.db.get_user_state(&name, "muzzle") {
+                        user_arc.muzzled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Ok(Some(_)) = ctx.db.get_user_state(&name, "lowered") {
+                        user_arc.lowered.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Ok(Some(_)) = ctx.db.get_user_state(&name, "kiddy") {
+                        user_arc.kiddied.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Ok(Some(text)) = ctx.db.get_user_state(&name, "echo") {
+                        *user_arc.echo_text.write() = Some(text);
+                    }
+
                     if needs_captcha_now {
                         let user_id = user_arc.id.to_string();
                         let challenge = ctx.captcha.create(user_id.clone());
@@ -1299,6 +1315,20 @@ fn route_command_text(
     };
     if let Some((cmd, args)) = astra_commands::parse_command_raw(&slashed) {
         let (_handled, events) = astra_commands::dispatch_builtin(ctx, scripting, user, cmd, args);
+        // LogSend: notificar a suscriptores TODO comando de admins (paridad sb0t
+        // ServerEvents.Command:893). Excluye whisper/host/jsmsg como el original.
+        if *user.level.read() as u8 > server_core::ILevel::Regular as u8 {
+            let cmd_lower = cmd.to_ascii_lowercase();
+            if !cmd_lower.starts_with("whisper")
+                && !cmd_lower.starts_with("host")
+                && !cmd_lower.starts_with("jsmsg")
+            {
+                let text = format!("{} {}", cmd, args);
+                ctx.notify_subscribers(&text, |u| {
+                    u.sub_logsend.load(std::sync::atomic::Ordering::Relaxed)
+                });
+            }
+        }
         // Eventos side-effect del builtin (ej. AdminLevelChanged tras /ban).
         for ev in events {
             scripting.dispatch(ev);
@@ -1886,6 +1916,11 @@ async fn handle_personal_message(ctx: &AppContext, user: &Arc<server_core::user_
         debug!("personal message de '{}' bloqueado por script", user.name.read());
         return;
     }
+    // Reaplicar mensaje forzado por `/changemessage` (paridad `AvatarPMManager`).
+    let text = match ctx.forced_pms.read().get(&user.guid) {
+        Some(forced) if !forced.is_empty() => forced.clone(),
+        _ => text,
+    };
     *user.personal_message.lock() = text.clone();
 
     // Broadcast a la sala: cada uno recibe un "MSG_CHAT_SERVER_PERSONAL_MESSAGE"
@@ -1974,7 +2009,15 @@ fn send_greet(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
     // Paridad sb0t: `pmgreetmsg` = greet por PM al que entra; `greetmsg` =
     // greet público a la sala (Server.Print). Pueden estar ambos activos.
     if ctx.room_flags.get("pmgreetmsg") {
-        let _ = user.send_pvt(&ctx.settings.bot_name, &text);
+        let pm_text = {
+            let custom = ctx.pm_greet_text.read().clone();
+            if custom.is_empty() {
+                text.clone()
+            } else {
+                server_core::greets::render_greet(&custom, &gctx)
+            }
+        };
+        let _ = user.send_pvt(&ctx.settings.bot_name, &pm_text);
     }
     if ctx.room_flags.get("greetmsg") {
         ctx.broadcast_print(&text);

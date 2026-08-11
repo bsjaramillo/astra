@@ -118,6 +118,7 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     ("enabledisable.greetmsg.off", "+n has disabled the greet message"),
     ("enabledisable.pmgreetmsg.on", "+n has enabled the PM greet message"),
     ("enabledisable.pmgreetmsg.off", "+n has disabled the PM greet message"),
+    ("greetings.pmgreet.set", "+n has set the PM greet message"),
     ("enabledisable.caps.on", "+n has enabled CAPS monitoring"),
     ("enabledisable.caps.off", "+n has disabled CAPS monitoring"),
     ("enabledisable.anon.on", "+n has enabled Anon monitoring"),
@@ -172,17 +173,21 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     ("clearscreen.by", "screen cleared by +n"),
     // Whois (Category.Whois #0-9 de sb0t)
     ("whois.name", "Name: +n"),
+    ("whois.orgname", "Original Name: +n"),
+    ("whois.asn", "ASN: +n"),
     ("whois.extip", "External IP: +n"),
     ("whois.localip", "Local IP: +n"),
     ("whois.dataport", "Data Port: +n"),
     ("whois.version", "Version: +n"),
     ("whois.vroom", "Vroom: +n"),
     ("whois.id", "ID: +n"),
+    ("whois.linked", "Linked: +n"),
     ("whois.registered", "Registered: +n"),
     // Shout (Messaging#0 de sb0t)
     ("shout.line", "+n> [SHOUT] +t"),
     // Avisos a mods (Notification #15/#16 de sb0t)
     ("clone.by", "+n was cloned by +a"),
+    ("oldname.by", "+n has had their original name restored by +a"),
     ("move.by", "+n was moved to vroom +v by +a"),
     // Status actualizado (RoomInfo#6 de sb0t)
     ("status.updated", "+n has updated the host status"),

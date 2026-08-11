@@ -152,6 +152,18 @@ impl AsnBanManager {
         }
     }
 
+    /// Elimina el ASN en la posición de índice. Retorna el ASN eliminado
+    /// o `None` si el índice es inválido (paridad sb0t `AsnBans.RemoveIndex`).
+    pub fn remove_at(&self, index: usize) -> Option<u32> {
+        let mut cache = self.cache.write();
+        if index >= cache.len() {
+            return None;
+        }
+        let asn = cache.remove(index);
+        let _ = self.db.remove_asn_ban(asn);
+        Some(asn)
+    }
+
     /// Lista los ASN.
     pub fn list(&self) -> Vec<u32> {
         self.cache.read().clone()
