@@ -1175,18 +1175,18 @@ Scribble.prototype.load = function(path){ var b = __read_file_b64("" + path); if
 Scribble.prototype.download = function(url){
   if (typeof HttpRequest === "undefined") return false;
   var self = this;
-  // sb0t parity: si recibe URL o falsy, usar scribble.src (seteado como URL).
   var downloadUrl = url;
   if (downloadUrl == null || downloadUrl === 0 || ("" + downloadUrl).length < 5) {
     downloadUrl = self.__url;
   }
   if (!downloadUrl || ("" + downloadUrl).length < 5) return false;
+  self.__url = downloadUrl; // guardar URL para clientes web
   var r = new HttpRequest();
   r.src = downloadUrl;
-  r.utf = false; // binary data, native returns base64
+  r.utf = false;
   r.oncomplete = function(bytes){
     if (bytes != null && ("" + bytes).length){
-      self.__id = ScribbleImage_new("" + bytes); // native already returns base64 when utf=false
+      self.__id = ScribbleImage_new("" + bytes);
     }
     if (typeof self.oncomplete === "function") self.oncomplete(self);
   };
@@ -2102,36 +2102,61 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
             true
         }
         "scribble" => {
-            // Paridad sb0t `JSUser.Scribble`/`AresClient.Scribble`: manda un
-            // scribble dirigido a ESE usuario como CustomData
-            // `cb0t_scribble_once|first|chunk|last` (chunks de 4000 bytes).
-            // Solo custom clients. arg = JSON {"id": scribble_store_id, "s": sender}.
-            if !u.custom_client {
-                false
+            // sb0t parity: envía scribble dirigido a ESTE usuario.
+            // Custom clients (cb0t): cb0t_scribble_once. Web clients:
+            // SCRIBBLE_HEAD + SCRIBBLE_BLOCK via ws_text_sender.
+            let parsed = serde_json::from_str::<serde_json::Value>(&arg).ok();
+            let id = parsed
+                .as_ref()
+                .and_then(|v| v["id"].as_i64())
+                .unwrap_or(-1);
+            let sender = parsed
+                .as_ref()
+                .and_then(|v| v["s"].as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| bot.clone());
+            let bytes = if id < 0 {
+                None
             } else {
-                let parsed = serde_json::from_str::<serde_json::Value>(&arg).ok();
-                let id = parsed
-                    .as_ref()
-                    .and_then(|v| v["id"].as_i64())
-                    .unwrap_or(-1);
-                let sender = parsed
-                    .as_ref()
-                    .and_then(|v| v["s"].as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| bot.clone());
-                let bytes = if id < 0 {
-                    None
-                } else {
-                    SCRIBBLE_STORE.with(|store| store.borrow().get(id as usize).cloned())
-                };
-                match bytes {
-                    Some(img) if !img.is_empty() => {
+                SCRIBBLE_STORE.with(|store| store.borrow().get(id as usize).cloned())
+            };
+            match bytes {
+                Some(img) if !img.is_empty() => {
+                    if u.custom_client {
                         send_scribble_to_user(&u, &sender, &img);
                         true
+                    } else if let Some(tx) = &u.ws_text_sender {
+                        let b64 = base64_encode_bytes_to_string(&img);
+                        const CHUNK: usize = 30_000;
+                        let mut chunks: Vec<&str> = Vec::new();
+                        let mut pos = 0;
+                        let b = b64.as_bytes();
+                        while pos < b.len() {
+                            let end = (pos + CHUNK).min(b.len());
+                            chunks.push(&b64[pos..end]);
+                            pos = end;
+                        }
+                        const SCRIBBLE_H: u16 = 300;
+                        let head = format!(
+                            "SCRIBBLE_HEAD:{},{},{}:{}{}{}",
+                            sender.len(),
+                            chunks.len().to_string().len(),
+                            SCRIBBLE_H.to_string().len(),
+                            sender,
+                            chunks.len(),
+                            SCRIBBLE_H
+                        );
+                        let _ = tx.send(head);
+                        for c in &chunks {
+                            let _ = tx.send(format!("SCRIBBLE_BLOCK:{}:{}", c.len(), c));
+                        }
+                        true
+                    } else {
+                        false
                     }
-                    _ => false,
                 }
+                _ => false,
             }
         }
         _ => false,
