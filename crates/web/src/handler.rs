@@ -973,10 +973,17 @@ fn handle_ws_public(
             broadcast_announce_lines_ws(ctx, &sender_name, user.external_ip, &lines, &remainder);
         }
     }
+    // Efectos de castigo por-usuario (/paint, /kewl, /lower, /kiddy): el path
+    // TCP ya los aplica en handle_public; este path web no lo hacía.
+    let mut text = server_core::text_effects::apply_punish_effects(user, text);
+    // Caps monitoring de sala (paridad TCP).
+    if ctx.room_flags.get("caps") && server_core::text_effects::is_shouting(&text) {
+        text = text.to_lowercase();
+    }
     let name = user.name.read().clone();
     // Hook onTextBefore (paridad TCP): un script puede cancelar (None) o
     // REESCRIBIR el mensaje (Some(texto)).
-    let text = match scripting.check_text_before(&name, text) {
+    let text = match scripting.check_text_before(&name, &text) {
         Some(t) => t,
         None => return,
     };
