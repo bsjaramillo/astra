@@ -41,19 +41,57 @@ web, en cualquier plataforma.
 [astra-creator](https://github.com/bsjaramillo/astra-creator) es una TUI que
 crea y administra una o varias salas Astra sobre Docker: genera la config de
 cada una, las despliega y maneja su ciclo de vida (start/stop/logs/update)
-sin salir de la terminal.
+sin salir de la terminal. Requiere `docker` + `docker compose`.
+
+**Instalar:**
 
 ```bash
-# Instalar (necesita docker + docker compose):
+# Linux / macOS:
 curl -sSL https://raw.githubusercontent.com/bsjaramillo/astra-creator/main/install.sh | sh
 
-# Abrir la TUI y crear tu sala:
-astra-creator /srv/astra-salas
+# Windows (PowerShell):
+irm https://raw.githubusercontent.com/bsjaramillo/astra-creator/main/install.ps1 | iex
+
+# Con Cargo:
+cargo install --git https://github.com/bsjaramillo/astra-creator
 ```
 
-En la TUI: `a` agrega una sala (nombre, puerto, owner password y — si quieres
-HTTPS — un dominio), `D` la despliega. Cada sala es un contenedor independiente
-con su configuración y sus datos.
+**Usar:**
+
+```bash
+# Crea una carpeta donde se guardarán los archivos de config y datos:
+mkdir astra-servers && cd astra-servers
+
+# Abre la TUI (guarda su estado en el directorio actual):
+astra-creator
+```
+
+Atajos principales en la TUI:
+
+| Tecla | Acción |
+|---|---|
+| `a` | Agregar sala |
+| `e` | Editar sala seleccionada |
+| `d` | Eliminar sala (borra contenedor, volumen y carpeta de datos) |
+| `g` | Generar archivos (`astra.toml` + `docker-compose.yml`) sin tocar Docker |
+| `D` | **Deploy**: genera y levanta todas las salas (`docker compose up -d`) |
+| `s` / `x` | Start / Stop de la sala seleccionada |
+| `R` | **Restart**: reinicia la sala seleccionada |
+| `u` | **Update**: baja la última imagen y recrea la sala |
+| `U` | Update de todas las salas |
+| `l` | Ver logs de la sala |
+| `i` | Cambiar la imagen Docker de Astra |
+| `L` | Cambiar idioma (español / inglés) |
+| `?` / `h` | Menú de ayuda con todos los atajos |
+| `q` | Salir |
+
+En el formulario: `Tab`/`↑`/`↓` para moverse, `Espacio` para alternar switches,
+`Enter` para guardar, `Esc` para cancelar.
+
+Cada sala es un contenedor independiente con su puerto, su config y su volumen
+de datos. Si quieres HTTPS, pon un dominio en el campo "Dominio HTTPS" del
+formulario (con el DNS apuntando al servidor) y el deploy levanta automáticamente
+un [Caddy](https://caddyserver.com) con certificados de Let's Encrypt.
 
 ### Opción B — Docker manual
 
@@ -128,9 +166,11 @@ conectan directo al `:5009` (el protocolo Ares no soporta TLS).
 
 **Con astra-creator** (recomendado): pon un dominio en el campo
 "Dominio HTTPS" del formulario de la sala (con el DNS apuntando a tu servidor)
-y redespliega con `D`. Se levanta automáticamente un [Caddy](https://caddyserver.com)
-como reverse proxy con certificados de Let's Encrypt; varias salas pueden tener
-cada una su dominio compartiendo el mismo Caddy.
+y despliega con `D`. El deploy levanta automáticamente un
+[Caddy](https://caddyserver.com) como reverse proxy que obtiene y renueva solo
+los certificados de Let's Encrypt; varias salas pueden tener cada una su dominio
+compartiendo el mismo Caddy. Asegúrate de que los puertos 80 y 443 estén abiertos
+en el firewall de tu VPS, o Let's Encrypt no podrá validar el dominio.
 
 **Manual**: el repo trae el mismo setup listo para usar sin astra-creator:
 
