@@ -952,10 +952,16 @@ impl AppContext {
 
     /// Broadcast de una línea de sistema (texto del server) a todos los
     /// usuarios logueados. Equivalente a `Server.Print` de sb0t.
+    ///
+    /// El transporte es `NoSuch` (mensaje público sin emisor) para TODOS los
+    /// clientes, igual que `Server.Print` → `client.Print` →
+    /// `TCPOutbound.NoSuch` de sb0t: los anuncios de sala (greet, roominfo,
+    /// acciones admin, roomsearch, etc.) aparecen en el chat público, NO como
+    /// PM del bot.
     pub fn broadcast_print(&self, text: &str) {
         for u in self.user_pool.users() {
             if u.logged_in {
-                u.print(&self.settings.bot_name, text);
+                u.send_nosuch(text);
             }
         }
     }

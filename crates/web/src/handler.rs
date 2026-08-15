@@ -194,6 +194,25 @@ pub async fn handle_connection(
     // `if (hijack == null || !(hijack is AresClient))`.
     if !hijacked {
         broadcast_to_room(&ctx, &user, |c| outbound::build_join_or_userlist_c(&user, c));
+        // Avatar del LOGIN del usuario web → a los clientes Ares nativos
+        // (paridad `WebProcessor.Login` de sb0t: tras el JOIN manda
+        // `TCPOutbound.Avatar(x, client)` a `UserPool.AUsers`). El JOIN no
+        // lleva el avatar, así que sin esto un cb0t nunca ve la foto de un
+        // usuario web que entra con avatar.
+        let avatar = user.avatar.lock().clone();
+        if let Some(bytes) = avatar {
+            let avatar_name = user.name.read().clone();
+            let vroom = *user.vroom.read();
+            for u in ctx.user_pool.users() {
+                if u.logged_in
+                    && !u.web_client
+                    && *u.vroom.read() == vroom
+                    && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let _ = u.send(outbound::build_avatar_c(&avatar_name, &bytes, u.ares_crypto));
+                }
+            }
+        }
     }
 
     // Greet de bienvenida (PM del bot al usuario WS que entra)
@@ -1451,6 +1470,8 @@ fn send_greet_ws(
         region: &user.region,
     };
     let text = server_core::greets::render_greet(&template, &gctx);
+    // Colores: `\x02`+dígito → formato real del cliente (ver `set_colors`).
+    let text = server_core::text_effects::set_colors(&text);
     // Paridad sb0t: `pmgreetmsg` = greet por PM; `greetmsg` = greet público.
     if ctx.room_flags.get("pmgreetmsg") {
         let _ = ws_text_tx.send(crate::protocol::build_pm(&ctx.settings.bot_name, &text));

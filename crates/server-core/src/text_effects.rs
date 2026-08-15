@@ -5,6 +5,31 @@ use std::sync::atomic::Ordering;
 
 use crate::user_pool::AresUser;
 
+/// Convierte los códigos de color/formato abreviados de sb0t al formato que
+/// entienden los clientes (paridad `Helpers.SetColors` de sb0t).
+///
+/// En el texto del MOTD/greet se escribe `\x02` + dígito como prefijo de
+/// formato (`\x02304` = itálicas, color 04); el cliente Ares interpreta
+/// `\x02`+dígito como el inicio de un código de color y sin esta conversión
+/// los colores no se renderizan. Aquí `\x02`+dígito se convierte al carácter
+/// de control del formato:
+///
+/// - `\x02` + `5` → `\x05` (negrita)
+/// - `\x02` + `3` → `\x03` (itálicas)
+/// - `\x02` + `6` → `\x06`
+/// - `\x02` + `7` → `\x07` (subrayado)
+/// - `\x02` + `9` → `\x09` (color)
+///
+/// Los dos dígitos que siguen (el color) se conservan: `\x02304` →
+/// `\x03` + `04`.
+pub fn set_colors(text: &str) -> String {
+    text.replace("\u{2}5", "\u{5}")
+        .replace("\u{2}3", "\u{3}")
+        .replace("\u{2}6", "\u{6}")
+        .replace("\u{2}7", "\u{7}")
+        .replace("\u{2}9", "\u{9}")
+}
+
 /// Aplica las transformaciones "de castigo" per-usuario a un texto público
 /// saliente, según los flags del usuario (`kiddied`, `lowered`).
 ///
@@ -137,5 +162,24 @@ mod tests {
         assert!(is_shouting("STOP IT NOW")); // todo mayúsculas
         assert!(!is_shouting("STOP it now")); // 4/9 mayúsculas → no
         assert!(!is_shouting("Hello There Friend")); // title case, no grito
+    }
+
+    #[test]
+    fn set_colors_converts_sb0t_shorthands() {
+        // `\x02` + dígito → carácter de control del formato (Helpers.SetColors).
+        assert_eq!(set_colors("\x025Hola"), "\x05Hola"); // negrita
+        assert_eq!(set_colors("\x023Hola"), "\x03Hola"); // itálicas
+        assert_eq!(set_colors("\x026Hola"), "\x06Hola");
+        assert_eq!(set_colors("\x027Hola"), "\x07Hola"); // subrayado
+        assert_eq!(set_colors("\x029Hola"), "\x09Hola");
+    }
+
+    #[test]
+    fn set_colors_keeps_color_digits() {
+        // Los dos dígitos del color se conservan: `\x02304` → `\x03` + "04".
+        assert_eq!(set_colors("\x02304hola"), "\x03\x30\x34hola");
+        assert_eq!(set_colors("\x02512hola"), "\x05\x31\x32hola");
+        // Texto sin códigos no cambia.
+        assert_eq!(set_colors("hola"), "hola");
     }
 }

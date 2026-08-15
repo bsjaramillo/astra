@@ -2006,6 +2006,10 @@ fn send_greet(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
         region: &user.region,
     };
     let text = server_core::greets::render_greet(&template, &gctx);
+    // Colores: `\x02`+dígito → formato real del cliente (paridad
+    // `Helpers.SetColors`, aplicado también al greet para que los colores se
+    // vean igual en el chat público y en el PM).
+    let text = server_core::text_effects::set_colors(&text);
     // Paridad sb0t: `pmgreetmsg` = greet por PM al que entra; `greetmsg` =
     // greet público a la sala (Server.Print). Pueden estar ambos activos.
     if ctx.room_flags.get("pmgreetmsg") {

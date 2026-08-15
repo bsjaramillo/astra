@@ -68,12 +68,14 @@ impl MotdManager {
 
     /// Devuelve las líneas del MOTD (sin las vacías) con los placeholders ya
     /// sustituidos, listas para enviarse al usuario que entra. `None`/vacío si
-    /// no hay MOTD.
+    /// no hay MOTD. Cada línea pasa por [`crate::text_effects::set_colors`]
+    /// (paridad `Motd.ViewMOTD` de sb0t, que manda `Helpers.SetColors(s)`):
+    /// los prefijos `\x02`+dígito se convierten al formato real del cliente.
     pub fn rendered_lines(&self, ctx: &MotdContext) -> Vec<String> {
         let text = self.text.read();
         text.lines()
             .map(|l| render_motd(l, ctx))
-            .map(|l| l.trim_end().to_string())
+            .map(|l| crate::text_effects::set_colors(l.trim_end()).to_string())
             .filter(|l| !l.trim().is_empty())
             .collect()
     }
