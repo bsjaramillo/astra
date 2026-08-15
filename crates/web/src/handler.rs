@@ -1460,7 +1460,9 @@ fn send_greet_ws(
     }
 }
 
-/// Envía el MOTD al usuario WS que entra, línea por línea como PM del bot.
+/// Envía el MOTD al usuario WS que entra, línea por línea como `NOSUCH:`
+/// (paridad `ib0tClient.Print` de sb0t: texto de servidor en la ventana
+/// principal, NO un PM).
 fn send_motd_ws(
     ctx: &AppContext,
     user: &AresUser,
@@ -1476,7 +1478,7 @@ fn send_motd_ws(
         user_count: ctx.user_pool.len(),
     };
     for line in ctx.motd.rendered_lines(&mctx) {
-        let _ = ws_text_tx.send(crate::protocol::build_pm(&ctx.settings.bot_name, &line));
+        let _ = ws_text_tx.send(crate::protocol::build_nosuch(&line));
     }
 }
 

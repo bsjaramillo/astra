@@ -1527,7 +1527,9 @@ fn handle_motd(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
             user_count: ctx.user_pool.len(),
         };
         for line in ctx.motd.rendered_lines(&mctx) {
-            send_system_line(ctx, user, &line);
+            // Paridad `Motd.ViewMOTD` de sb0t: cada línea va como `NoSuch`
+            // (mensaje público sin emisor), no como PM del bot.
+            let _ = user.send_nosuch(&line);
         }
         return;
     }
@@ -3403,17 +3405,23 @@ pub fn roominfo_lines(ctx: &AppContext) -> Vec<String> {
         .filter(|u| u.logged_in && (*u.level.read() as u8) >= ILevel::Owner as u8)
         .count();
 
-    // Textos de sb0t (Category.RoomInfo #0-5).
+    // Textos de sb0t (Category.RoomInfo #0-5), editables desde el panel como
+    // templates ("Textos del sistema"); cada línea sustituye su `+n`. El
+    // `roominfo.title` se repite al final como footer (paridad `RoomInfo.Show`
+    // de sb0t: título, línea, cuerpo, línea, título).
     let secs = ctx.uptime_secs();
     let uptime = format!("{}d {}h {}m", secs / 86400, (secs / 3600) % 24, (secs / 60) % 60);
+    let status = ctx.room_status();
     vec![
-        "Room Information".to_string(),
+        ctx.templates.render("roominfo.title", &[]),
         String::new(),
-        format!("Current hosts: {}", owners),
-        format!("Current user count: {}", total),
-        format!("Current admin count: {}", ops),
-        format!("Server uptime: {}", uptime),
-        format!("Host status: {}", ctx.room_status()),
+        ctx.templates.render("roominfo.hosts", &[("+n", &owners.to_string())]),
+        ctx.templates.render("roominfo.usercount", &[("+n", &total.to_string())]),
+        ctx.templates.render("roominfo.admins", &[("+n", &ops.to_string())]),
+        ctx.templates.render("roominfo.uptime", &[("+n", &uptime)]),
+        ctx.templates.render("roominfo.status", &[("+n", &status)]),
+        String::new(),
+        ctx.templates.render("roominfo.title", &[]),
     ]
 }
 
@@ -5578,6 +5586,12 @@ mod tests {
         r.read_string_nt().expect("topic")
     }
 
+    fn decode_nosuch(pkt: bytes::Bytes) -> String {
+        assert_eq!(pkt[0], TcpMsg::ServerNosuch as u8);
+        let mut r = PacketReader::new(&pkt[1..]);
+        r.read_string_nt().expect("nosuch")
+    }
+
     fn next_pvt_text(rx: &mut mpsc::UnboundedReceiver<bytes::Bytes>) -> String {
         for _ in 0..16 {
             let pkt = rx.try_recv().expect("expected queued packet");
@@ -5805,7 +5819,7 @@ mod tests {
 
         let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &user, "motd", "");
         assert!(handled);
-        let (_from, view) = decode_pvt(rx.try_recv().expect("motd view"));
+        let view = decode_nosuch(rx.try_recv().expect("motd view"));
         assert_eq!(view, "Hola Alice");
     }
 
@@ -7170,7 +7184,7 @@ mod tests {
         ctx.user_pool.add(alice.clone());
 
         let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "roominfo", "");
-        // Bloque con los textos de sb0t (RoomInfo #0-5).
+        // Bloque con los textos de sb0t (RoomInfo #0-5) + footer con el título.
         assert_eq!(next_pvt_text(&mut alice_rx), "Room Information");
         let _blank = next_pvt_text(&mut alice_rx);
         assert_eq!(next_pvt_text(&mut alice_rx), "Current hosts: 1");
@@ -7178,6 +7192,8 @@ mod tests {
         assert_eq!(next_pvt_text(&mut alice_rx), "Current admin count: 1");
         assert!(next_pvt_text(&mut alice_rx).starts_with("Server uptime: "));
         assert!(next_pvt_text(&mut alice_rx).starts_with("Host status:"));
+        let _blank_footer = next_pvt_text(&mut alice_rx);
+        assert_eq!(next_pvt_text(&mut alice_rx), "Room Information");
 
         // set status → confirma + anuncia la actualización (RoomInfo#6)
         let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "status", "under maintenance");

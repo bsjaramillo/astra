@@ -2025,8 +2025,9 @@ fn send_greet(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
 }
 
 /// Envía el MOTD (message of the day) al usuario que entra, línea por línea
-/// como PM del bot. No-op si no hay MOTD configurado. Paridad conceptual con
-/// `ViewMOTD` de sb0t (texto plano; sin tags de media).
+/// como mensaje público `ServerNosuch` (sin emisor), igual que `Motd.ViewMOTD`
+/// de sb0t (`client.Print` → `TCPOutbound.NoSuch`), NO como PM del bot.
+/// No-op si no hay MOTD configurado. Texto plano; sin tags de media.
 fn send_motd(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
     if ctx.motd.is_empty() {
         return;
@@ -2038,7 +2039,7 @@ fn send_motd(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
         user_count: ctx.user_pool.len(),
     };
     for line in ctx.motd.rendered_lines(&mctx) {
-        let _ = user.send_pvt(&ctx.settings.bot_name, &line);
+        let _ = user.send_nosuch(&line);
     }
 }
 

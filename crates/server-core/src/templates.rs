@@ -191,6 +191,14 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     ("move.by", "+n was moved to vroom +v by +a"),
     // Status actualizado (RoomInfo#6 de sb0t)
     ("status.updated", "+n has updated the host status"),
+    // Bloque de info de sala (Category.RoomInfo #0-5 de sb0t; el `/roominfo`
+    // y el broadcast periódico los renderizan con el placeholder `+n`).
+    ("roominfo.title", "Room Information"),
+    ("roominfo.hosts", "Current hosts: +n"),
+    ("roominfo.usercount", "Current user count: +n"),
+    ("roominfo.admins", "Current admin count: +n"),
+    ("roominfo.uptime", "Server uptime: +n"),
+    ("roominfo.status", "Host status: +n"),
     // Whowas (Category.WhoWas de sb0t)
     ("whowas.entry", "whowas: +n +ip +v +t"),
     ("whowas.none", "no results were found containing +n"),

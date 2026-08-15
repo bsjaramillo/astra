@@ -2,7 +2,9 @@
 //! usuario cuando entra a la sala. Paridad conceptual con el `motd.txt` de
 //! sb0t (`commands/Motd.cs`), pero simplificado: en Astra guardamos el texto
 //! completo (multilínea) en el store `kv` de SQLite bajo la clave `motd`, y
-//! al entrar se envía línea por línea como PM del bot al usuario.
+//! al entrar se envía línea por línea como mensaje público `ServerNosuch`
+//! (sin emisor), igual que `Motd.ViewMOTD` de sb0t (`client.Print` →
+//! `TCPOutbound.NoSuch`), NO como PM del bot.
 //!
 //! ## Placeholders soportados (mismos que los greets, subset de sb0t)
 //!
@@ -12,9 +14,9 @@
 //! - `+uc` → usuarios conectados
 //!
 //! A diferencia de sb0t, NO interpretamos tags de media (`[youtube=]`,
-//! `[image=]`, etc.): Astra manda el MOTD como texto plano por PM. Si en el
-//! futuro se quiere HTML para clientes que lo soporten, se puede extender
-//! aquí sin tocar los call sites.
+//! `[image=]`, etc.): Astra manda el MOTD como texto plano por `NoSuch`. Si
+//! en el futuro se quiere HTML para clientes que lo soporten, se puede
+//! extender aquí sin tocar los call sites.
 
 use std::sync::Arc;
 
