@@ -445,7 +445,7 @@ pub fn parse_login(args_text: &str) -> Option<LoginArgs> {
         return None;
     }
 
-    let version = items[0].clone();
+    let proto = items[0].clone();
     let guid_hex = &items[1];
     // El cliente Ares/ib0t manda 32 hex chars (16 bytes); algunos clientes
     // web (ej. "inbizio web") mandan 64 hex chars (32 bytes). Tomamos los
@@ -464,9 +464,20 @@ pub fn parse_login(args_text: &str) -> Option<LoginArgs> {
     let name = items[2].trim().to_string();
     let lang = items.get(3).cloned().unwrap_or_default();
 
-    let inbizier_web = version == "5000";
-    let inbizier_mobile = version == "6000";
+    let inbizier_web = proto == "5000";
+    let inbizier_mobile = proto == "6000";
     let inbizier = inbizier_web || inbizier_mobile;
+
+    // sb0t `WebProcessor.Login`: `client.Version = arg_items[4] + " [" +
+    // arg_items[3] + "]"`. El campo [0] es el NÚMERO del protocolo
+    // ("5000"/"6000"), no el nombre del cliente: la versión visible debe ser
+    // `client_version [user_agent]` (ej. "inbizio web v0.1.5 [Mozilla/5.0 ...]").
+    // Antes guardábamos solo el proto, así que el cliente aparecía como "5000"
+    // o "6000".
+    let version = match (items.get(3), items.get(4)) {
+        (Some(a), Some(b)) => format!("{} [{}]", b, a),
+        _ => proto.clone(),
+    };
 
     // sb0t: para inbizier con 7 campos, el pmsg real es [5] y el avatar [6];
     // [4] es el string de versión del cliente (fallback de pmsg).
@@ -551,7 +562,8 @@ mod tests {
         let guid = "A".repeat(32);
         let s = format!("4,32,5,5,5:2000{}Aliceen-UShello", guid);
         let login = parse_login(&s).unwrap();
-        assert_eq!(login.version, "2000");
+        // sb0t: Version = items[4] + " [" + items[3] + "]"
+        assert_eq!(login.version, "hello [en-US]");
         assert_eq!(login.guid[0], 0xAA);
         assert_eq!(login.guid[15], 0xAA);
         assert_eq!(login.name, "Alice");
@@ -568,7 +580,11 @@ mod tests {
         // primeros 16 bytes del guid).
         let args = "4,64,13,109,18,18,0:6000000d7bcb2510574ad8128d95a74679466e6223af1bcb518460b87c162fae6469ElMagoDelSiamMozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15inbizio web v0.1.5inbizio web v0.1.5";
         let login = parse_login(args).expect("inbizio login debe parsear");
-        assert_eq!(login.version, "6000");
+        // La versión visible es `client_version [user_agent]`, NO el proto "6000".
+        assert_eq!(
+            login.version,
+            "inbizio web v0.1.5 [Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15]"
+        );
         assert!(login.inbizier_mobile);
         assert_eq!(login.name, "ElMagoDelSiam");
         assert_eq!(login.guid[0], 0x00);
