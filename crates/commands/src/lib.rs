@@ -2515,7 +2515,8 @@ fn push_level_refresh(ctx: &AppContext, target: &Arc<AresUser>) {
     ));
     let name = target.name.read().clone();
     let vroom = *target.vroom.read();
-    let level_str = (level as u8).to_string();
+    // Escala Ares 0..3 (ver nota en `apply_level`).
+    let level_str = server_core::outbound::ares_level(level as u8).to_string();
     let ws_msg = format!("UPDATE:{},{}:{}{}", name.encode_utf16().count(), level_str.len(), name, level_str);
     for u in ctx.user_pool.users() {
         if !u.logged_in
@@ -2702,10 +2703,12 @@ fn apply_level(
     // como UPDATE (paridad ib0tClient.Level setter -> WebOutbound.UpdateTo,
     // así el userlist/badge de todos se refresca en vivo) y a los clientes
     // Ares TCP como un refresh de join/userlist (paridad UpdateUserStatus).
-    let level_byte = new_level as u8;
     let name = target.name.read().clone();
     let vroom = *target.vroom.read();
-    let level_str = level_byte.to_string();
+    // El UPDATE web usa la escala Ares 0..3 (igual que USERINFO/USERLIST y
+    // `WebOutbound.UpdateTo` de sb0t), NO la escala interna 50/80/100: con la
+    // interna, inbizio no coloreaba el rango otorgado hasta reconectar.
+    let level_str = server_core::outbound::ares_level(new_level as u8).to_string();
     let ws_msg = format!("UPDATE:{},{}:{}{}", name.encode_utf16().count(), level_str.len(), name, level_str);
     for u in ctx.user_pool.users() {
         if !u.logged_in
@@ -6222,6 +6225,32 @@ mod tests {
 
         assert_eq!(next_pvt_text(&mut bob_rx), "Your level is now 50 (moderator).");
         assert_eq!(next_pvt_text(&mut alice_rx), "'Bob' is now level 50 (moderator).");
+    }
+
+    #[test]
+    fn builtin_grant_uses_ares_scale_in_web_update() {
+        // El UPDATE a los clientes web debe llevar la escala Ares 0..3 (como
+        // USERINFO/USERLIST y `WebOutbound.UpdateTo` de sb0t), NO la interna
+        // 50/80/100: con la interna, inbizio no colorea el rango otorgado.
+        let ctx = make_test_ctx();
+        let (alice, _alice_rx) = make_test_user(1, "Alice");
+        let (mut bob, _bob_rx) = make_test_user(2, "Bob");
+        *alice.level.write() = ILevel::Owner;
+        ctx.user_pool.add(alice.clone());
+
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        Arc::get_mut(&mut bob).unwrap().ws_text_sender = Some(ws_tx);
+        ctx.user_pool.add(bob.clone());
+
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "grant", "Bob moderator");
+        let mut got = None;
+        while let Ok(msg) = ws_rx.try_recv() {
+            if msg.starts_with("UPDATE:") {
+                got = Some(msg);
+            }
+        }
+        // moderator → "1" en la escala Ares (no "50").
+        assert_eq!(got.expect("UPDATE a los clientes web"), "UPDATE:3,1:Bob1");
     }
 
     #[test]

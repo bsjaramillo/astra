@@ -223,8 +223,11 @@ pub fn build_userlist_item_c(user: &AresUser, crypto: Crypto) -> Bytes {
 /// `MyLevel == 3`, así que el dueño de la sala no ve su propio menú de host.
 /// `Voice` no existe en Ares y baja a Regular (sigue sin ser staff).
 ///
-/// Solo aplica a los paquetes binarios Ares. El protocolo de texto ib0t (web)
-/// usa la escala de Astra tal cual y no pasa por aquí.
+/// Convierte la escala interna de Astra (1/2/50/80/100) a la escala del
+/// protocolo Ares (0..3). Es la que esperan los clientes: los nativos Ares
+/// (paquetes binarios de join/userlist) y también los web — USERINFO/USERLIST/
+/// UPDATE del protocolo ib0t usan esta escala (inbizio colorea los rangos por
+/// 1/2/3), no la interna.
 pub fn ares_level(level: u8) -> u8 {
     match level {
         l if l >= crate::types::ILevel::Owner as u8 => 3,
