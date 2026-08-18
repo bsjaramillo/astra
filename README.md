@@ -15,6 +15,10 @@ web, en cualquier plataforma.
   Link (multi-servidor) y UDP (room search).
 - **Un binario estático**, sin runtime, con miles de conexiones concurrentes.
 
+## Míralo en acción
+
+[Nokia Enterprise](http://inbizio.xyz/?r=nokia-enterprise)
+
 ## Qué incluye
 
 - Protocolo Ares completo (TCP + UDP room search).
