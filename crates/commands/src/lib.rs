@@ -1170,7 +1170,7 @@ pub fn dispatch_builtin(
 }
 
 /// Efecto de texto per-usuario que un mod puede aplicar a un target.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextEffect {
     Lower,
     Kewl,
@@ -2813,15 +2813,15 @@ fn handle_hostcban(ctx: &AppContext, user: &Arc<AresUser>) {
     let ranges = ctx.range_bans.clear();
     let mut cleared_users = 0usize;
     for u in ctx.user_pool.users() {
-        let had = u.muzzled.swap(false, Relaxed)
+        let had_effects = u.muzzled.swap(false, Relaxed)
             | u.kiddied.swap(false, Relaxed)
             | u.lowered.swap(false, Relaxed)
             | u.kewl.swap(false, Relaxed)
-            | u.painted.swap(false, Relaxed);
-        if u.echo_text.read().is_some() {
-            *u.echo_text.write() = None;
-        }
-        if had {
+            | u.paint_text.read().is_some()
+            | u.echo_text.read().is_some();
+        *u.paint_text.write() = None;
+        *u.echo_text.write() = None;
+        if had_effects {
             cleared_users += 1;
         }
     }
@@ -5385,6 +5385,12 @@ fn handle_text_effect(
         send_system_line(ctx, user, "Access denied. Moderator+ required.");
         return;
     }
+    // Paint lleva `<nick> <texto>` (el texto se prepone a los mensajes,
+    // paridad `Paint.Add(client, text)` de sb0t) — handler aparte.
+    if effect == TextEffect::Paint {
+        handle_paint(ctx, user, args, enable);
+        return;
+    }
     let target_name = args.trim();
     if target_name.is_empty() {
         send_system_line(ctx, user, "Usage: /<effect> <nick>");
@@ -5394,7 +5400,10 @@ fn handle_text_effect(
         send_system_line(ctx, user, "User not found.");
         return;
     };
-    if enable && !outranks(user, &target) {
+    // sb0t: solo Lower/Kiddy/Echo exigen superar al target (Eval.cs — esos
+    // checan `target.Level < admin.Level`); Paint y KewlText NO, así que
+    // puedes pintarte/kewlearte a ti mismo o a un igual.
+    if enable && matches!(effect, TextEffect::Lower) && !outranks(user, &target) {
         send_level_too_low(ctx, user, &target);
         return;
     }
@@ -5403,8 +5412,7 @@ fn handle_text_effect(
         TextEffect::Lower => (&target.lowered, "lower", "adminaction.unlower"),
         TextEffect::Kewl if enable => (&target.kewl, "kewl text", "adminaction.kewltext"),
         TextEffect::Kewl => (&target.kewl, "kewl text", "adminaction.unkewltext"),
-        TextEffect::Paint if enable => (&target.painted, "paint", "adminaction.paint"),
-        TextEffect::Paint => (&target.painted, "paint", "adminaction.unpaint"),
+        TextEffect::Paint => unreachable!("Paint se maneja en handle_paint"),
     };
     flag.store(enable, std::sync::atomic::Ordering::Relaxed);
     // Persistir a disco lowered (paridad sb0t: Lowered persiste en archivo).
@@ -5427,6 +5435,47 @@ fn handle_text_effect(
     );
     // AdminAction #7-#10/#15/#16: sb0t lo anuncia a toda la sala.
     announce_admin_action(ctx, user, key, &target.name.read().clone());
+}
+
+/// `/paint <nick|id> <texto>` — guarda el texto de paint del target (se le
+/// prepone a sus mensajes, paridad `Paint.Add(client, text)` + `IsPainted`
+/// de sb0t). `/unpaint <nick|id>` lo limpia. SIN check de `outranks` (sb0t:
+/// puedes pintarte a ti mismo o a un igual).
+fn handle_paint(ctx: &AppContext, user: &Arc<AresUser>, args: &str, enable: bool) {
+    if enable {
+        let (target, text) = find_target_and_args(ctx, args);
+        let text = text.trim();
+        let Some(target) = target else {
+            if args.trim().is_empty() {
+                send_system_line(ctx, user, "Usage: /paint <nick|id> <text>");
+            } else {
+                send_system_line(ctx, user, "User not found.");
+            }
+            return;
+        };
+        if text.is_empty() {
+            send_system_line(ctx, user, "Usage: /paint <nick|id> <text>");
+            return;
+        }
+        let target_name = target.name.read().clone();
+        *target.paint_text.write() = Some(text.to_string());
+        send_system_line(ctx, user, &format!("paint enabled for '{}'.", target_name));
+        announce_admin_action(ctx, user, "adminaction.paint", &target_name);
+    } else {
+        let target_name = args.trim();
+        if target_name.is_empty() {
+            send_system_line(ctx, user, "Usage: /unpaint <nick|id>");
+            return;
+        }
+        let Some(target) = find_target(ctx, target_name) else {
+            send_system_line(ctx, user, "User not found.");
+            return;
+        };
+        let tname = target.name.read().clone();
+        *target.paint_text.write() = None;
+        send_system_line(ctx, user, &format!("paint disabled for '{}'.", tname));
+        announce_admin_action(ctx, user, "adminaction.unpaint", &tname);
+    }
 }
 
 /// Formatea un timestamp epoch-ms como tiempo relativo ("5m ago", etc.).
@@ -7554,8 +7603,36 @@ mod tests {
         assert_eq!(next_nosuch_text(&mut alice_rx), "lower disabled for 'Bob'.");
         assert_eq!(next_nosuch_text(&mut alice_rx), "Bob has been unlowered by Alice");
 
-        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "paint", "Bob");
-        assert!(bob.painted.load(std::sync::atomic::Ordering::Relaxed));
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "paint", "Bob 🎨");
+        assert_eq!(bob.paint_text.read().clone(), Some("🎨".to_string()));
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "unpaint", "Bob");
+        assert!(bob.paint_text.read().is_none());
+    }
+
+    #[test]
+    fn builtin_paint_and_kewl_allow_self_no_outrank() {
+        // sb0t: Paint/KewlText no checan nivel del target — puedes pintarte
+        // a ti mismo o a un igual. Lower sí lo exige.
+        let ctx = make_test_ctx();
+        let (mod_u, mut rx) = make_test_user(1, "Mod");
+        *mod_u.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(mod_u.clone());
+
+        // Self-paint: funciona (antes daba "nivel demasiado bajo").
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &mod_u, "paint", "Mod 🖌️");
+        assert_eq!(mod_u.paint_text.read().clone(), Some("🖌️".to_string()));
+
+        // Self-kewl: funciona.
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &mod_u, "kewltext", "Mod");
+        assert!(mod_u.kewl.load(std::sync::atomic::Ordering::Relaxed));
+        // Drenar acks/anuncios de paint + kewl.
+        while rx.try_recv().is_ok() {}
+
+        // Self-lower: SÍ exige superar al target → denegado (paridad sb0t).
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &mod_u, "lower", "Mod");
+        let denied = next_nosuch_text(&mut rx);
+        assert!(denied.contains("too low"), "denied: {denied}");
+        assert!(!mod_u.lowered.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]

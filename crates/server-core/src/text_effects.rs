@@ -45,8 +45,13 @@ pub fn apply_punish_effects(user: &AresUser, text: &str) -> String {
     if user.kewl.load(Ordering::Relaxed) {
         out = kewl_transform(&out);
     }
-    if user.painted.load(Ordering::Relaxed) {
-        out = paint_transform(&out);
+    if let Some(paint) = user.paint_text.read().clone() {
+        if !paint.trim().is_empty() {
+            // Paridad `commands/Paint.cs` de sb0t (`ServerEvents.cs`:
+            // `text = Paint.IsPainted(client) + text`): el paint es un TEXTO
+            // que se prepone al mensaje, no un wrap con unicode.
+            out = format!("{}{}", paint, out);
+        }
     }
     out
 }
@@ -64,12 +69,6 @@ pub fn kewl_transform(text: &str) -> String {
             _ => c,
         })
         .collect()
-}
-
-/// "Paint": decora el texto envolviéndolo con marcas (aproximación en texto
-/// plano del efecto de color de sb0t, que requiere el protocolo de fuente Ares).
-pub fn paint_transform(text: &str) -> String {
-    format!("*·¸¸·* {} *·¸¸·*", text)
 }
 
 /// ¿El texto está "gritado" (mayoría de letras en mayúscula y con
@@ -143,8 +142,12 @@ mod tests {
     fn kewl_and_paint_transforms() {
         assert_eq!(kewl_transform("elite"), "3l173");
         assert_eq!(kewl_transform("SASO"), "5450");
-        assert!(paint_transform("hi").contains("hi"));
-        assert!(paint_transform("hi").len() > 2);
+        // Paint: el texto configurado se PREPONE (paridad sb0t Paint.cs).
+        let u = user();
+        *u.paint_text.write() = Some("🎨 ".to_string());
+        assert_eq!(apply_punish_effects(&u, "hola"), "🎨 hola");
+        *u.paint_text.write() = None;
+        assert_eq!(apply_punish_effects(&u, "hola"), "hola");
     }
 
     #[test]

@@ -96,7 +96,10 @@ pub struct AresUser {
     /// ¿"Kewl text"? Si sí, su texto se transforma a leetspeak (`/kewltext`).
     pub kewl: AtomicBool,
     /// ¿"Painted"? Si sí, su texto se decora (`/paint`).
-    pub painted: AtomicBool,
+    /// Texto del paint aplicado al usuario (paridad `commands/Paint.cs` de
+    /// sb0t: `Paint.Add(client, text)` guarda un texto que se PREPONE a sus
+    /// mensajes; `None` = sin paint).
+    pub paint_text: parking_lot::RwLock<Option<String>>,
     /// Texto de "echo" (heckle): si está seteado, se le reenvía al usuario
     /// cada vez que habla en público (`/echo`).
     pub echo_text: parking_lot::RwLock<Option<String>>,
@@ -228,7 +231,7 @@ impl AresUser {
             kiddied: AtomicBool::new(false),
             lowered: AtomicBool::new(false),
             kewl: AtomicBool::new(false),
-            painted: AtomicBool::new(false),
+            paint_text: parking_lot::RwLock::new(None),
             echo_text: parking_lot::RwLock::new(None),
             sub_vspy: AtomicBool::new(false),
             sub_ipsend: AtomicBool::new(false),
