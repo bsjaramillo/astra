@@ -895,7 +895,9 @@ async fn dispatch_message(
                 return Ok(false);
             }
             let cleared = png.len() < 10;
-            *user.avatar.lock() = if cleared { None } else { Some(png.clone()) };
+            // Escalar/recomprimir a JPEG ≤384px (paridad `AresClient.Scale`).
+            let scaled = server_core::avatars::scale_avatar(&png);
+            *user.avatar.lock() = if cleared { None } else { Some(scaled) };
             // Avatar propio del cliente → stash para user.restoreAvatar().
             *user.org_avatar.lock() = if cleared { None } else { Some(png.clone()) };
             *user.full_avatar.lock() = None;
@@ -1369,7 +1371,7 @@ async fn handle_public(
     scripting: &ScriptHandle,
 ) {
     let mut r = PacketReader::new_crypto(data, user.ares_crypto);
-    let text = match r.read_string_nt() {
+    let mut text = match r.read_string_nt() {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -1447,9 +1449,16 @@ async fn handle_public(
 
     // Word filter: solo aplica (censura) a usuarios regulares (Moderator+ exentos).
     if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
-        if let Some(action) = ctx.word_filter.check(&text) {
-            apply_filter_action(ctx, user, action, &name);
+        if let Some((action, fargs)) = ctx.word_filter.check(&text) {
+            apply_filter_action(ctx, user, action, &fargs, &name);
             return;
+        }
+    }
+    // Filtro `replace`: NO bloquea — reemplaza el trigger y el mensaje
+    // modificado continúa su flujo normal (paridad `FilterType.Replace`).
+    if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
+        if let Some(replaced) = ctx.word_filter.check_replace(&text) {
+            text = replaced;
         }
     }
 
@@ -2042,17 +2051,35 @@ fn send_motd(ctx: &AppContext, user: &server_core::user_pool::AresUser) {
         ip: &user.external_ip.to_string(),
         user_count: ctx.user_pool.len(),
     };
-    for line in ctx.motd.rendered_lines(&mctx) {
-        let _ = user.send_nosuch(&line);
+    let lines = ctx.motd.rendered_lines(&mctx);
+    if user.supports_html {
+        // Paridad `Motd.ViewMOTD` de sb0t con clientes HTML: marcadores
+        // MOTDSTART/END (el cliente los pinta en su vista de MOTD) y tags de
+        // media (`[youtube=]`, `[image=]`, etc.) como SendHTML.
+        let _ = user.send_html("<!--MOTDSTART-->");
+        for line in lines {
+            if let Some(html) = server_core::motd::media_html(&line) {
+                let _ = user.send_html(&html);
+            } else {
+                let _ = user.send_nosuch(&line);
+            }
+        }
+        let _ = user.send_html("<!--MOTDEND-->");
+    } else {
+        for line in lines {
+            let _ = user.send_nosuch(&line);
+        }
     }
 }
 
 /// Aplica la acción de un word filter a un mensaje bloqueado: notifica al
-/// emisor y, según la acción, lo expulsa (remueve del pool) o lo banea.
+/// emisor y, según la acción, lo expulsa (remueve del pool), lo banea, lo
+/// muzzlea, lo mueve de vroom o lo redirige.
 fn apply_filter_action(
     ctx: &AppContext,
     user: &Arc<server_core::user_pool::AresUser>,
     action: server_core::FilterAction,
+    fargs: &str,
     name: &str,
 ) {
     use server_core::FilterAction;
@@ -2070,6 +2097,45 @@ fn apply_filter_action(
             info!("word filter: kick de '{}'", name);
             filter_remove_user(ctx, user);
         }
+        FilterAction::Muzzle => {
+            info!("word filter: muzzle de '{}'", name);
+            user.muzzled.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        FilterAction::Move => {
+            info!("word filter: move de '{}' a vroom {}", name, fargs);
+            let Ok(new_vroom) = fargs.trim().parse::<u16>() else {
+                return;
+            };
+            let old_vroom = *user.vroom.read();
+            if ctx.vrooms.get(new_vroom).is_none() {
+                let _ = ctx.vrooms.create(new_vroom, None, None);
+            }
+            *user.vroom.write() = new_vroom;
+            ctx.announce_vroom_move(user, old_vroom, new_vroom);
+        }
+        FilterAction::Redirect => {
+            info!("word filter: redirect de '{}' a {}", name, fargs);
+            // Destino: arlnk:///hashlink o ip:port (paridad `handle_redirect`).
+            let dest = fargs.trim().strip_prefix("astrahash://").unwrap_or(fargs.trim());
+            let dest_parsed = server_core::hashlink::decode(dest)
+                .map(|hr| (std::net::IpAddr::V4(hr.ip), hr.port))
+                .or_else(|| {
+                    let (ip_str, port_str) = dest.rsplit_once(':')?;
+                    Some((
+                        ip_str.parse::<std::net::IpAddr>().ok()?,
+                        port_str.parse::<u16>().ok()?,
+                    ))
+                });
+            if let Some((ip, port)) = dest_parsed {
+                let _ = user.send(outbound::build_redirect_c(
+                    ip,
+                    port,
+                    &ctx.settings.room_name,
+                    user.ares_crypto,
+                ));
+                filter_remove_user(ctx, user);
+            }
+        }
         FilterAction::Ban => {
             info!("word filter: ban de '{}'", name);
             let _ = ctx.bans.ban(
@@ -2080,13 +2146,17 @@ fn apply_filter_action(
                 user.local_ip,
                 user.data_port,
             );
+            // Feed /bansend a los admins suscritos (paridad con handle_ban).
+            let bansend_line = format!("BANSEND: word filter banned {}", name);
+            ctx.notify_subscribers(&bansend_line, |u| {
+                u.sub_bansend.load(std::sync::atomic::Ordering::Relaxed)
+            });
             filter_remove_user(ctx, user);
         }
-        FilterAction::Announce => {
-            // No debería llegar aquí: `check()` (censura) nunca devuelve
-            // Announce — ver `check_announce` para ese path, que no
-            // bloquea el mensaje.
-            debug!("word filter: Announce inesperado en apply_filter_action de '{}'", name);
+        FilterAction::Announce | FilterAction::Replace => {
+            // No deberían llegar aquí: `check()` no devuelve Announce/Replace
+            // (ver `check_announce`/`check_replace`).
+            debug!("word filter: acción inesperada en apply_filter_action de '{}'", name);
         }
     }
 }
@@ -2199,4 +2269,97 @@ fn build_my_features(user: &server_core::user_pool::AresUser) -> Bytes {
     w.write_u32_le(0).ok();
     w.write_u8(1).ok();
     Bytes::copy_from_slice(w.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use server_core::db::Database;
+    use server_core::settings::Settings;
+    use server_core::user_pool::AresUser;
+    use server_core::{FilterAction, ILevel};
+
+    fn test_ctx() -> Arc<AppContext> {
+        Arc::new(AppContext::new(Settings::default(), Database::in_memory().unwrap()))
+    }
+
+    fn make_user(id: u16, name: &str, level: ILevel) -> (Arc<AresUser>, mpsc::UnboundedReceiver<Bytes>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut u = AresUser::new(
+            id,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, id as u8)),
+            [id as u8; 16],
+        );
+        u.logged_in = true;
+        u.sender = Some(tx);
+        *u.name.write() = name.to_string();
+        *u.level.write() = level;
+        (Arc::new(u), rx)
+    }
+
+    /// Payload de un `Public` entrante (sin opcode): `str text`.
+    fn public_payload(text: &str) -> Bytes {
+        let mut w = PacketWriter::with_msg(TcpMsg::Public);
+        w.write_string_nt(text).ok();
+        Bytes::copy_from_slice(&w.into_bytes())
+    }
+
+    #[test]
+    fn word_filter_blocks_regular_public_message() {
+        let ctx = test_ctx();
+        let (regular, mut regular_rx) = make_user(1, "Reg", ILevel::Regular);
+        let (bob, mut bob_rx) = make_user(2, "Bob", ILevel::Regular);
+        ctx.user_pool.add(regular.clone());
+        ctx.user_pool.add(bob.clone());
+        // Filtros activos por defecto + un patrón block.
+        assert!(ctx.word_filter.is_enabled());
+        ctx.word_filter.add("badword", FilterAction::Block, "");
+
+        let payload = public_payload("this is a badword");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(handle_public(&ctx, &regular, &payload[1..], &ScriptHandle::dummy()));
+
+        // El mensaje NO se difunde a la sala.
+        assert!(bob_rx.try_recv().is_err(), "mensaje bloqueado no debe difundirse");
+        // El emisor recibe el aviso de bloqueo (PM del bot).
+        let msg = regular_rx.try_recv().expect("aviso de bloqueo");
+        assert_eq!(msg[0], TcpMsg::Pmt as u8);
+    }
+
+    #[test]
+    fn word_filter_disabled_lets_message_pass() {
+        let ctx = test_ctx();
+        let (regular, _regular_rx) = make_user(1, "Reg", ILevel::Regular);
+        let (bob, mut bob_rx) = make_user(2, "Bob", ILevel::Regular);
+        ctx.user_pool.add(regular.clone());
+        ctx.user_pool.add(bob.clone());
+        ctx.word_filter.add("badword", FilterAction::Block, "");
+        ctx.word_filter.set_enabled(false);
+
+        let payload = public_payload("this is a badword");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(handle_public(&ctx, &regular, &payload[1..], &ScriptHandle::dummy()));
+
+        // Con el filtrado apagado el mensaje SÍ se difunde (Public a Bob).
+        let pkt = bob_rx.try_recv().expect("mensaje sin filtrar");
+        assert_eq!(pkt[0], TcpMsg::Public as u8);
+    }
+
+    #[test]
+    fn word_filter_exempts_moderators() {
+        let ctx = test_ctx();
+        let (mod_user, _mod_rx) = make_user(1, "Mod", ILevel::Moderator);
+        let (bob, mut bob_rx) = make_user(2, "Bob", ILevel::Regular);
+        ctx.user_pool.add(mod_user.clone());
+        ctx.user_pool.add(bob.clone());
+        ctx.word_filter.add("badword", FilterAction::Block, "");
+
+        let payload = public_payload("this is a badword");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(handle_public(&ctx, &mod_user, &payload[1..], &ScriptHandle::dummy()));
+
+        // Moderator+ está exento: el mensaje se difunde (paridad sb0t).
+        let pkt = bob_rx.try_recv().expect("mensaje de mod sin filtrar");
+        assert_eq!(pkt[0], TcpMsg::Public as u8);
+    }
 }

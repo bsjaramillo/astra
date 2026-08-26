@@ -149,11 +149,22 @@ pub fn run_command(ctx: &Arc<AppContext>, line: &str) -> Vec<String> {
 
     let mut out = Vec::new();
     while let Ok(pkt) = rx.try_recv() {
-        if !pkt.is_empty() && pkt[0] == TcpMsg::Pmt as u8 {
-            let mut r = PacketReader::new(&pkt[1..]);
-            let _from = r.read_string_nt().ok();
-            if let Ok(text) = r.read_string_nt() {
-                out.push(text);
+        if !pkt.is_empty() {
+            let op = pkt[0];
+            if op == TcpMsg::ServerNosuch as u8 {
+                // Respuesta de comando vía `user.print` → ServerNosuch (paridad
+                // `client.Print` de sb0t).
+                let mut r = PacketReader::new(&pkt[1..]);
+                if let Ok(text) = r.read_string_nt() {
+                    out.push(text);
+                }
+            } else if op == TcpMsg::Pmt as u8 {
+                // PM real (p.ej. avisos al target).
+                let mut r = PacketReader::new(&pkt[1..]);
+                let _from = r.read_string_nt().ok();
+                if let Ok(text) = r.read_string_nt() {
+                    out.push(text);
+                }
             }
         }
     }
@@ -345,13 +356,21 @@ pub fn state_json(ctx: &AppContext) -> String {
     s.push(']');
     write!(s, ",\"greetsEnabled\":{}", ctx.greets.is_enabled()).ok();
 
-    // word filters
+// word filters
+    s.push_str(&format!(",\"filtersEnabled\":{}", ctx.word_filter.is_enabled()));
     s.push_str(",\"filters\":[");
-    for (i, (pat, act)) in ctx.word_filter.list().iter().enumerate() {
+    for (i, (pat, act, args)) in ctx.word_filter.list().iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
-        write!(s, "{{\"pattern\":\"{}\",\"action\":\"{}\"}}", esc(pat), act.as_str()).ok();
+        write!(
+            s,
+            "{{\"pattern\":\"{}\",\"action\":\"{}\",\"args\":\"{}\"}}",
+            esc(pat),
+            act.as_str(),
+            esc(args)
+        )
+        .ok();
     }
     s.push(']');
 

@@ -101,6 +101,58 @@ pub fn render_motd(line: &str, ctx: &MotdContext) -> String {
         .replace("+uc", &ctx.user_count.to_string())
 }
 
+/// Si la línea es un tag de media de sb0t (`[youtube=]`, `[image=]`,
+/// `[poster=]`, `[audio=]`, `[video=]`), retorna el HTML a mandar por
+/// `SendHTML` (paridad `Motd.ViewMOTD` de sb0t). `None` si es una línea
+/// normal, que va por `Print`/`NoSuch`. Solo lo procesan los clientes con
+/// soporte de HTML.
+pub fn media_html(line: &str) -> Option<String> {
+    let html = line.trim();
+    if let Some(rest) = html.strip_prefix("[youtube=") {
+        if let Some(link) = rest.strip_suffix(']') {
+            return Some(format!(
+                "<div style=\"margin-left: 2px;\"><object width=\"420\" height=\"315\">\
+                 <param name=\"movie\" value=\"https://www.youtube.com/v/{}?version=3&autoplay=0\"></param>\
+                 <param name=\"allowScriptAccess\" value=\"always\"></param>\
+                 <embed src=\"https://www.youtube.com/v/{}?version=3&autoplay=0\" \
+                 type=\"application/x-shockwave-flash\" allowscriptaccess=\"always\" \
+                 wmode=\"opaque\" width=\"420\" height=\"315\"></embed></object></div>",
+                link, link
+            ));
+        }
+    }
+    if let Some(rest) = html.strip_prefix("[image=") {
+        if let Some(url) = rest.strip_suffix(']') {
+            return Some(format!(
+                "<img src=\"{}\" style=\"max-width: 420px; max-height: 420px;\" alt=\"\" />",
+                url
+            ));
+        }
+    }
+    if let Some(rest) = html.strip_prefix("[poster=") {
+        if let Some(url) = rest.strip_suffix(']') {
+            return Some(format!(
+                "<img src=\"{}\" style=\"max-width: 75%; display: block; margin-left: auto; margin-right: auto;\" alt=\"\" />",
+                url
+            ));
+        }
+    }
+    if let Some(rest) = html.strip_prefix("[audio=") {
+        if let Some(url) = rest.strip_suffix(']') {
+            return Some(format!("<audio src=\"{}\" autoplay />", url));
+        }
+    }
+    if let Some(rest) = html.strip_prefix("[video=") {
+        if let Some(url) = rest.strip_suffix(']') {
+            return Some(format!(
+                "<video src=\"{}\" width=\"420\" height=\"315\" controls />",
+                url
+            ));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +195,18 @@ mod tests {
             lines,
             vec!["¡Hola Ana!".to_string(), "Bienvenido a MiSala (5 conectados)".to_string()]
         );
+    }
+
+    #[test]
+    fn media_tags_parse_to_html() {
+        assert!(media_html("hola normal").is_none());
+        assert!(media_html("[image=x.png]").unwrap().contains("<img"));
+        assert!(media_html("[image=x.png]").unwrap().contains("x.png"));
+        assert!(media_html("[poster=p.png]").unwrap().contains("<img"));
+        assert!(media_html("[audio=a.mp3]").unwrap().contains("<audio"));
+        assert!(media_html("[video=v.mp4]").unwrap().contains("<video"));
+        assert!(media_html("[youtube=ABC123]").unwrap().contains("youtube.com/v/ABC123"));
+        // Con espacios alrededor igual se parsea.
+        assert!(media_html("  [image=y.jpg]  ").unwrap().contains("y.jpg"));
     }
 }

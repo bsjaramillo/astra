@@ -542,9 +542,9 @@ const LVL={
 };
 function lvlName(n){ return (LVL[LANG]||LVL.es)[n] || n; }
 const ACT={
-  es:{block:"Bloquear",kick:"Expulsar",ban:"Banear",announce:"Anunciar"},
-  en:{block:"Block",kick:"Kick",ban:"Ban",announce:"Announce"}
-};
+  es:{block:"Bloquear",kick:"Expulsar",ban:"Banear",muzzle:"Silenciar",announce:"Anunciar"},
+  en:{block:"Block",kick:"Kick",ban:"Ban",muzzle:"Muzzle",announce:"Announce"}
+ };
 function actName(a){ return (ACT[LANG]||ACT.es)[a] || a; }
 const FLAG={
   es:{
@@ -799,17 +799,19 @@ function renderBaneos(){
 }
 
 function renderFiltros(){
+  const on = STATE.filtersEnabled!==false;
   const f = (STATE.filters||[]).map((x,i)=>`<tr><td>${i}</td><td>${esc(x.pattern)}</td><td><span class="chip">${esc(actName(x.action))}</span></td>
     <td style="text-align:right"><button class="btn sm danger" data-remfilter="${esc(x.pattern)}">${t("common_remove")}</button></td></tr>`).join("");
   return `<div class="cardhead"><h2>${t("filters_h")}</h2><p class="sub">${t("filters_sub")}</p></div>
     <div class="note">${t("filters_note")}</div>
-    <div class="card"><h3>${t("filters_active_h")}</h3>
+    <div class="card"><h3>${t("filters_active_h")} · <b style="color:${on?'var(--ok)':'var(--mut)'}">${on?t("greets_on"):t("greets_off")}</b></h3>
       <div class="scroll"><table class="tbl"><thead><tr><th>#</th><th>${t("th_word")}</th><th>${t("th_action")}</th><th></th></tr></thead>
       <tbody>${f||`<tr><td colspan=4 class=mut>${t("filters_empty")}</td></tr>`}</tbody></table></div>
       <div class="rowend">
         <input id="fpat" placeholder="${t("filters_ph")}" style="flex:1;min-width:150px">
-        <select id="fact" class="sel"><option value="block">${actName("block")}</option><option value="kick">${actName("kick")}</option><option value="ban">${actName("ban")}</option><option value="announce">${actName("announce")}</option></select>
-        <button class="btn primary" id="faddBtn">${t("filters_add")}</button></div></div>`;
+        <select id="fact" class="sel"><option value="block">${actName("block")}</option><option value="kick">${actName("kick")}</option><option value="ban">${actName("ban")}</option><option value="muzzle">${actName("muzzle")}</option><option value="announce">${actName("announce")}</option></select>
+        <button class="btn primary" id="faddBtn">${t("filters_add")}</button>
+        <button class="btn" id="fToggleBtn">${on?t("greets_disable"):t("greets_enable")}</button></div></div>`;
 }
 
 function renderBienvenidas(){
@@ -1157,6 +1159,7 @@ function wire(){
   if(g("greetAdd"))g("greetAdd").onclick=()=>{ if(g("greetIn").value.trim()) run(`/addgreet ${g("greetIn").value.trim()}`,t("toast_greet_add")); };
   if(g("greetToggle"))g("greetToggle").onclick=()=>run(`/greets ${STATE.greetsEnabled?"off":"on"}`,t("toast_toggled"));
   if(g("faddBtn"))g("faddBtn").onclick=()=>{ const p=g("fpat").value.trim(); if(p) run(`/addfilter ${p} ${g("fact").value}`,t("toast_filter_add")); };
+  if(g("fToggleBtn"))g("fToggleBtn").onclick=()=>run(`/filter ${STATE.filtersEnabled===false?"on":"off"}`,t("toast_toggled"));
   if(g("cmdRun")){const rc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=rc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")rc();};}
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
   if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }

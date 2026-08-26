@@ -29,7 +29,7 @@ use crate::db::Database;
 pub const FLAG_DEFAULTS: &[(&str, bool)] = &[
     ("caps", false),
     ("anon", false),
-    ("general", true),
+    ("general", false),
     ("audios", true),
     ("buzzes", true),
     ("scribbles", true),
@@ -46,8 +46,8 @@ pub const FLAG_DEFAULTS: &[(&str, bool)] = &[
     // `greetmsg`: greet PÚBLICO al entrar (sb0t `Settings.GreetMsg`).
     ("greetmsg", false),
     // `pmgreetmsg`: greet por PM al entrar (sb0t `Settings.PMGreetMsg`).
-    // Default on: preserva el comportamiento histórico de Astra (greet=PM).
-    ("pmgreetmsg", true),
+    // Default off (paridad sb0t: ambos flags off por defecto).
+    ("pmgreetmsg", false),
     // `adminannounce`: los word-filters tipo Announce no disparan para
     // usuarios regulares (sb0t `Settings.AdminAnnounce`, WordFilter.cs:195).
     ("adminannounce", false),

@@ -207,7 +207,8 @@ impl Database {
 
             CREATE TABLE IF NOT EXISTS word_filters (
                 pattern TEXT NOT NULL PRIMARY KEY,
-                action INTEGER NOT NULL DEFAULT 0
+                action INTEGER NOT NULL DEFAULT 0,
+                args TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS urls (
@@ -293,6 +294,10 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_rooms_users ON rooms(users);
             "#,
         )?;
+
+        // Migración: columnas nuevas en tablas existentes (`CREATE TABLE IF NOT
+        // EXISTS` no las agrega). Se ignoran los errores si la columna ya existe.
+        let _ = conn.execute("ALTER TABLE word_filters ADD COLUMN args TEXT NOT NULL DEFAULT ''", []);
 
         // Migración de la tabla `nodes` de PK (ip, port) → PK (ip). Las DBs
         // creadas antes de este cambio tienen la PK compuesta; `CREATE TABLE IF
@@ -1075,14 +1080,14 @@ impl Database {
     // Word filters (filtro de palabras del chat público)
     // ========================================================================
 
-    /// Inserta o actualiza un patrón de filtro con su acción.
+    /// Inserta o actualiza un patrón de filtro con su acción y args.
     /// Retorna `true` si era nuevo.
-    pub fn add_word_filter(&self, pattern: &str, action: u8) -> DbResult<bool> {
+    pub fn add_word_filter(&self, pattern: &str, action: u8, args: &str) -> DbResult<bool> {
         let conn = self.conn.lock();
         let n = conn.execute(
-            "INSERT INTO word_filters (pattern, action) VALUES (?1, ?2) \
-             ON CONFLICT(pattern) DO UPDATE SET action = ?2",
-            params![pattern, action as i64],
+            "INSERT INTO word_filters (pattern, action, args) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(pattern) DO UPDATE SET action = ?2, args = ?3",
+            params![pattern, action as i64, args],
         )?;
         Ok(n > 0)
     }
@@ -1094,12 +1099,17 @@ impl Database {
         Ok(n > 0)
     }
 
-    /// Lista los filtros como `(pattern, action)`.
-    pub fn list_word_filters(&self) -> DbResult<Vec<(String, u8)>> {
+    /// Lista los filtros como `(pattern, action, args)`.
+    pub fn list_word_filters(&self) -> DbResult<Vec<(String, u8, String)>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT pattern, action FROM word_filters ORDER BY pattern")?;
+        let mut stmt =
+            conn.prepare("SELECT pattern, action, args FROM word_filters ORDER BY pattern")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u8))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u8,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {

@@ -26,6 +26,17 @@ pub enum FilterAction {
     /// auto-respuesta por keyword, administrado con `/addline`/`/remline`/
     /// `/viewfilter` (a diferencia de Block/Kick/Ban, que no tienen líneas).
     Announce = 3,
+    /// Bloquear y muzzles al usuario (paridad `FilterType.Muzzle`).
+    Muzzle = 4,
+    /// Bloquear y mover al usuario a otro vroom (args = vroom, paridad
+    /// `FilterType.Move`).
+    Move = 5,
+    /// Bloquear y redirigir al usuario a otro server (args = ip:port o
+    /// arlnk://, paridad `FilterType.Redirect`).
+    Redirect = 6,
+    /// NO bloquea: reemplaza el trigger por `args` en el mensaje (paridad
+    /// `FilterType.Replace`, regex case-insensitive).
+    Replace = 7,
 }
 
 impl FilterAction {
@@ -35,6 +46,10 @@ impl FilterAction {
             1 => FilterAction::Kick,
             2 => FilterAction::Ban,
             3 => FilterAction::Announce,
+            4 => FilterAction::Muzzle,
+            5 => FilterAction::Move,
+            6 => FilterAction::Redirect,
+            7 => FilterAction::Replace,
             _ => FilterAction::Block,
         }
     }
@@ -46,15 +61,23 @@ impl FilterAction {
             FilterAction::Kick => "kick",
             FilterAction::Ban => "ban",
             FilterAction::Announce => "announce",
+            FilterAction::Muzzle => "muzzle",
+            FilterAction::Move => "move",
+            FilterAction::Redirect => "redirect",
+            FilterAction::Replace => "replace",
         }
     }
 
-    /// Parsea desde el nombre (`block`/`kick`/`ban`/`announce`). Default `block`.
+    /// Parsea desde el nombre. Default `block`.
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "kick" => FilterAction::Kick,
             "ban" => FilterAction::Ban,
             "announce" => FilterAction::Announce,
+            "muzzle" => FilterAction::Muzzle,
+            "move" => FilterAction::Move,
+            "redirect" => FilterAction::Redirect,
+            "replace" => FilterAction::Replace,
             _ => FilterAction::Block,
         }
     }
@@ -77,16 +100,20 @@ pub enum RemoveLineResult {
 /// Manager de filtros de palabras: cache en memoria + persistencia SQLite.
 pub struct WordFilterManager {
     db: Arc<Database>,
-    /// Cache de `(pattern, action)`.
-    cache: RwLock<Vec<(String, FilterAction)>>,
+    /// Cache de `(pattern, action, args)`.
+    cache: RwLock<Vec<(String, FilterAction, String)>>,
     /// Líneas de respuesta por pattern, solo relevante para entradas
     /// `Announce`. Vacío (o ausente) para Block/Kick/Ban.
     lines: RwLock<HashMap<String, Vec<String>>>,
     /// ¿Está activo el filtrado? (`#filter on|off`, paridad
     /// `Settings.Filtering` de sb0t). Con esto apagado los patrones siguen
-    /// guardados pero no se evalúa ninguno.
+    /// guardados pero no se evalúa ninguno. Se persiste en el store `kv`
+    /// (sb0t lo guarda en el registro, sobrevive reinicios).
     enabled: std::sync::atomic::AtomicBool,
 }
+
+/// Clave en el store `kv` para el estado on/off del filtrado.
+const KV_ENABLED: &str = "filter_enabled";
 
 impl WordFilterManager {
     /// Crea el manager cargando los filtros existentes desde la DB.
@@ -95,17 +122,24 @@ impl WordFilterManager {
             .list_word_filters()
             .unwrap_or_default()
             .into_iter()
-            .map(|(p, a)| (p, FilterAction::from_u8(a)))
+            .map(|(p, a, args)| (p, FilterAction::from_u8(a), args))
             .collect();
         let mut lines: HashMap<String, Vec<String>> = HashMap::new();
         for (pattern, _idx, text) in db.list_all_word_filter_lines().unwrap_or_default() {
             lines.entry(pattern).or_default().push(text);
         }
+        // Estado on/off persistido (`filter_enabled = "1"/"0"`); por defecto on.
+        let enabled = db
+            .get_kv(KV_ENABLED)
+            .ok()
+            .flatten()
+            .map(|v| v == "1")
+            .unwrap_or(true);
         Self {
             db,
             cache: RwLock::new(cache),
             lines: RwLock::new(lines),
-            enabled: std::sync::atomic::AtomicBool::new(true),
+            enabled: std::sync::atomic::AtomicBool::new(enabled),
         }
     }
 
@@ -115,9 +149,12 @@ impl WordFilterManager {
     }
 
     /// Activa/desactiva el filtrado de la sala sin borrar los patrones.
+    /// El estado se persiste en el store `kv` (paridad `Settings.Filtering`
+    /// de sb0t, que sobrevive reinicios).
     pub fn set_enabled(&self, on: bool) {
         self.enabled
             .store(on, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.db.set_kv(KV_ENABLED, if on { "1" } else { "0" });
     }
 
     /// Cantidad de filtros.
@@ -134,17 +171,20 @@ impl WordFilterManager {
     /// el pattern ya existía con líneas (Announce) y se lo re-agrega con
     /// otra acción, las líneas viejas se descartan (paridad `WordFilter.Add`
     /// de sb0t: re-agregar un trigger reemplaza la entrada por completo).
-    pub fn add(&self, pattern: &str, action: FilterAction) {
+    /// `args` es el parámetro de acciones que lo usan (vroom de `move`,
+    /// destino de `redirect`, reemplazo de `replace`).
+    pub fn add(&self, pattern: &str, action: FilterAction, args: &str) {
         let pattern = pattern.trim().to_ascii_lowercase();
         if pattern.is_empty() {
             return;
         }
-        let _ = self.db.add_word_filter(&pattern, action as u8);
+        let _ = self.db.add_word_filter(&pattern, action as u8, args);
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.iter_mut().find(|(p, _)| *p == pattern) {
+        if let Some(entry) = cache.iter_mut().find(|(p, _, _)| *p == pattern) {
             entry.1 = action;
+            entry.2 = args.to_string();
         } else {
-            cache.push((pattern.clone(), action));
+            cache.push((pattern.clone(), action, args.to_string()));
         }
         drop(cache);
         if action != FilterAction::Announce {
@@ -159,7 +199,7 @@ impl WordFilterManager {
         let pattern = pattern.trim().to_ascii_lowercase();
         let mut cache = self.cache.write();
         let before = cache.len();
-        cache.retain(|(p, _)| *p != pattern);
+        cache.retain(|(p, _, _)| *p != pattern);
         let existed = cache.len() != before;
         drop(cache);
         if existed {
@@ -170,26 +210,55 @@ impl WordFilterManager {
         existed
     }
 
-    /// Lista los filtros como `(pattern, action)`.
-    pub fn list(&self) -> Vec<(String, FilterAction)> {
+    /// Lista los filtros como `(pattern, action, args)`.
+    pub fn list(&self) -> Vec<(String, FilterAction, String)> {
         self.cache.read().clone()
     }
 
-    /// Evalúa un mensaje contra los filtros de censura (Block/Kick/Ban).
-    /// Las entradas `Announce` NUNCA se consideran aquí — no bloquean el
-    /// mensaje, ver [`Self::check_announce`]. Retorna la acción del primer
+    /// Evalúa un mensaje contra los filtros de censura (Block/Kick/Ban/
+    /// Muzzle/Move/Redirect). Las entradas `Announce` y `Replace` NUNCA se
+    /// consideran aquí — no bloquean el mensaje (ver [`Self::check_announce`]
+    /// y [`Self::check_replace`]). Retorna la acción y sus args del primer
     /// patrón que matchee, o `None` si ninguno.
-    pub fn check(&self, text: &str) -> Option<FilterAction> {
+    pub fn check(&self, text: &str) -> Option<(FilterAction, String)> {
         if !self.is_enabled() {
             return None;
         }
         let lower = text.to_ascii_lowercase();
-        for (pattern, action) in self.cache.read().iter() {
-            if *action != FilterAction::Announce && matches_pattern(pattern, &lower) {
-                return Some(*action);
+        for (pattern, action, args) in self.cache.read().iter() {
+            if *action != FilterAction::Announce
+                && *action != FilterAction::Replace
+                && matches_pattern(pattern, &lower)
+            {
+                return Some((*action, args.clone()));
             }
         }
         None
+    }
+
+    /// Para los filtros `Replace`: reemplaza el trigger por su `args` en el
+    /// texto (paridad `FilterType.Replace` de sb0t, regex case-insensitive).
+    /// Retorna `Some(texto_reemplazado)` si algún patrón Replace matcheó, o
+    /// `None` si no. El mensaje NO se bloquea — se difunde el texto nuevo.
+    pub fn check_replace(&self, text: &str) -> Option<String> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let lower = text.to_ascii_lowercase();
+        let mut out = text.to_string();
+        let mut changed = false;
+        for (pattern, action, args) in self.cache.read().iter() {
+            if *action == FilterAction::Replace && matches_pattern(pattern, &lower) {
+                changed = true;
+                let regex =
+                    regex::RegexBuilder::new(&regex::escape(pattern).replace("\\?", ".").replace("\\*", ".*"))
+                        .case_insensitive(true)
+                        .build()
+                        .ok()?;
+                out = regex.replace_all(&out, args.as_str()).to_string();
+            }
+        }
+        changed.then_some(out)
     }
 
     /// Evalúa un mensaje contra los filtros `Announce`. Si matchea,
@@ -205,7 +274,7 @@ impl WordFilterManager {
         }
         let lower = text.to_ascii_lowercase();
         let cache = self.cache.read();
-        for (pattern, action) in cache.iter() {
+        for (pattern, action, _) in cache.iter() {
             if *action == FilterAction::Announce && matches_pattern(pattern, &lower) {
                 let lines = self.lines.read().get(pattern).cloned().unwrap_or_default();
                 if lines.is_empty() {
@@ -230,7 +299,7 @@ impl WordFilterManager {
         let cache = self.cache.read();
         let is_announce = cache
             .iter()
-            .any(|(p, a)| *p == pattern && *a == FilterAction::Announce);
+            .any(|(p, a, _)| *p == pattern && *a == FilterAction::Announce);
         drop(cache);
         if !is_announce {
             return Err(format!("'{}' is not an announce-type filter", pattern));
@@ -260,7 +329,7 @@ impl WordFilterManager {
             lines.remove(&pattern);
             drop(lines);
             let _ = self.db.clear_word_filter_lines(&pattern);
-            self.cache.write().retain(|(p, _)| *p != pattern);
+            self.cache.write().retain(|(p, _, _)| *p != pattern);
             let _ = self.db.remove_word_filter(&pattern);
             RemoveLineResult::FilterRemoved
         } else {
@@ -281,7 +350,7 @@ impl WordFilterManager {
         let cache = self.cache.read();
         let is_announce = cache
             .iter()
-            .any(|(p, a)| *p == pattern && *a == FilterAction::Announce);
+            .any(|(p, a, _)| *p == pattern && *a == FilterAction::Announce);
         drop(cache);
         if !is_announce {
             return None;
@@ -374,9 +443,9 @@ mod tests {
     fn manager_add_check_remove() {
         let m = WordFilterManager::new(mem_db());
         assert!(m.check("hello world").is_none());
-        m.add("Spam", FilterAction::Ban);
+        m.add("Spam", FilterAction::Ban, "");
         // case-insensitive
-        assert_eq!(m.check("this is SPAM").unwrap(), FilterAction::Ban);
+        assert_eq!(m.check("this is SPAM").unwrap().0, FilterAction::Ban);
         assert!(m.remove("spam"));
         assert!(m.check("this is spam").is_none());
         assert!(!m.remove("spam"));
@@ -385,10 +454,10 @@ mod tests {
     #[test]
     fn manager_update_action() {
         let m = WordFilterManager::new(mem_db());
-        m.add("x", FilterAction::Block);
-        m.add("x", FilterAction::Kick);
+        m.add("x", FilterAction::Block, "");
+        m.add("x", FilterAction::Kick, "");
         assert_eq!(m.len(), 1);
-        assert_eq!(m.check("xyz").unwrap(), FilterAction::Kick);
+        assert_eq!(m.check("xyz").unwrap().0, FilterAction::Kick);
     }
 
     #[test]
@@ -396,16 +465,34 @@ mod tests {
         let db = mem_db();
         {
             let m = WordFilterManager::new(db.clone());
-            m.add("badword", FilterAction::Kick);
+            m.add("badword", FilterAction::Kick, "");
         }
         let m2 = WordFilterManager::new(db);
-        assert_eq!(m2.check("a badword here").unwrap(), FilterAction::Kick);
+        assert_eq!(m2.check("a badword here").unwrap().0, FilterAction::Kick);
+    }
+
+    #[test]
+    fn enabled_state_persists_across_managers() {
+        // `#filter off` debe sobrevivir un reinicio (paridad `Settings.Filtering`).
+        let db = mem_db();
+        {
+            let m = WordFilterManager::new(db.clone());
+            assert!(m.is_enabled(), "por defecto activo");
+            m.set_enabled(false);
+            assert!(!m.is_enabled());
+        }
+        let m2 = WordFilterManager::new(db);
+        assert!(!m2.is_enabled(), "el estado off se restaura tras reiniciar");
+        m2.set_enabled(true);
+        assert!(m2.is_enabled());
+        let m3 = WordFilterManager::new(mem_db());
+        assert!(m3.is_enabled());
     }
 
     #[test]
     fn announce_does_not_censor() {
         let m = WordFilterManager::new(mem_db());
-        m.add("!rules", FilterAction::Announce);
+        m.add("!rules", FilterAction::Announce, "");
         m.add_line("!rules", "line one").unwrap();
         // check() (censura) nunca debe ver entradas Announce.
         assert!(m.check("!rules please").is_none());
@@ -414,7 +501,7 @@ mod tests {
     #[test]
     fn announce_check_returns_lines_and_remainder() {
         let m = WordFilterManager::new(mem_db());
-        m.add("!hi", FilterAction::Announce);
+        m.add("!hi", FilterAction::Announce, "");
         m.add_line("!hi", "hello +n").unwrap();
         m.add_line("!hi", "second line").unwrap();
         let (pattern, lines, remainder) = m.check_announce("!hi there").unwrap();
@@ -426,7 +513,7 @@ mod tests {
     #[test]
     fn add_line_fails_on_non_announce() {
         let m = WordFilterManager::new(mem_db());
-        m.add("bad", FilterAction::Block);
+        m.add("bad", FilterAction::Block, "");
         assert!(m.add_line("bad", "won't work").is_err());
         assert!(m.add_line("nonexistent", "won't work").is_err());
     }
@@ -434,7 +521,7 @@ mod tests {
     #[test]
     fn remove_line_cascades_to_filter_removal() {
         let m = WordFilterManager::new(mem_db());
-        m.add("!x", FilterAction::Announce);
+        m.add("!x", FilterAction::Announce, "");
         m.add_line("!x", "only line").unwrap();
         assert_eq!(m.remove_line("!x", 0), RemoveLineResult::FilterRemoved);
         assert_eq!(m.view("!x"), None);
@@ -444,7 +531,7 @@ mod tests {
     #[test]
     fn remove_line_keeps_filter_when_lines_remain() {
         let m = WordFilterManager::new(mem_db());
-        m.add("!x", FilterAction::Announce);
+        m.add("!x", FilterAction::Announce, "");
         m.add_line("!x", "line 0").unwrap();
         m.add_line("!x", "line 1").unwrap();
         assert_eq!(m.remove_line("!x", 0), RemoveLineResult::LineRemoved);
@@ -455,7 +542,7 @@ mod tests {
     fn remove_line_not_found() {
         let m = WordFilterManager::new(mem_db());
         assert_eq!(m.remove_line("nope", 0), RemoveLineResult::NotFound);
-        m.add("!x", FilterAction::Announce);
+        m.add("!x", FilterAction::Announce, "");
         m.add_line("!x", "line 0").unwrap();
         assert_eq!(m.remove_line("!x", 5), RemoveLineResult::NotFound);
     }
@@ -463,9 +550,9 @@ mod tests {
     #[test]
     fn view_only_works_on_announce() {
         let m = WordFilterManager::new(mem_db());
-        m.add("bad", FilterAction::Block);
+        m.add("bad", FilterAction::Block, "");
         assert_eq!(m.view("bad"), None);
-        m.add("!x", FilterAction::Announce);
+        m.add("!x", FilterAction::Announce, "");
         m.add_line("!x", "hi").unwrap();
         assert_eq!(m.view("!x"), Some(vec!["hi".to_string()]));
     }
@@ -475,7 +562,7 @@ mod tests {
         let db = mem_db();
         {
             let m = WordFilterManager::new(db.clone());
-            m.add("!p", FilterAction::Announce);
+            m.add("!p", FilterAction::Announce, "");
             m.add_line("!p", "one").unwrap();
             m.add_line("!p", "two").unwrap();
         }
@@ -486,10 +573,38 @@ mod tests {
     #[test]
     fn re_adding_pattern_discards_stale_lines() {
         let m = WordFilterManager::new(mem_db());
-        m.add("!x", FilterAction::Announce);
+        m.add("!x", FilterAction::Announce, "");
         m.add_line("!x", "hi").unwrap();
-        m.add("!x", FilterAction::Block); // re-add as a different type
+        m.add("!x", FilterAction::Block, ""); // re-add as a different type
         assert_eq!(m.view("!x"), None);
         assert!(m.add_line("!x", "won't work").is_err());
+    }
+
+    #[test]
+    fn check_returns_args_for_move_and_redirect() {
+        let m = WordFilterManager::new(mem_db());
+        m.add("cambiate", FilterAction::Move, "5");
+        assert_eq!(m.check("cambiate ya").unwrap(), (FilterAction::Move, "5".to_string()));
+        m.add("vete", FilterAction::Redirect, "10.0.0.9:6000");
+        assert_eq!(
+            m.check("vete ahora").unwrap(),
+            (FilterAction::Redirect, "10.0.0.9:6000".to_string())
+        );
+    }
+
+    #[test]
+    fn check_skips_announce_and_replace() {
+        let m = WordFilterManager::new(mem_db());
+        m.add("!a", FilterAction::Announce, "");
+        m.add("repl", FilterAction::Replace, "***");
+        assert!(m.check("!a y repl").is_none());
+    }
+
+    #[test]
+    fn replace_rewrites_text() {
+        let m = WordFilterManager::new(mem_db());
+        m.add("spam", FilterAction::Replace, "***");
+        assert_eq!(m.check_replace("this is spam, spam again").unwrap(), "this is ***, *** again");
+        assert!(m.check_replace("clean message").is_none());
     }
 }

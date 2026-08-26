@@ -406,16 +406,17 @@ impl AresUser {
     }
 
     /// Línea de sistema (respuestas de comandos, avisos del server). Para
-    /// clientes web va como `NOSUCH:` (paridad `ib0tClient.Print` de sb0t:
-    /// texto de servidor en la ventana principal, no un PM); para clientes
-    /// Ares va como PM del bot.
-    pub fn print(&self, bot_name: &str, text: &str) -> bool {
+    /// clientes web va como `NOSUCH:`; para clientes Ares como el paquete
+    /// `ServerNosuch` — paridad `client.Print` de sb0t (`AresClient.Print` →
+    /// `TCPOutbound.NoSuch`): el texto se muestra en la ventana de la sala de
+    /// ESE cliente, NO como PM del bot y sin difundirse a la sala.
+    pub fn print(&self, _bot_name: &str, text: &str) -> bool {
         if let Some(tx) = &self.ws_text_sender {
             return tx
                 .send(format!("NOSUCH:{}:{}", ws_len(text), text))
                 .is_ok();
         }
-        self.send(crate::outbound::build_pvt_c(bot_name, text, self.ares_crypto))
+        self.send(crate::outbound::build_nosuch_c(text, self.ares_crypto))
     }
 
     /// Línea suelta en la sala, sin emisor (`NoSuch`). A diferencia de
@@ -429,6 +430,14 @@ impl AresUser {
                 .is_ok();
         }
         self.send(crate::outbound::build_nosuch_c(text, self.ares_crypto))
+    }
+
+    /// Manda HTML a un cliente Ares con soporte de HTML (paridad
+    /// `AresClient.SendHTML` → `TCPOutbound.HTML`). Se usa para los
+    /// marcadores MOTDSTART/MOTDEND y el embed de media del MOTD. Los
+    /// clientes web no lo procesan (sb0t: `ib0tClient.SupportsHTML == false`).
+    pub fn send_html(&self, text: &str) -> bool {
+        self.send(crate::outbound::build_html_c(text, self.ares_crypto))
     }
 
     /// PM real desde el bot (u otro emisor): para clientes web abre la

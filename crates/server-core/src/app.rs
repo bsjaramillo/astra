@@ -1060,6 +1060,99 @@ impl AppContext {
         let _ = self.link_events.send(event);
     }
 
+    /// Anuncia un cambio de vroom de `target` (paridad del setter `Vroom` de
+    /// sb0t + `Helpers.FakeRejoinSequence`): PART a los usuarios del vroom
+    /// viejo, JOIN a los del nuevo (incluido el propio movido), y refresco de
+    /// la userlist del vroom nuevo para el movido. Web-aware: los clientes web
+    /// reciben el texto ib0t equivalente (PART/JOININFO/USERLIST), no binario.
+    pub fn announce_vroom_move(
+        &self,
+        target: &crate::user_pool::AresUser,
+        old_vroom: u16,
+        new_vroom: u16,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let name = target.name.read().clone();
+        let level = *target.level.read() as u8;
+        let pmsg = target.personal_message.lock().clone();
+        let avatar_b64 = web_avatar_b64(target);
+        let id = target.id;
+        let iw = target.inbizier_web;
+        let im = target.inbizier_mobile;
+        let join_text = if iw || im {
+            crate::outbound::build_web_joininfo(&name, &pmsg, &avatar_b64, id, level, iw, im)
+        } else {
+            crate::outbound::build_web_userlist_item(&name, level)
+        };
+        let part_text = crate::outbound::build_web_part(&name);
+
+        for u in self.user_pool.users() {
+            if !u.logged_in || u.quarantined.load(Relaxed) {
+                continue;
+            }
+            let uv = *u.vroom.read();
+            if uv == old_vroom {
+                // PART del que se fue.
+                self.send_vroom_event(&*u, |c| crate::outbound::build_part_c(target, c), &part_text);
+            } else if uv == new_vroom {
+                // JOIN del que llega (el propio movido se anuncia a sí mismo).
+                self.send_vroom_event(
+                    &*u,
+                    |c| crate::outbound::build_join_or_userlist_c(target, c),
+                    &join_text,
+                );
+            }
+        }
+
+        // Refresco de la userlist del propio movido en el vroom nuevo.
+        let userlist_end = crate::outbound::build_web_userlist_end();
+        for u in self.user_pool.users() {
+            if !u.logged_in
+                || u.quarantined.load(Relaxed)
+                || u.id == target.id
+                || *u.vroom.read() != new_vroom
+            {
+                continue;
+            }
+            let uname = u.name.read().clone();
+            let ulevel = *u.level.read() as u8;
+            let upmsg = u.personal_message.lock().clone();
+            let uav = web_avatar_b64(&*u);
+            let uiw = u.inbizier_web;
+            let uim = u.inbizier_mobile;
+            let item = if iw || im {
+                crate::outbound::build_web_userinfo(&uname, &upmsg, &uav, u.id, ulevel, uiw, uim)
+            } else {
+                crate::outbound::build_web_userlist_item(&uname, ulevel)
+            };
+            self.send_vroom_event(
+                target,
+                |c| crate::outbound::build_userlist_item_c(&*u, c),
+                &item,
+            );
+        }
+        self.send_vroom_event(
+            target,
+            |_c| crate::outbound::build_userlist_end(),
+            &userlist_end,
+        );
+    }
+
+    /// Envía un paquete de cambio de vroom a un destinatario: binario para
+    /// clientes Ares (reconstruido con su key si cifran), texto ib0t para web.
+    fn send_vroom_event<F>(&self, u: &crate::user_pool::AresUser, build: F, web_text: &str)
+    where
+        F: Fn(crate::outbound::Crypto) -> bytes::Bytes,
+    {
+        if let Some(tx) = &u.ws_text_sender {
+            let _ = tx.send(web_text.to_string());
+        } else if let Some(crypto) = u.ares_crypto {
+            let _ = u.send(build(Some(crypto)));
+        } else {
+            let _ = u.send(build(None));
+        }
+    }
+
     /// Aplica una acción admin de red ([`LinkEvent::AdminAction`]) al pool
     /// local: usada al recibir un `host*` desde otro servidor enlazado. Retorna
     /// `true` si el objetivo estaba conectado localmente y se aplicó.
@@ -1487,5 +1580,22 @@ mod tests {
         // Case-insensitive (los nicks de Ares no distinguen mayúsculas).
         let _third = add_user(&ctx, 3, "NOMADA");
         assert!(ctx.is_ghost_departure(2, "Nomada"));
+    }
+}
+
+/// Base64 del avatar de un usuario para los mensajes USERINFO/JOININFO web
+/// (paridad `handler::avatar_b64_of` del crate web: usa el full_avatar si hay,
+/// si no el avatar chico).
+fn web_avatar_b64(user: &crate::user_pool::AresUser) -> String {
+    use base64::Engine as _;
+    let full = user.full_avatar.lock();
+    if let Some(bytes) = full.as_ref() {
+        return base64::engine::general_purpose::STANDARD.encode(bytes);
+    }
+    drop(full);
+    let small = user.avatar.lock();
+    match small.as_ref() {
+        Some(bytes) => base64::engine::general_purpose::STANDARD.encode(bytes),
+        None => String::new(),
     }
 }

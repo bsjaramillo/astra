@@ -153,11 +153,121 @@ pub fn build_part_c(user: &AresUser, crypto: Crypto) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+// ============================================================================
+// Texto del protocolo web (ib0t/inbizio) para los anuncios de sala. Viven aquí
+// (y no solo en el crate web) porque `commands` los necesita para difundir un
+// cambio de vroom a los clientes web sin depender del crate web (el web
+// depende de commands, no al revés). Son los mismos formatos que
+// `crates/web/src/protocol.rs`.
+// ============================================================================
+
+/// Largo en unidades UTF-16 (paridad `String.length` de JS).
+fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// `PART:{len}:{name}` — un usuario se fue (o cambió de vroom).
+pub fn build_web_part(name: &str) -> String {
+    format!("PART:{}:{}", utf16_len(name), name)
+}
+
+/// `USERLIST:{nameLen},{levelLen}:{name}{level}` — item de userlist simple
+/// (no inbizier). El nivel sale en la escala Ares 0..3.
+pub fn build_web_userlist_item(name: &str, level: u8) -> String {
+    let level_str = ares_level(level).to_string();
+    format!(
+        "USERLIST:{},{}:{}{}",
+        utf16_len(name),
+        utf16_len(&level_str),
+        name,
+        level_str
+    )
+}
+
+/// `USERLIST_END:` — fin de la userlist.
+pub fn build_web_userlist_end() -> String {
+    "USERLIST_END:".to_string()
+}
+
+/// `JOININFO:{nameLen},{pmsgLen},{avLen},{idLen},{levelLen},1,1:{name}{pmsg}
+/// {avatar}{id}{level}{web}{mobile}` — un usuario entró (o cambió de vroom),
+/// formato que esperan los clientes inbizier.
+pub fn build_web_joininfo(
+    name: &str,
+    pmsg: &str,
+    avatar_b64: &str,
+    id: u16,
+    level: u8,
+    inbizier_web: bool,
+    inbizier_mobile: bool,
+) -> String {
+    userinfo_like(
+        "JOININFO", name, pmsg, avatar_b64, id, level, inbizier_web, inbizier_mobile,
+    )
+}
+
+/// `USERINFO:{...}` — igual que `JOININFO` pero con ident USERINFO (entrada
+/// de userlist de un usuario ya presente, formato inbizier).
+pub fn build_web_userinfo(
+    name: &str,
+    pmsg: &str,
+    avatar_b64: &str,
+    id: u16,
+    level: u8,
+    inbizier_web: bool,
+    inbizier_mobile: bool,
+) -> String {
+    userinfo_like(
+        "USERINFO", name, pmsg, avatar_b64, id, level, inbizier_web, inbizier_mobile,
+    )
+}
+
+fn userinfo_like(
+    ident: &str,
+    name: &str,
+    pmsg: &str,
+    avatar_b64: &str,
+    id: u16,
+    level: u8,
+    inbizier_web: bool,
+    inbizier_mobile: bool,
+) -> String {
+    let id_str = id.to_string();
+    let level_str = ares_level(level).to_string();
+    let web = if inbizier_web { "1" } else { "0" };
+    let mobile = if inbizier_mobile { "1" } else { "0" };
+    format!(
+        "{}:{},{},{},{},{},1,1:{}{}{}{}{}{}{}",
+        ident,
+        utf16_len(name),
+        utf16_len(pmsg),
+        utf16_len(avatar_b64),
+        utf16_len(&id_str),
+        utf16_len(&level_str),
+        name,
+        pmsg,
+        avatar_b64,
+        id_str,
+        level_str,
+        web,
+        mobile
+    )
+}
+
+/// Construye un HTML (server → cliente Ares con soporte HTML): manda el
+/// string tal cual (paridad `TCPOutbound.HTML` de sb0t, que escribe los bytes
+/// UTF-8 sin null terminator). Se usa para los marcadores `<!--MOTDSTART-->`/
+/// `<!--MOTDEND-->` y el embed de media del MOTD.
+///
+/// Formato: `bytes utf8` (sin null).
+pub fn build_html_c(text: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerHtml, crypto);
+    w.write_bytes(text.as_bytes()).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
 /// Construye un AVATAR (server → cliente Ares): notifica el avatar de
 /// `target_name` a un destinatario (paridad `TCPOutbound.Avatar`).
-///
-/// Formato: `str target_name` + `bytes avatar_png` (sin largo explícito:
-/// el resto del paquete es el PNG).
 pub fn build_avatar_c(target_name: &str, avatar: &[u8], crypto: Crypto) -> Bytes {
     let mut w = PacketWriter::with_msg_crypto(TcpMsg::Avatar, crypto);
     w.write_string_nt(target_name).ok();

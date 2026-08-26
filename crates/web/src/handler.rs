@@ -219,6 +219,24 @@ pub async fn handle_connection(
     send_greet_ws(&ctx, &user, &ws_text_tx);
     // MOTD (message of the day), tras el greet.
     send_motd_ws(&ctx, &user, &ws_text_tx);
+    // Feeds de admin: ipsend (IP del que entra) y logsend (log de join),
+    // paridad con el path TCP (tcp_handler.rs) — un join WEB también debe
+    // disparar los feeds para los admin suscritos.
+    {
+        let jname = user.name.read().clone();
+        let ipsend_line = format!(
+            "IPSEND: {} {} {} {}",
+            jname, user.external_ip, user.local_ip, user.data_port
+        );
+        let logsend_line = format!("LOG: join {} [{}]", jname, user.external_ip);
+        let self_id = user.id;
+        ctx.notify_subscribers(&ipsend_line, |u| {
+            u.id != self_id && u.sub_ipsend.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        ctx.notify_subscribers(&logsend_line, |u| {
+            u.id != self_id && u.sub_logsend.load(std::sync::atomic::Ordering::Relaxed)
+        });
+    }
     // Replay del historial de chat si el flag `history` está activo
     // (paridad sb0t ServerEvents.cs:186 — aplica también a clientes web).
     ctx.replay_history(&user);
@@ -642,7 +660,8 @@ async fn ws_handshake_login(
         use base64::Engine as _;
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&login.avatar_b64) {
             *user.full_avatar.lock() = Some(bytes.clone());
-            *user.avatar.lock() = Some(bytes.clone());
+            // `avatar` (canal Ares) escalado a ≤384px JPEG (paridad Scale).
+            *user.avatar.lock() = Some(server_core::avatars::scale_avatar(&bytes));
             *user.org_avatar.lock() = Some(bytes);
         }
     }
@@ -852,7 +871,7 @@ async fn dispatch_ws_message(
             if !is_cmd && ws_is_text_flooding(ctx, user, scripting, FloodKind::Public, args) {
                 return Ok(true);
             }
-            handle_ws_public(ctx, user, args, scripting);
+            handle_ws_public(ctx, user, args.to_string(), scripting);
         }
         "EMOTE" => {
             if ws_is_text_flooding(ctx, user, scripting, FloodKind::Emote, args) {
@@ -929,7 +948,7 @@ fn handle_ws_command(
 fn handle_ws_public(
     ctx: &AppContext,
     user: &Arc<AresUser>,
-    text: &str,
+    mut text: String,
     scripting: &astra_scripting::ScriptHandle,
 ) {
     if text.is_empty() {
@@ -943,7 +962,7 @@ fn handle_ws_public(
             let _ = scripting.eval_room(&name, code);
             return; // @-prefixed: suprimir salida, cancelar texto (sb0t parity)
         }
-        if let Some(out) = scripting.eval_room(&name, text) {
+        if let Some(out) = scripting.eval_room(&name, &text) {
             let bot = ctx.settings.bot_name.clone();
             broadcast_to_room(ctx, user, |c| outbound::build_public_c(&bot, &out, c));
         }
@@ -969,16 +988,22 @@ fn handle_ws_public(
     // mensaje que empezara con `#` o `/` (ver `handle_public` del path TCP).
     if let Some(rest) = text.strip_prefix('#') {
         let hides_text = rest.starts_with("login") || rest.starts_with("register");
-        handle_ws_command(ctx, user, text, scripting);
+        handle_ws_command(ctx, user, &text, scripting);
         if hides_text {
             return;
         }
     }
     // Word filter: solo aplica (censura) a usuarios regulares (Moderator+ exentos).
     if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
-        if let Some(action) = ctx.word_filter.check(text) {
-            apply_filter_action_ws(ctx, user, action);
+        if let Some((action, fargs)) = ctx.word_filter.check(&text) {
+            apply_filter_action_ws(ctx, user, action, &fargs);
             return;
+        }
+    }
+    // Filtro `replace`: NO bloquea — reemplaza el trigger y continúa.
+    if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
+        if let Some(replaced) = ctx.word_filter.check_replace(&text) {
+            text = replaced;
         }
     }
     // Filtro Announce: dispara para cualquier usuario, NO bloquea el
@@ -987,14 +1012,14 @@ fn handle_ws_public(
     let announce_blocked = ctx.room_flags.get("adminannounce")
         && *user.level.read() == server_core::ILevel::Regular;
     if !announce_blocked {
-        if let Some((_, lines, remainder)) = ctx.word_filter.check_announce(text) {
+        if let Some((_, lines, remainder)) = ctx.word_filter.check_announce(&text) {
             let sender_name = user.name.read().clone();
             broadcast_announce_lines_ws(ctx, &sender_name, user.external_ip, &lines, &remainder);
         }
     }
     // Efectos de castigo por-usuario (/paint, /kewl, /lower, /kiddy): el path
     // TCP ya los aplica en handle_public; este path web no lo hacía.
-    let mut text = server_core::text_effects::apply_punish_effects(user, text);
+    let mut text = server_core::text_effects::apply_punish_effects(user, &text);
     // Caps monitoring de sala (paridad TCP).
     if ctx.room_flags.get("caps") && server_core::text_effects::is_shouting(&text) {
         text = text.to_lowercase();
@@ -1025,6 +1050,25 @@ fn handle_ws_public(
         broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, text, c));
     }
     ctx.record_message(&name, text, false);
+    // Vspy: copia del mensaje a los admin `/vspy` de otros vrooms (paridad
+    // con el path TCP; un mensaje WEB también debe monitorearse).
+    vspy_copy_ws(ctx, user, &name, text);
+}
+
+/// Copia un mensaje público a los suscriptores de `/vspy` que estén en un
+/// vroom DISTINTO al del emisor (paridad `vspy_copy` del path TCP).
+fn vspy_copy_ws(ctx: &AppContext, sender: &AresUser, name: &str, text: &str) {
+    let sender_vroom = *sender.vroom.read();
+    let line = format!("[vroom {}] {}: {}", sender_vroom, name, text);
+    for u in ctx.user_pool.users() {
+        if u.logged_in
+            && u.sub_vspy.load(std::sync::atomic::Ordering::Relaxed)
+            && *u.vroom.read() != sender_vroom
+            && (*u.level.read() as u8) >= server_core::ILevel::Moderator as u8
+        {
+            let _ = u.send_pvt(&ctx.settings.bot_name, &line);
+        }
+    }
 }
 
 /// PM saliente de un usuario web: `PM:{nameLen},{textLen}:{target}{text}`.
@@ -1218,22 +1262,21 @@ fn handle_ws_avatar(
     }
     // `full_avatar` es el que ven los clientes web (base64, sin límite de
     // tamaño). `avatar` es el que viaja por el canal binario Ares, que sí
-    // tiene tope: sb0t descarta los de 4064 bytes o más
-    // (`TCPProcessor.Avatar`). Una foto de móvil subida desde la web supera
-    // de largo los 64 KB del framing Ares, y mandarla igual desincronizaba
-    // el stream de los clientes nativos — dejaban de ver todo el chat.
-    let fits_ares = bytes.len() < server_core::avatars::MAX_ARES_AVATAR;
-    if !fits_ares {
+    // tiene tope: sb0t lo ESCALA a ≤384px y lo re-comprime a JPEG
+    // (`AresClient.Scale`), no lo descarta. Una foto de móvil supera de largo
+    // el framing Ares y mandarla igual desincronizaba el stream de los
+    // clientes nativos.
+    let scaled = server_core::avatars::scale_avatar(&bytes);
+    if scaled.len() >= server_core::avatars::MAX_ARES_AVATAR {
         debug!(
-            "avatar de '{}' ({} bytes) supera el máximo de {} del protocolo Ares: \
-             solo se manda a los clientes web",
+            "avatar de '{}' ({}) aún supera {} tras escalar: solo web",
             user.name.read(),
-            bytes.len(),
+            scaled.len(),
             server_core::avatars::MAX_ARES_AVATAR
         );
     }
     *user.full_avatar.lock() = Some(bytes.clone());
-    *user.avatar.lock() = fits_ares.then(|| bytes.clone());
+    *user.avatar.lock() = Some(scaled.clone());
     *user.org_avatar.lock() = Some(bytes);
     user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -1268,7 +1311,11 @@ fn handle_ws_avatar(
                 let _ = tx.send(info.clone());
             }
         } else if let Some(bytes) = &raw_avatar {
-            let _ = u.send(outbound::build_avatar_c(&name, bytes, u.ares_crypto));
+            // El escalado normalmente deja el avatar bajo el tope; si aún lo
+            // supera, no se manda al canal binario (rompería el stream Ares).
+            if bytes.len() < server_core::avatars::MAX_ARES_AVATAR {
+                let _ = u.send(outbound::build_avatar_c(&name, bytes, u.ares_crypto));
+            }
         }
     }
 }
@@ -1508,6 +1555,7 @@ fn apply_filter_action_ws(
     ctx: &AppContext,
     user: &Arc<AresUser>,
     action: server_core::FilterAction,
+    fargs: &str,
 ) {
     use server_core::FilterAction;
     if let Some(tx) = &user.ws_text_sender {
@@ -1519,6 +1567,41 @@ fn apply_filter_action_ws(
     match action {
         FilterAction::Block => {}
         FilterAction::Kick => filter_remove_user_ws(ctx, user),
+        FilterAction::Muzzle => {
+            user.muzzled.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        FilterAction::Move => {
+            let Ok(new_vroom) = fargs.trim().parse::<u16>() else {
+                return;
+            };
+            let old_vroom = *user.vroom.read();
+            if ctx.vrooms.get(new_vroom).is_none() {
+                let _ = ctx.vrooms.create(new_vroom, None, None);
+            }
+            *user.vroom.write() = new_vroom;
+            ctx.announce_vroom_move(user, old_vroom, new_vroom);
+        }
+        FilterAction::Redirect => {
+            let dest = fargs.trim().strip_prefix("astrahash://").unwrap_or(fargs.trim());
+            let dest_parsed = server_core::hashlink::decode(dest)
+                .map(|hr| (std::net::IpAddr::V4(hr.ip), hr.port))
+                .or_else(|| {
+                    let (ip_str, port_str) = dest.rsplit_once(':')?;
+                    Some((
+                        ip_str.parse::<std::net::IpAddr>().ok()?,
+                        port_str.parse::<u16>().ok()?,
+                    ))
+                });
+            if let Some((ip, port)) = dest_parsed {
+                let _ = user.send(outbound::build_redirect_c(
+                    ip,
+                    port,
+                    &ctx.settings.room_name,
+                    user.ares_crypto,
+                ));
+                filter_remove_user_ws(ctx, user);
+            }
+        }
         FilterAction::Ban => {
             let _ = ctx.bans.ban(
                 &user.name.read(),
@@ -1528,11 +1611,15 @@ fn apply_filter_action_ws(
                 user.local_ip,
                 user.data_port,
             );
+            // Feed /bansend a los admins suscritos (paridad con handle_ban).
+            let bansend_line = format!("BANSEND: word filter banned {}", user.name.read());
+            ctx.notify_subscribers(&bansend_line, |u| {
+                u.sub_bansend.load(std::sync::atomic::Ordering::Relaxed)
+            });
             filter_remove_user_ws(ctx, user);
         }
-        FilterAction::Announce => {
-            // No debería llegar aquí: `check()` (censura) nunca devuelve
-            // Announce — ver `check_announce`, que no bloquea el mensaje.
+        FilterAction::Announce | FilterAction::Replace => {
+            // No deberían llegar aquí: `check()` no devuelve Announce/Replace.
         }
     }
 }
