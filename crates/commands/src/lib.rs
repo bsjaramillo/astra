@@ -2070,8 +2070,9 @@ fn handle_shout(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 }
 
 /// `/stats` (Mod, paridad sb0t `Eval.Stats`): bloque multilínea con las
-/// métricas del server (Category.Stats; se omiten las que Astra no trackea:
-/// language/hashlink/roomsearch size).
+/// métricas del server (Category.Stats, mismo orden que sb0t). El hashlink
+/// usa `server_ip`+`port` configurados; si `server_ip` no está declarado, se
+/// omite la línea (no hay IP pública fiable).
 fn handle_stats(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     let secs = ctx.uptime_secs();
     let uptime = format!("{}d {}h {}m", secs / 86400, (secs / 3600) % 24, (secs / 60) % 60);
@@ -2081,9 +2082,31 @@ fn handle_stats(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         .iter()
         .filter(|u| u.quarantined.load(std::sync::atomic::Ordering::Relaxed))
         .count();
-    let lines = [
+    // Hashlink de la sala (paridad `Server.Chatroom.Hashlink` de sb0t):
+    // `arlnk://` + encode(ip, port, room_name).
+    let hashlink = ctx
+        .settings
+        .server_ip
+        .trim()
+        .parse::<std::net::Ipv4Addr>()
+        .ok()
+        .map(|ip| {
+            server_core::hashlink::encode(&server_core::hashlink::HashlinkRoom {
+                ip,
+                port: ctx.settings.port,
+                name: ctx.settings.room_name.clone(),
+            })
+        });
+    let roomsearch_size = ctx.db.list_rooms().map(|r| r.len()).unwrap_or(0);
+    let mut lines = vec![
         format!("Stats for {}", ctx.settings.room_name),
         String::new(),
+        format!("Language: {}", language_code_to_string(ctx.settings.language)),
+    ];
+    if let Some(h) = hashlink {
+        lines.push(format!("Hashlink: arlnk://{}", h));
+    }
+    lines.extend([
         format!("Uptime: {}", uptime),
         format!("Bytes received: {}", ctx.stats.bytes_in()),
         format!("Bytes sent: {}", ctx.stats.bytes_out()),
@@ -2097,7 +2120,8 @@ fn handle_stats(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
         format!("Peak user count: {}", ctx.stats.peak_users()),
         format!("Message count: {}", ctx.stats.messages()),
         format!("PM count: {}", ctx.stats.pms()),
-    ];
+        format!("Roomsearch size: {}", roomsearch_size),
+    ]);
     for line in lines {
         send_system_line(ctx, user, &line);
     }
@@ -6615,8 +6639,35 @@ mod tests {
         let header = next_nosuch_text(&mut a_rx);
         assert!(header.starts_with("Stats for "), "header: {header}");
         let _blank = next_nosuch_text(&mut a_rx);
+        // Orden sb0t: Language (sin hashlink porque el test no declara server_ip).
+        assert_eq!(next_nosuch_text(&mut a_rx), "Language: English");
         assert!(next_nosuch_text(&mut a_rx).starts_with("Uptime: "));
         assert!(next_nosuch_text(&mut a_rx).starts_with("Bytes received: "));
+    }
+
+    #[test]
+    fn builtin_stats_includes_hashlink_and_roomsearch_size() {
+        // Con `server_ip` declarado, stats muestra el hashlink de la sala
+        // (arlnk://) y el tamaño del roomsearch (paridad Category.Stats#2/#16).
+        let mut settings = Settings::default();
+        settings.server_ip = "203.0.113.9".to_string();
+        settings.port = 2500;
+        settings.room_name = "MiSala".to_string();
+        let ctx = make_test_ctx_with(settings);
+        let (alice, mut a_rx) = make_test_user(1, "Alice");
+        *alice.level.write() = ILevel::Moderator;
+        ctx.user_pool.add(alice.clone());
+
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "stats", "");
+        let mut lines = Vec::new();
+        while let Ok(pkt) = a_rx.try_recv() {
+            if pkt[0] == TcpMsg::ServerNosuch as u8 {
+                lines.push(decode_nosuch(pkt));
+            }
+        }
+        assert!(lines.iter().any(|l| l.starts_with("Hashlink: arlnk://")), "hashlink: {lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("Language: ")), "language: {lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("Roomsearch size: ")), "roomsearch: {lines:?}");
     }
 
     #[test]
