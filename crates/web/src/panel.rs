@@ -398,7 +398,7 @@ const I18N = {
     bot_trigger:"Disparador", bot_trigger_contains:"Cuando mencionan su nombre", bot_trigger_prefix:"Cuando el mensaje empieza con", bot_trigger_always:"Responder a todo",
     bot_prefix_l:"Prefijo", bot_memory:"Recordar conversación", bot_memory_turns:"Turns de memoria",
     bot_cooldown:"Cooldown (seg)", bot_max_inflight:"Máx. llamadas simultáneas",
-    bot_llm_h:"🤖 Proveedor LLM", bot_provider:"Proveedor", bot_provider_openai:"OpenAI / compatible", bot_provider_anthropic:"Anthropic",
+    bot_llm_h:"🤖 Proveedor LLM", bot_provider:"Proveedor", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
     bot_api_key:"API key (vacía si es local)", bot_model:"Modelo", bot_temp:"Temperatura", bot_max_tokens:"Máx. tokens",
     bot_prompt:"Prompt de sistema (personalidad)", bot_prompt_ph:"Eres Nova, un asistente amable y cercano...",
@@ -554,7 +554,7 @@ const I18N = {
     bot_trigger:"Trigger", bot_trigger_contains:"When they mention its name", bot_trigger_prefix:"When the message starts with", bot_trigger_always:"Reply to everything",
     bot_prefix_l:"Prefix", bot_memory:"Remember conversation", bot_memory_turns:"Memory turns",
     bot_cooldown:"Cooldown (sec)", bot_max_inflight:"Max concurrent calls",
-    bot_llm_h:"🤖 LLM provider", bot_provider:"Provider", bot_provider_openai:"OpenAI / compatible", bot_provider_anthropic:"Anthropic",
+    bot_llm_h:"🤖 LLM provider", bot_provider:"Provider", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
     bot_api_key:"API key (blank if local)", bot_model:"Model", bot_temp:"Temperature", bot_max_tokens:"Max tokens",
     bot_prompt:"System prompt (personality)", bot_prompt_ph:"You are Nova, a friendly assistant...",
@@ -1157,6 +1157,7 @@ function renderBot(){
       <label class="fld"><span>${t("bot_provider")}</span>
         <select id="botProvider">
           <option value="openai">${t("bot_provider_openai")}</option>
+          <option value="deepseek">${t("bot_provider_deepseek")}</option>
           <option value="anthropic">${t("bot_provider_anthropic")}</option>
         </select></label>
       <label class="fld"><span>${t("bot_endpoint")}</span><input id="botEndpoint" placeholder="${esc(t("bot_endpoint_ph"))}"></label>
@@ -1191,20 +1192,21 @@ async function loadBot(){
   applyBotDefaults();
 }
 // URLs/modelos por defecto por proveedor. Al cambiar el proveedor, si el
-// endpoint/modelo están vacíos (o son el default del OTRO proveedor) se
-// rellenan solos.
+// endpoint/modelo están vacíos (o son defaults de otro proveedor) se rellenan.
 const BOT_API = {
   openai:{endpoint:"https://api.openai.com/v1/chat/completions", model:"gpt-4o-mini"},
-  anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-3-5-haiku-latest"},
+  deepseek:{endpoint:"https://api.deepseek.com/chat/completions", model:"deepseek-v4-flash"},
+  anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-haiku-4-5"},
 };
 function applyBotDefaults(){
   const p=g("botProvider").value;
   const def=BOT_API[p]; if(!def) return;
-  const other=BOT_API[p==="openai"?"anthropic":"openai"];
   const ep=g("botEndpoint").value.trim();
-  if(!ep || ep===other.endpoint) g("botEndpoint").value=def.endpoint;
+  const endpointIsDefault=Object.entries(BOT_API).some(([name, value])=>name!==p && ep===value.endpoint);
+  if(!ep || endpointIsDefault) g("botEndpoint").value=def.endpoint;
   const m=g("botModel").value.trim();
-  if(!m || m===other.model) g("botModel").value=def.model;
+  const modelIsDefault=Object.entries(BOT_API).some(([name, value])=>name!==p && m===value.model);
+  if(!m || modelIsDefault) g("botModel").value=def.model;
 }
 async function saveBot(){
   const g=(id)=>document.getElementById(id);

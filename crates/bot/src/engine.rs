@@ -137,6 +137,7 @@ impl BotEngine {
                     cfg.fallback_response.clone()
                 }
             };
+            let reply = normalize_reply(&reply);
 
             if !reply.is_empty() {
                 if is_pm {
@@ -171,6 +172,7 @@ fn split_chunks(text: &str, max: usize) -> Vec<String> {
     if max == 0 || text.is_empty() {
         return vec![text.to_string()];
     }
+
     if text.chars().count() <= max {
         return vec![text.to_string()];
     }
@@ -194,6 +196,10 @@ fn split_chunks(text: &str, max: usize) -> Vec<String> {
         rest = &rest[cut..];
     }
     out
+}
+
+fn normalize_reply(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn release(
@@ -331,7 +337,12 @@ mod tests {
     }
 
     fn engine(db: Arc<Database>, reply: &str) -> Arc<BotEngine> {
-        let e = BotEngine::with_llm(db, Arc::new(MockLlm { reply: reply.into() }));
+        let e = BotEngine::with_llm(
+            db,
+            Arc::new(MockLlm {
+                reply: reply.into(),
+            }),
+        );
         let mut cfg = BotConfig::default();
         cfg.enabled = true;
         cfg.name = "Nova".into();
@@ -344,16 +355,18 @@ mod tests {
         e
     }
 
-    fn ctx_with_user(name: &str) -> (Arc<AppContext>, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    fn ctx_with_user(
+        name: &str,
+    ) -> (
+        Arc<AppContext>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
         let settings = Settings::default();
         let db = Database::in_memory().unwrap();
         let ctx = Arc::new(AppContext::new(settings, db));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let mut u = server_core::user_pool::AresUser::new(
-            1,
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            [0u8; 16],
-        );
+        let mut u =
+            server_core::user_pool::AresUser::new(1, IpAddr::V4(Ipv4Addr::LOCALHOST), [0u8; 16]);
         *u.name.write() = name.to_string();
         u.ws_text_sender = Some(tx);
         u.logged_in = true;
@@ -381,7 +394,10 @@ mod tests {
 
     #[test]
     fn render_greet_placeholders() {
-        assert_eq!(render_greet("hola +n en +rn", "Ana", "Mi Sala"), "hola Ana en Mi Sala");
+        assert_eq!(
+            render_greet("hola +n en +rn", "Ana", "Mi Sala"),
+            "hola Ana en Mi Sala"
+        );
         assert_eq!(render_greet("solo hola", "Ana", "Mi Sala"), "solo hola");
     }
 
@@ -397,7 +413,12 @@ mod tests {
         let chunks = split_chunks(text, 10);
         assert!(chunks.len() > 1, "debería dividirse");
         for c in &chunks {
-            assert!(c.chars().count() <= 10, "chunk de {} > 10: '{}'", c.chars().count(), c);
+            assert!(
+                c.chars().count() <= 10,
+                "chunk de {} > 10: '{}'",
+                c.chars().count(),
+                c
+            );
         }
         // Se conserva el contenido completo.
         assert_eq!(chunks.concat(), text);
@@ -407,7 +428,10 @@ mod tests {
     fn split_chunks_breaks_on_words() {
         let text = "palabra_a palabra_b palabra_c palabra_d";
         let chunks = split_chunks(text, 15);
-        assert!(chunks.iter().all(|c| !c.starts_with(' ')), "ningún chunk debe empezar con espacio");
+        assert!(
+            chunks.iter().all(|c| !c.starts_with(' ')),
+            "ningún chunk debe empezar con espacio"
+        );
         assert_eq!(chunks.concat(), text);
     }
 
@@ -419,6 +443,14 @@ mod tests {
         assert_eq!(chunks.len(), 4);
         assert!(chunks.iter().all(|c| c.chars().count() <= 30));
         assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn normalize_reply_flattens_whitespace() {
+        assert_eq!(
+            normalize_reply("  primera línea\n\n segunda\t línea  "),
+            "primera línea segunda línea"
+        );
     }
 
     #[test]

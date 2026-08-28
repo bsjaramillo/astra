@@ -1,6 +1,6 @@
 [package]
 name = "astra-bot"
-description = "Bot agente inteligente integrado en Astra (LLM: OpenAI-compatible / Anthropic)"
+description = "Bot agente inteligente integrado en Astra (LLM: OpenAI-compatible / DeepSeek / Anthropic)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

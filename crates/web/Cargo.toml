@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 proto-ares = { path = "../proto-ares" }
 server-core = { path = "../server-core" }
+astra-bot = { path = "../bot" }
 astra-commands = { path = "../commands" }
 astra-scripting = { path = "../scripting" }
 

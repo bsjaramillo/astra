@@ -29,9 +29,11 @@ pub enum TriggerMode {
 #[serde(rename_all = "lowercase")]
 pub enum LlmProvider {
     /// API OpenAI-compatible (`POST {endpoint}` con `Authorization: Bearer`).
-    /// Cubre OpenAI, Ollama, Groq, DeepSeek, LM Studio, vLLM, Mistral, etc.
+    /// Cubre OpenAI, Ollama, Groq, LM Studio, vLLM, Mistral, etc.
     #[default]
     Openai,
+    /// API de DeepSeek, compatible con el formato de OpenAI.
+    Deepseek,
     /// API de Anthropic (`POST {endpoint}` con `x-api-key`).
     Anthropic,
 }
@@ -49,7 +51,7 @@ pub struct LlmConfig {
     pub endpoint: String,
     /// API key. Vacía para endpoints locales sin auth (Ollama).
     pub api_key: String,
-    /// Modelo (ej. `gpt-4o-mini`, `claude-3-5-haiku-latest`, `deepseek-chat`).
+    /// Modelo (ej. `gpt-4o-mini`, `claude-haiku-4-5`, `deepseek-v4-flash`).
     pub model: String,
     /// Temperatura (0-2).
     pub temperature: f64,
@@ -192,6 +194,14 @@ mod tests {
         assert!(c.enabled);
         assert_eq!(c.trigger, TriggerMode::Contains);
         assert_eq!(c.llm.model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn deepseek_provider_roundtrips() {
+        let raw = r#"{"provider":"deepseek"}"#;
+        let c: LlmConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(c.provider, LlmProvider::Deepseek);
+        assert_eq!(serde_json::to_value(c.provider).unwrap(), "deepseek");
     }
 
     #[test]

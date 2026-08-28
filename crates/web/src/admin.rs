@@ -614,32 +614,72 @@ pub fn set_bot_config(ctx: &Arc<AppContext>, json: &str) -> Result<String, Strin
         }
     }
 
-    let (old_enabled, old_name) = ctx
+    let (old_enabled, old_name, old_config) = ctx
         .bot
         .read()
         .as_ref()
-        .map(|b| (b.is_enabled(), b.bot_name()))
-        .unwrap_or((false, String::new()));
+        .map(|b| {
+            (
+                b.is_enabled(),
+                b.bot_name(),
+                serde_json::from_str::<astra_bot::BotConfig>(&b.config_json()).ok(),
+            )
+        })
+        .unwrap_or((false, String::new(), None));
 
     match ctx.bot.read().as_ref() {
         Some(bot) => bot.set_config_json(json)?,
         None => return Err("bot no disponible".into()),
     }
 
-    let (new_enabled, new_name) = ctx
+    let (new_enabled, new_name, new_config) = ctx
         .bot
         .read()
         .as_ref()
-        .map(|b| (b.is_enabled(), b.bot_name()))
-        .unwrap_or((false, String::new()));
+        .map(|b| {
+            (
+                b.is_enabled(),
+                b.bot_name(),
+                serde_json::from_str::<astra_bot::BotConfig>(&b.config_json()).ok(),
+            )
+        })
+        .unwrap_or((false, String::new(), None));
 
     update_bot_presence(ctx, old_enabled, &old_name, new_enabled, &new_name);
+    if old_config.as_ref().map(|c| (&c.trigger, &c.trigger_prefix))
+        != new_config.as_ref().map(|c| (&c.trigger, &c.trigger_prefix))
+    {
+        if let Some(config) = new_config.as_ref() {
+            broadcast_trigger_change(ctx, &new_name, config);
+        }
+    }
     Ok(ctx
         .bot
         .read()
         .as_ref()
         .map(|b| b.config_json())
         .unwrap_or_default())
+}
+
+fn broadcast_trigger_change(ctx: &AppContext, bot_name: &str, config: &astra_bot::BotConfig) {
+    if !config.enabled || bot_name.is_empty() {
+        return;
+    }
+    let mode = match config.trigger {
+        astra_bot::TriggerMode::Contains => "cuando mencionen mi nombre",
+        astra_bot::TriggerMode::Prefix => "con el prefijo",
+        astra_bot::TriggerMode::Always => "con todos los mensajes",
+    };
+    let text = if config.trigger == astra_bot::TriggerMode::Prefix {
+        format!("Ahora responderé {} '{}'.", mode, config.trigger_prefix)
+    } else {
+        format!("Ahora responderé {}.", mode)
+    };
+    for user in ctx.user_pool.users() {
+        if user.logged_in {
+            let _ = user.send_public(bot_name, &text);
+        }
+    }
 }
 
 /// Anuncia en vivo la presencia del bot (JOIN/PART) cuando se activa,

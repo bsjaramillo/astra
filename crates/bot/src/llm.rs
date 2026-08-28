@@ -1,4 +1,4 @@
-//! Cliente LLM (OpenAI-compatible y Anthropic) para el bot.
+//! Cliente LLM (OpenAI-compatible, DeepSeek y Anthropic) para el bot.
 //!
 //! Expuesto tras un trait ([`LlmClient`]) para poder mockearlo en tests.
 
@@ -39,7 +39,9 @@ impl LlmClient for HttpLlm {
         }
         let timeout = Duration::from_secs(cfg.timeout_secs.max(1));
         match cfg.provider {
-            LlmProvider::Openai => openai_chat(cfg, messages, timeout).await,
+            LlmProvider::Openai | LlmProvider::Deepseek => {
+                openai_chat(cfg, messages, timeout).await
+            }
             LlmProvider::Anthropic => anthropic_chat(cfg, messages, timeout).await,
         }
     }
