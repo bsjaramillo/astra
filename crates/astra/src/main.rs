@@ -293,6 +293,13 @@ async fn main() -> anyhow::Result<()> {
         ctx.bans.len()
     );
 
+    // Bot agente inteligente (identidad propia, configurable desde el panel).
+    let bot = astra_bot::BotEngine::new(db.clone());
+    if bot.is_enabled() {
+        info!("bot agente activo: '{}'", bot.bot_name());
+    }
+    *ctx.bot.write() = Some(bot);
+
     // Inicializar sistema de scripting (boa_engine)
     let scripts_dir = std::path::PathBuf::from(&settings.data_dir).join("scripts");
     let scripting_manager = astra_scripting::ScriptManager::new(ctx.clone(), scripts_dir.clone());

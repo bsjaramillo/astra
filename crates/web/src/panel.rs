@@ -259,7 +259,7 @@ const I18N = {
     nav_filtros:"Filtros de palabras", nav_bienvenidas:"Bienvenidas", nav_sala:"Opciones de sala",
     nav_avatares:"Avatares", nav_servidor:"Servidor", nav_enlace:"Enlace de salas", nav_seguridad:"Seguridad",
     nav_proxies:"Proxies", nav_permisos:"Permisos de comandos", nav_config:"Config avanzada", nav_consola:"Consola",
-    nav_motd:"Mensaje de entrada", nav_plantillas:"Textos del sistema",
+    nav_motd:"Mensaje de entrada", nav_plantillas:"Textos del sistema", nav_bot:"Bot agente",
     common_save:"Guardar", common_save_changes:"Guardar cambios", common_add:"Agregar", common_remove:"Quitar",
     common_none:"Ninguno.", common_none_f:"Ninguna.", common_done:"Listo",
     restart_note:"⚠️ Estos cambios se guardan en el archivo de configuración y se aplican al <b>reiniciar el servidor</b>.",
@@ -388,6 +388,22 @@ const I18N = {
     tpl_note:"Edita el texto después del <code>=</code> en cada línea (formato <code>clave = texto</code>). Comodines: <code>+n</code> = usuario · <code>+a</code> = admin · <code>+l</code> = nivel · <code>+i</code> = ident. Para restaurar un texto, déjalo igual al original.",
     tpl_warn:"Están cargados todos los mensajes que el servidor le muestra a la gente por los comandos. Los que tienen comodines (como <code>+n</code>) insertan valores al vivo — mantén el comodín si quieres que aparezca ese dato.",
     tpl_saved:"Textos guardados ({0} aplicados).",
+
+    bot_h:"Bot agente", bot_sub:"Asistente inteligente con identidad propia (LLM).",
+    bot_note:"Se aplica en vivo. El bot aparece en la lista de usuarios solo cuando está activo.",
+    bot_enabled:"Activar bot", bot_name_l:"Nombre", bot_name_ph:"ej. Nova",
+    bot_greet_h:"👋 Saludos al entrar", bot_greet_on:"Saludar a quien entra", bot_greet_pm:"Saludo por PM (si no, en sala)",
+    bot_greet_msg:"Mensaje de saludo", bot_greet_ph:"¡Hola +n! Bienvenido a +rn.",
+    bot_reply_h:"💬 Conversación", bot_reply_room:"Responder menciones en sala", bot_reply_pm:"Responder PMs",
+    bot_trigger:"Disparador", bot_trigger_contains:"Cuando mencionan su nombre", bot_trigger_prefix:"Cuando el mensaje empieza con", bot_trigger_always:"Responder a todo",
+    bot_prefix_l:"Prefijo", bot_memory:"Recordar conversación", bot_memory_turns:"Turns de memoria",
+    bot_cooldown:"Cooldown (seg)", bot_max_inflight:"Máx. llamadas simultáneas",
+    bot_llm_h:"🤖 Proveedor LLM", bot_provider:"Proveedor", bot_provider_openai:"OpenAI / compatible", bot_provider_anthropic:"Anthropic",
+    bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
+    bot_api_key:"API key (vacía si es local)", bot_model:"Modelo", bot_temp:"Temperatura", bot_max_tokens:"Máx. tokens",
+    bot_prompt:"Prompt de sistema (personalidad)", bot_prompt_ph:"Eres Nova, un asistente amable y cercano...",
+    bot_fallback:"Respuesta si el LLM falla",
+    bot_saved:"Bot guardado.",
   },
   en:{
     chrome_refresh:"Refresh", chrome_logout:"Log out", chrome_menu:"Menu",
@@ -399,7 +415,7 @@ const I18N = {
     nav_filtros:"Word filters", nav_bienvenidas:"Greetings", nav_sala:"Room options",
     nav_avatares:"Avatars", nav_servidor:"Server", nav_enlace:"Room linking", nav_seguridad:"Security",
     nav_proxies:"Proxies", nav_permisos:"Command permissions", nav_config:"Advanced config", nav_consola:"Console",
-    nav_motd:"Join message", nav_plantillas:"System texts",
+    nav_motd:"Join message", nav_plantillas:"System texts", nav_bot:"Agent bot",
     common_save:"Save", common_save_changes:"Save changes", common_add:"Add", common_remove:"Remove",
     common_none:"None.", common_none_f:"None.", common_done:"Done",
     restart_note:"⚠️ These changes are written to the config file and take effect after <b>restarting the server</b>.",
@@ -528,6 +544,22 @@ const I18N = {
     tpl_note:"Edit the text after the <code>=</code> on each line (format <code>key = text</code>). Placeholders: <code>+n</code> = user · <code>+a</code> = admin · <code>+l</code> = level · <code>+i</code> = ident. To restore a text, set it back to the original.",
     tpl_warn:"All the messages the server shows people through commands are loaded here. The ones with placeholders (like <code>+n</code>) insert live values — keep the placeholder if you want that data to appear.",
     tpl_saved:"Texts saved ({0} applied).",
+
+    bot_h:"Agent bot", bot_sub:"Intelligent assistant with its own identity (LLM).",
+    bot_note:"Applied live. The bot shows in the user list only while active.",
+    bot_enabled:"Enable bot", bot_name_l:"Name", bot_name_ph:"e.g. Nova",
+    bot_greet_h:"👋 Join greetings", bot_greet_on:"Greet users on join", bot_greet_pm:"Greet by PM (otherwise in room)",
+    bot_greet_msg:"Greeting message", bot_greet_ph:"Welcome +n to +rn!",
+    bot_reply_h:"💬 Conversation", bot_reply_room:"Reply to mentions in room", bot_reply_pm:"Reply to PMs",
+    bot_trigger:"Trigger", bot_trigger_contains:"When they mention its name", bot_trigger_prefix:"When the message starts with", bot_trigger_always:"Reply to everything",
+    bot_prefix_l:"Prefix", bot_memory:"Remember conversation", bot_memory_turns:"Memory turns",
+    bot_cooldown:"Cooldown (sec)", bot_max_inflight:"Max concurrent calls",
+    bot_llm_h:"🤖 LLM provider", bot_provider:"Provider", bot_provider_openai:"OpenAI / compatible", bot_provider_anthropic:"Anthropic",
+    bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
+    bot_api_key:"API key (blank if local)", bot_model:"Model", bot_temp:"Temperature", bot_max_tokens:"Max tokens",
+    bot_prompt:"System prompt (personality)", bot_prompt_ph:"You are Nova, a friendly assistant...",
+    bot_fallback:"Reply if the LLM fails",
+    bot_saved:"Bot saved.",
   }
 };
 function t(k, ...args){
@@ -595,6 +627,7 @@ const TABS = [
     {id:"sala", icon:"⚙️", k:"nav_sala"},
     {id:"motd", icon:"📢", k:"nav_motd"},
     {id:"avatares", icon:"🖼️", k:"nav_avatares"},
+    {id:"bot", icon:"🤖", k:"nav_bot"},
   ]},
   {gk:"g_avanzado", items:[
     {id:"servidor", icon:"🖥️", k:"nav_servidor"},
@@ -716,7 +749,8 @@ function render(){
     baneos:renderBaneos, filtros:renderFiltros, bienvenidas:renderBienvenidas,
     sala:renderSala, motd:renderMotd, avatares:renderAvatares, servidor:renderServidor,
     enlace:renderEnlace, seguridad:renderSeguridad, proxies:renderProxies,
-    permisos:renderPermisos, plantillas:renderPlantillas, config:renderConfig, consola:renderConsola
+    permisos:renderPermisos, plantillas:renderPlantillas, config:renderConfig, consola:renderConsola,
+    bot:renderBot
   };
   document.getElementById("view").innerHTML = (map[TAB] || renderInicio)();
   wire();
@@ -1088,6 +1122,107 @@ async function savePlantillas(){
   else toast(t("err_prefix")+t("err_save"),"err");
 }
 
+/* ---------------- Bot agente ---------------- */
+let BOTCFG = null;
+function renderBot(){
+  return `<div class="cardhead"><h2>${t("bot_h")}</h2><p class="sub">${t("bot_sub")}</p></div>
+    <div class="note">${t("bot_note")}</div>
+    <div class="card"><h3>${t("nav_bot")}</h3>
+      <label class="fld"><span class="switch"><input type="checkbox" id="botEnabled"><span class="slider"></span></span>${t("bot_enabled")}</label>
+      <label class="fld"><span>${t("bot_name_l")}</span><input id="botName" placeholder="${esc(t("bot_name_ph"))}"></label>
+    </div>
+    <div class="card"><h3>${t("bot_greet_h")}</h3>
+      <label class="fld"><span class="switch"><input type="checkbox" id="botGreetOn"><span class="slider"></span></span>${t("bot_greet_on")}</label>
+      <label class="fld"><span class="switch"><input type="checkbox" id="botGreetPm"><span class="slider"></span></span>${t("bot_greet_pm")}</label>
+      <label class="fld"><span>${t("bot_greet_msg")}</span><input id="botGreetMsg" placeholder="${esc(t("bot_greet_ph"))}"></label>
+    </div>
+    <div class="card"><h3>${t("bot_reply_h")}</h3>
+      <label class="fld"><span class="switch"><input type="checkbox" id="botReplyRoom"><span class="slider"></span></span>${t("bot_reply_room")}</label>
+      <label class="fld"><span class="switch"><input type="checkbox" id="botReplyPm"><span class="slider"></span></span>${t("bot_reply_pm")}</label>
+      <label class="fld"><span>${t("bot_trigger")}</span>
+        <select id="botTrigger">
+          <option value="contains">${t("bot_trigger_contains")}</option>
+          <option value="prefix">${t("bot_trigger_prefix")}</option>
+          <option value="always">${t("bot_trigger_always")}</option>
+        </select></label>
+      <label class="fld"><span>${t("bot_prefix_l")}</span><input id="botPrefix" placeholder="!"></label>
+      <label class="fld"><span class="switch"><input type="checkbox" id="botMemory"><span class="slider"></span></span>${t("bot_memory")}</label>
+      <div class="rowend">
+        <label class="fld"><span>${t("bot_memory_turns")}</span><input id="botMemoryTurns" type="number" min="1" max="50"></label>
+        <label class="fld"><span>${t("bot_cooldown")}</span><input id="botCooldown" type="number" min="0" max="120"></label>
+        <label class="fld"><span>${t("bot_max_inflight")}</span><input id="botMaxInflight" type="number" min="1" max="16"></label>
+      </div>
+    </div>
+    <div class="card"><h3>${t("bot_llm_h")}</h3>
+      <label class="fld"><span>${t("bot_provider")}</span>
+        <select id="botProvider">
+          <option value="openai">${t("bot_provider_openai")}</option>
+          <option value="anthropic">${t("bot_provider_anthropic")}</option>
+        </select></label>
+      <label class="fld"><span>${t("bot_endpoint")}</span><input id="botEndpoint" placeholder="${esc(t("bot_endpoint_ph"))}"></label>
+      <label class="fld"><span>${t("bot_api_key")}</span><input id="botApiKey" type="password" autocomplete="off"></label>
+      <div class="rowend">
+        <label class="fld"><span>${t("bot_model")}</span><input id="botModel" placeholder="gpt-4o-mini"></label>
+        <label class="fld"><span>${t("bot_temp")}</span><input id="botTemp" type="number" step="0.1" min="0" max="2"></label>
+        <label class="fld"><span>${t("bot_max_tokens")}</span><input id="botMaxTokens" type="number" min="1" max="4096"></label>
+      </div>
+      <label class="fld"><span>${t("bot_prompt")}</span><textarea id="botPrompt" spellcheck="false" style="height:90px" placeholder="${esc(t("bot_prompt_ph"))}"></textarea></label>
+      <label class="fld"><span>${t("bot_fallback")}</span><input id="botFallback"></label>
+    </div>
+    <div class="rowend"><button class="btn primary" id="botSave">${t("common_save")}</button></div>`;
+}
+async function loadBot(){
+  const r=await api("/admin/bot"); if(!r.ok) return;
+  const j=await r.json().catch(()=>({config:{}}));
+  const c=j.config||{};
+  BOTCFG=c;
+  const set=(id,v)=>{ const el=document.getElementById(id); if(el && v!=null) el.value=v; };
+  const chk=(id,v)=>{ const el=document.getElementById(id); if(el) el.checked=!!v; };
+  chk("botEnabled",c.enabled); set("botName",c.name);
+  chk("botGreetOn",c.greet_on_join); chk("botGreetPm",c.greet_as_pm); set("botGreetMsg",c.greet_message);
+  chk("botReplyRoom",c.reply_in_room); chk("botReplyPm",c.reply_by_pm);
+  set("botTrigger",c.trigger); set("botPrefix",c.trigger_prefix);
+  chk("botMemory",c.conversation_memory); set("botMemoryTurns",c.memory_turns);
+  set("botCooldown",c.cooldown_secs); set("botMaxInflight",c.max_in_flight);
+  const llm=c.llm||{};
+  set("botProvider",llm.provider); set("botEndpoint",llm.endpoint); set("botApiKey",llm.api_key);
+  set("botModel",llm.model); set("botTemp",llm.temperature); set("botMaxTokens",llm.max_tokens);
+  set("botPrompt",llm.system_prompt); set("botFallback",c.fallback_response);
+}
+async function saveBot(){
+  const g=(id)=>document.getElementById(id);
+  const base=BOTCFG||{};
+  const c={
+    enabled:g("botEnabled").checked,
+    name:g("botName").value.trim()||base.name||"",
+    greet_on_join:g("botGreetOn").checked,
+    greet_as_pm:g("botGreetPm").checked,
+    greet_message:g("botGreetMsg").value,
+    reply_in_room:g("botReplyRoom").checked,
+    reply_by_pm:g("botReplyPm").checked,
+    trigger:g("botTrigger").value,
+    trigger_prefix:g("botPrefix").value,
+    conversation_memory:g("botMemory").checked,
+    memory_turns:parseInt(g("botMemoryTurns").value)||12,
+    cooldown_secs:parseInt(g("botCooldown").value)||3,
+    max_in_flight:parseInt(g("botMaxInflight").value)||4,
+    llm:{
+      provider:g("botProvider").value,
+      endpoint:g("botEndpoint").value.trim()||base.llm?.endpoint||"",
+      api_key:g("botApiKey").value,
+      model:g("botModel").value.trim()||base.llm?.model||"",
+      temperature:parseFloat(g("botTemp").value)||0.7,
+      max_tokens:parseInt(g("botMaxTokens").value)||200,
+      system_prompt:g("botPrompt").value,
+      timeout_secs:(base.llm&&base.llm.timeout_secs)||20,
+    },
+    fallback_response:g("botFallback").value,
+  };
+  const r=await api("/admin/bot",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(c)});
+  if(r.ok){ toast(t("bot_saved"),"ok"); BOTCFG=c; }
+  else toast(t("err_prefix")+t("err_save"),"err");
+}
+
 function renderConfig(){
   return `<div class="cardhead"><h2>${t("cfg_h")}</h2><p class="sub">${t("cfg_sub")}</p></div>
     <div class="warnbox">${t("cfg_warn")}</div>
@@ -1163,6 +1298,7 @@ function wire(){
   if(g("cmdRun")){const rc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=rc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")rc();};}
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
   if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }
+  if(g("botSave")){ loadBot(); g("botSave").onclick=saveBot; }
   if(g("tplEd")){ loadPlantillas(); g("tplSave").onclick=savePlantillas; }
   if(g("cfgSrvSave")){ fillServerCfg(); g("cfgSrvSave").onclick=saveServerCfg; }
   if(g("cfgDirSave")){ g("cfgDirSave").onclick=saveDirectoryCfg; }

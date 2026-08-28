@@ -183,6 +183,11 @@ pub async fn handle_connection(
             ip: user.external_ip.to_string(),
         });
         scripting.dispatch(ScriptEvent::LoginGranted { name: jname });
+        // Bot agente: saludo configurable al entrar.
+        if let Some(bot) = ctx.bot.read().as_ref() {
+            let jname = user.name.read().clone();
+            bot.on_join(&ctx, &jname);
+        }
     }
 
     // Broadcast del JOIN a la sala — salvo que sea un HIJACK (el mismo
@@ -768,6 +773,12 @@ async fn send_initial_state_ws(
         base64::engine::general_purpose::STANDARD.encode(bytes)
     });
     let _ = tx.send(emit(&bot_name, "", &bot_avatar_b64, 0, ILevel::Owner as u8, false, false));
+    // Bot agente (identidad propia): solo aparece en la userlist si está activo.
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        if bot.is_enabled() && !bot.bot_name().is_empty() {
+            let _ = tx.send(emit(&bot.bot_name(), "", "", 0, ILevel::Owner as u8, false, false));
+        }
+    }
     let vroom = *user.vroom.read();
     for other in ctx.user_pool.users() {
         if other.logged_in && *other.vroom.read() == vroom {
@@ -1045,6 +1056,10 @@ fn handle_ws_public(
         from: name.clone(),
         text: text.to_string(),
     });
+    // Bot agente: responder menciones en público.
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        bot.on_public(ctx, &name, text);
+    }
     // Custom name activo → línea `NoSuch` con el prefijo (paridad TCP).
     if !ctx.broadcast_public_custom_name(user, text) {
         broadcast_to_room(ctx, user, |c| outbound::build_public_c(&name, text, c));
@@ -1133,12 +1148,20 @@ fn handle_ws_pm(
         return;
     }
 
-    // PM al bot: los comandos `/x` o `#x` se ejecutan (paridad sb0t).
+    // PM al bot: los comandos `/x` o `#x` se ejecutan (paridad sb0t);
+    // el resto se lo pasa al bot agente si está activo.
     if target_name == ctx.settings.bot_name {
         if text.starts_with('/') || text.starts_with('#') {
             handle_ws_command(ctx, user, &text, scripting);
         }
         return;
+    }
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        if bot.is_enabled() && target_name.eq_ignore_ascii_case(&bot.bot_name()) {
+            let from = user.name.read().clone();
+            bot.on_private(ctx, &from, &text);
+            return;
+        }
     }
 
     let from = user.name.read().clone();

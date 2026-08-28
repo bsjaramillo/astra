@@ -413,6 +413,38 @@ pub fn build_userlist_bot_c(bot_name: &str, crypto: Crypto) -> Bytes {
     Bytes::copy_from_slice(w.as_bytes())
 }
 
+/// JOIN anunciado para un bot fantasma (misma información que la entrada de
+/// userlist, bajo el opcode `ServerJoin` + el byte de features que el
+/// protocolo espera en un JOIN). Se usa para mostrar/ocultar al bot en vivo
+/// cuando se activa/desactiva desde el panel.
+pub fn build_join_bot_c(bot_name: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerJoin, crypto);
+    w.write_u16_le(0).ok();
+    w.write_u32_le(0).ok();
+    w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
+    w.write_u16_le(69).ok();
+    w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
+    w.write_u16_le(0).ok();
+    w.write_u8(0).ok();
+    w.write_string_nt(bot_name).ok();
+    w.write_ipv4(Ipv4Addr::new(0, 0, 0, 0)).ok();
+    w.write_u8(1).ok(); // browsable
+    w.write_u8(3).ok(); // level 3 (host)
+    w.write_u8(0).ok();
+    w.write_u8(0).ok();
+    w.write_u8(0).ok();
+    w.write_string_nt("").ok();
+    w.write_u8(0).ok(); // features
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
+/// PART anunciado por nombre (para ocultar al bot fantasma en vivo).
+pub fn build_part_name_c(name: &str, crypto: Crypto) -> Bytes {
+    let mut w = PacketWriter::with_msg_crypto(TcpMsg::ServerPart, crypto);
+    w.write_string_nt(name).ok();
+    Bytes::copy_from_slice(w.as_bytes())
+}
+
 /// Fin de la lista de usuarios.
 ///
 /// Formato: `u8 0`
@@ -704,6 +736,25 @@ mod tests {
     fn bot_userlist() {
         let pkt = build_userlist_bot("MyBot");
         assert_eq!(pkt[0], TcpMsg::ServerChannelUserList as u8);
+    }
+
+    #[test]
+    fn join_bot_packet() {
+        let pkt = build_join_bot_c("Nova", None);
+        assert_eq!(pkt[0], TcpMsg::ServerJoin as u8);
+        // El opcode va seguido del payload: debe contener el nombre del bot.
+        let data = &pkt[1..];
+        assert!(data.windows(4).any(|w| w == b"Nova"));
+        // Termina con el byte de features (layout JOIN).
+        assert_eq!(data.last(), Some(&0));
+    }
+
+    #[test]
+    fn part_name_packet() {
+        let pkt = build_part_name_c("Nova", None);
+        assert_eq!(pkt[0], TcpMsg::ServerPart as u8);
+        let data = &pkt[1..];
+        assert!(data.windows(4).any(|w| w == b"Nova"));
     }
 
     #[test]

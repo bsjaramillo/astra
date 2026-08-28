@@ -583,6 +583,143 @@ pub fn get_avatar_bytes(ctx: &AppContext, kind: &str) -> Option<Vec<u8>> {
     }
 }
 
+// ============================================================================
+// Bot agente (`GET/POST /admin/bot`)
+// ============================================================================
+
+/// GET /admin/bot → config del bot como JSON (o `{}` si no hay bot).
+pub fn get_bot_config(ctx: &AppContext) -> String {
+    ctx.bot
+        .read()
+        .as_ref()
+        .map(|b| b.config_json())
+        .unwrap_or_else(|| "{}".to_string())
+}
+
+/// POST /admin/bot → guarda la config (JSON del cliente) y devuelve la nueva
+/// config serializada. Aplica en vivo y, si cambió el estado activo o el
+/// nombre, actualiza la presencia del bot en la userlist de toda la sala
+/// (JOIN/PART para nativos y web).
+pub fn set_bot_config(ctx: &Arc<AppContext>, json: &str) -> Result<String, String> {
+    // El bot agente debe ser una identidad DISTINTA del "bot" del servidor
+    // (settings.bot_name): comparten el mecanismo de userlist fantasma.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+        if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+            if !name.trim().is_empty() && name.eq_ignore_ascii_case(&ctx.settings.bot_name) {
+                return Err(format!(
+                    "el nombre del bot no puede ser igual al del servidor ('{}')",
+                    ctx.settings.bot_name
+                ));
+            }
+        }
+    }
+
+    let (old_enabled, old_name) = ctx
+        .bot
+        .read()
+        .as_ref()
+        .map(|b| (b.is_enabled(), b.bot_name()))
+        .unwrap_or((false, String::new()));
+
+    match ctx.bot.read().as_ref() {
+        Some(bot) => bot.set_config_json(json)?,
+        None => return Err("bot no disponible".into()),
+    }
+
+    let (new_enabled, new_name) = ctx
+        .bot
+        .read()
+        .as_ref()
+        .map(|b| (b.is_enabled(), b.bot_name()))
+        .unwrap_or((false, String::new()));
+
+    update_bot_presence(ctx, old_enabled, &old_name, new_enabled, &new_name);
+    Ok(ctx
+        .bot
+        .read()
+        .as_ref()
+        .map(|b| b.config_json())
+        .unwrap_or_default())
+}
+
+/// Anuncia en vivo la presencia del bot (JOIN/PART) cuando se activa,
+/// desactiva o renombra desde el panel.
+fn update_bot_presence(
+    ctx: &AppContext,
+    old_enabled: bool,
+    old_name: &str,
+    new_enabled: bool,
+    new_name: &str,
+) {
+    match (old_enabled, new_enabled) {
+        (true, false) if !old_name.is_empty() => broadcast_bot_part(ctx, old_name),
+        (false, true) if !new_name.is_empty() => broadcast_bot_join(ctx, new_name),
+        (true, true) if old_name != new_name => {
+            if !old_name.is_empty() {
+                broadcast_bot_part(ctx, old_name);
+            }
+            if !new_name.is_empty() {
+                broadcast_bot_join(ctx, new_name);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// AresUser sintético para traducir el JOIN/PART del bot al formato web.
+fn bot_dummy_user(name: &str) -> AresUser {
+    let mut u = AresUser::new(0, IpAddr::V4(Ipv4Addr::UNSPECIFIED), [0u8; 16]);
+    *u.name.write() = name.to_string();
+    *u.level.write() = ILevel::Owner;
+    u
+}
+
+/// JOIN del bot a toda la sala (nativos + web).
+fn broadcast_bot_join(ctx: &AppContext, name: &str) {
+    use bytes::Bytes;
+    let plain: Bytes = server_core::outbound::build_join_bot_c(name, None);
+    let dummy = bot_dummy_user(name);
+    for u in ctx.user_pool.users() {
+        if !u.logged_in {
+            continue;
+        }
+        if u.web_client {
+            if let Some(tx) = &u.ws_text_sender {
+                if let Some(text) = crate::ws_outbound::translate_broadcast(&plain, &dummy, &u) {
+                    let _ = tx.send(text);
+                }
+            }
+        } else if let Some(crypto) = u.ares_crypto {
+            let _ = u.send(server_core::outbound::build_join_bot_c(name, Some(crypto)));
+        } else {
+            let _ = u.send(plain.clone());
+        }
+    }
+}
+
+/// PART del bot a toda la sala (nativos + web).
+fn broadcast_bot_part(ctx: &AppContext, name: &str) {
+    use bytes::Bytes;
+    let plain: Bytes = server_core::outbound::build_part_name_c(name, None);
+    let dummy = bot_dummy_user(name);
+    for u in ctx.user_pool.users() {
+        if !u.logged_in {
+            continue;
+        }
+        if u.web_client {
+            if let Some(tx) = &u.ws_text_sender {
+                if let Some(text) = crate::ws_outbound::translate_broadcast(&plain, &dummy, &u) {
+                    let _ = tx.send(text);
+                }
+            }
+        } else if let Some(crypto) = u.ares_crypto {
+            let _ = u.send(server_core::outbound::build_part_name_c(name, Some(crypto)));
+        } else {
+            let _ = u.send(plain.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

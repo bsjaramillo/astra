@@ -143,6 +143,7 @@ name = "astra"
 version = "0.1.31"
 dependencies = [
  "anyhow",
+ "astra-bot",
  "astra-captcha",
  "astra-commands",
  "astra-link",
@@ -168,6 +169,20 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "astra-bot"
+version = "0.1.31"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "server-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

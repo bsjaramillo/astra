@@ -208,6 +208,10 @@ pub async fn handle_tcp_client(
         name: user.name.read().clone(),
         ip: user.external_ip.to_string(),
     });
+    // Bot agente: saludo configurable al entrar.
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        bot.on_join(&ctx, &user.name.read().clone());
+    }
 
     // Greet de bienvenida (PM del bot al usuario que entra)
     send_greet(&ctx, &user);
@@ -744,6 +748,12 @@ async fn send_initial_state(
     // mandado en cada login en `TCPProcessor.cs`).
     if let Some(avatar) = ctx.server_avatar.read().clone() {
         let _ = user.send(outbound::build_avatar_c(&ctx.settings.bot_name, &avatar, crypto));
+    }
+    // Bot agente (identidad propia): solo aparece en la userlist si está activo.
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        if bot.is_enabled() && !bot.bot_name().is_empty() {
+            let _ = user.send(outbound::build_userlist_bot_c(&bot.bot_name(), crypto));
+        }
     }
 
     // Userlist de todos los usuarios conectados
@@ -1539,6 +1549,10 @@ async fn handle_public(
         from: name.clone(),
         text: text.clone(),
     });
+    // Bot agente: responder menciones en público.
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        bot.on_public(ctx, &name, &text);
+    }
     debug!("public de '{}': {}", name, text);
 }
 
@@ -1638,6 +1652,16 @@ async fn handle_pvt(
     };
     if text.is_empty() {
         return;
+    }
+
+    // PM dirigido al bot agente: lo procesa el bot en vez de "user not found"
+    // (paridad sb0t: los PMs al bot van al bot, no a un usuario real).
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        if bot.is_enabled() && target_name.eq_ignore_ascii_case(&bot.bot_name()) {
+            let from = user.name.read().clone();
+            bot.on_private(ctx, &from, &text);
+            return;
+        }
     }
 
     // Buscar al destinatario

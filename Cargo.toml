@@ -7,6 +7,7 @@ members = [
     "crates/captcha",
     "crates/commands",
     "crates/scripting",
+    "crates/bot",
     "crates/web",
     "crates/link",
     "crates/astra",

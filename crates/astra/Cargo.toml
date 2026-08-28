@@ -17,6 +17,7 @@ astra-udp = { path = "../udp" }
 astra-captcha = { path = "../captcha" }
 astra-commands = { path = "../commands" }
 astra-scripting = { path = "../scripting" }
+astra-bot = { path = "../bot" }
 astra-web = { path = "../web" }
 astra-link = { path = "../link" }
 

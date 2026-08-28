@@ -12,6 +12,9 @@
 /// Versión del servidor Astra.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Trait del bot agente inteligente integrado.
+pub mod bot;
+
 /// Puerto por defecto del servidor (mismo que el sb0t original).
 pub const DEFAULT_PORT: u16 = 5009;
 
@@ -121,6 +124,7 @@ pub use app::{
     admin_action, AppContext, KillScriptFn, LeafDirected, LinkEvent, LinkLeafInfo, LinkRequest,
     LinkUserSnapshot, ListScriptsFn, LoadScriptFn, ScriptingHooks,
 };
+pub use bot::Bot;
 pub use command_levels::CommandLevelManager;
 pub use proxy_trust::TrustedProxyManager;
 pub use ip_autologin::{IpAutologinEntry, IpAutologinManager};

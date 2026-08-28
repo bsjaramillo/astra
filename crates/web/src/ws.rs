@@ -433,6 +433,23 @@ async fn handle_admin_route(
                 None => send_http_bytes(stream, 404, b"").await?,
             }
         }
+        ("GET", "/admin/bot") => {
+            let json = crate::admin::get_bot_config(ctx);
+            let body = format!("{{\"config\":{}}}", json);
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/bot") if m.eq_ignore_ascii_case("POST") => {
+            match crate::admin::set_bot_config(ctx, &req.body) {
+                Ok(json) => {
+                    let body = format!("{{\"config\":{}}}", json);
+                    send_http_json(stream, 200, &body).await?;
+                }
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
         _ => {
             send_http_json(stream, 404, "{\"error\":\"not found\"}").await?;
         }

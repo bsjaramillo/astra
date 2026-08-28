@@ -1121,3 +1121,73 @@ los prototipos de objeto (`JSUser`, `JSChannel`, etc.).
 - **PM_SCRIBBLE/PM_AUDIO**: implementados en el server (ver arriba) pero sin
   E2E dedicado (el reporte era sobre el chat público); la lógica es la misma
   que la pública con destinatario único, debería funcionar igual.
+
+## Bot agente inteligente (LLM) — IMPLEMENTADO (2026-08-28)
+
+Bot de sala con **identidad propia** (distinta de `settings.bot_name`),
+persistido en SQLite (`kv["bot.config"]`), configurable en vivo desde el panel
+admin (pestaña "🤖 Bot agente") y en el código en `crates/bot`.
+
+### Implementado
+
+- **Nuevo crate `astra-bot`** (`crates/bot`): `config`, `llm`, `memory`,
+  `engine`.
+- **Config** (`BotConfig`): `enabled`, `name`, toggles por evento
+  (`greet_on_join`, `reply_in_room`, `reply_by_pm`), trigger (`contains` /
+  `prefix` / `always`), memoria (`conversation_memory`, `memory_turns`),
+  anti-spam (`cooldown_secs`, `max_in_flight`) y `llm` (`provider`,
+  `endpoint`, `api_key`, `model`, `temperature`, `max_tokens`,
+  `system_prompt`, `timeout_secs`) + `fallback_response`. Serde + persistencia
+  en `kv["bot.config"]` (aplica en vivo, sobrevive reinicios).
+- **LLM** (`LlmClient` trait, mockeable): `HttpLlm` con 2 providers —
+  `openai` (OpenAI-compatible: OpenAI, Ollama, Groq, DeepSeek, LM Studio,
+  vLLM, Mistral…) vía `Authorization: Bearer`; `anthropic` vía `x-api-key`
+  (`anthropic-version`). Parseo de `choices[0].message.content` /
+  `content[0].text`.
+- **Memoria** (`ConversationMemory`): historial por nick (`VecDeque`),
+  acotado por turns y TTL (30 min), roles `user`/`assistant`.
+- **Motor** (`BotEngine implements server_core::Bot`):
+  - `on_join` → saludo (PM o en sala, `+n`/`+rn` placeholders).
+  - `on_public` → responde menciones según trigger, en background con
+    cooldown por usuario + tope global de llamadas en vuelo.
+  - `on_private` → responde PMs dirigidos al bot.
+  - Nunca responde a sí mismo ni al bot del servidor.
+  - Re-chequea `enabled` dentro de la task (config cambió en vuelo).
+- **server-core**: trait `Bot` + `AppContext.bot: Option<Arc<dyn Bot>>`
+  (sin dependencia circular); builders `build_join_bot_c` / `build_part_name_c`
+  para la presencia en vivo.
+- **Wiring** (TCP + web):
+  - Join → `on_join` (tcp_handler ~:207, web/handler ~:181).
+  - Public → `on_public` (tcp_handler ~:1541, web/handler ~:1047).
+  - PM dirigido al bot → `on_private` (antes daba "User not found"):
+    `handle_pvt` (opcode 25) y path web.
+  - Userlist fantasma: solo si `enabled`, en `send_initial_state` y el estado
+    inicial web.
+  - `main.rs` construye `BotEngine::new(db)` y lo cuelga en `ctx.bot`.
+- **Presencia en vivo**: al activar/desactivar/renombrar desde el panel se
+  difunde JOIN/PART del bot a toda la sala (nativos + web) vía
+  `broadcast_bot_join`/`broadcast_bot_part` (admin.rs).
+- **Panel admin**: endpoints `GET/POST /admin/bot` (ws.rs + admin.rs), sección
+  "Bot" bilingüe con todos los campos. Validación: el nombre no puede ser
+  igual al de `settings.bot_name`.
+- **Tests** (16 en astra-bot + outbound): serde roundtrip, persistencia kv,
+  trigger modes, placeholders de saludo, memoria (turns/orden/clear),
+  reply público/PM con LLM mockeado, cooldown que descarta re-trigger rápido,
+  builders JOIN/PART del bot. `build/test/clippy` en verde.
+
+### Pendiente
+
+- **cb0t PM enriquecido**: `cb0t_pm_msg` (custom data 200) dirigido al bot aún
+  no se rutea (el texto va cifrado en el payload; requeriría descifrarlo). Los
+  PMs estándar (opcode 25) sí funcionan.
+- **Avatar propio del bot**: v1 usa sin avatar (o reutiliza el del server);
+  falta subir avatar específico del bot desde el panel.
+- **Streaming del LLM** (token streaming a la sala) — v1 es respuesta completa.
+- **Costo/rate-limit por usuario global** más fino (hoy: cooldown + max in
+  flight); falta presupuesto diario/mensual opcional.
+- **Personalidad contextual**: el system prompt es estático; falta un prompt
+  generado con topic/usuarios de la sala (`+rn`, `+uc`…) al armar el historial.
+- **Eventos extra configurables** (p. ej. responder a `/nudge`/buzz, onPart
+  despedidas, aniversarios de usuario) — hoy solo join/mención/PM.
+- **`/admin/bot`**: falta mostrar en `state_json` el estado del bot
+  (enabled/nombre) para el header/inicio del panel.
