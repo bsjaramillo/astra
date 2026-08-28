@@ -1198,9 +1198,14 @@ const BOT_API = {
   deepseek:{endpoint:"https://api.deepseek.com/chat/completions", model:"deepseek-v4-flash"},
   anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-haiku-4-5"},
 };
-function applyBotDefaults(){
+function applyBotDefaults(force=false){
   const p=g("botProvider").value;
   const def=BOT_API[p]; if(!def) return;
+  if(force){
+    g("botEndpoint").value=def.endpoint;
+    g("botModel").value=def.model;
+    return;
+  }
   const ep=g("botEndpoint").value.trim();
   const endpointIsDefault=Object.entries(BOT_API).some(([name, value])=>name!==p && ep===value.endpoint);
   if(!ep || endpointIsDefault) g("botEndpoint").value=def.endpoint;
@@ -1317,7 +1322,7 @@ function wire(){
   if(g("cmdRun")){const rc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=rc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")rc();};}
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
   if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }
-  if(g("botSave")){ loadBot(); g("botSave").onclick=saveBot; g("botProvider").onchange=applyBotDefaults; }
+  if(g("botSave")){ loadBot(); g("botSave").onclick=saveBot; g("botProvider").onchange=()=>applyBotDefaults(true); }
   if(g("tplEd")){ loadPlantillas(); g("tplSave").onclick=savePlantillas; }
   if(g("cfgSrvSave")){ fillServerCfg(); g("cfgSrvSave").onclick=saveServerCfg; }
   if(g("cfgDirSave")){ g("cfgDirSave").onclick=saveDirectoryCfg; }
