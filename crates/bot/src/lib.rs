@@ -2,7 +2,7 @@
 //!
 //! Bot agente inteligente integrado en Astra: una identidad propia (usuario
 //! fantasma) que saluda a quien entra y conversa con los usuarios usando un
-//! LLM (OpenAI-compatible o Anthropic).
+//! LLM (OpenAI-compatible, DeepSeek o Anthropic).
 //!
 //! ## Uso
 //!
