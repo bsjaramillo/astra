@@ -51,7 +51,7 @@ pub struct LlmConfig {
     pub endpoint: String,
     /// API key. Vacía para endpoints locales sin auth (Ollama).
     pub api_key: String,
-    /// Modelo (ej. `gpt-4o-mini`, `claude-3-5-haiku-latest`, `deepseek-chat`).
+    /// Modelo (ej. `gpt-4o-mini`, `claude-haiku-4-5`, `deepseek-v4-flash`).
     pub model: String,
     /// Temperatura (0-2).
     pub temperature: f64,

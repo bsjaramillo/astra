@@ -1195,7 +1195,7 @@ async function loadBot(){
 // endpoint/modelo están vacíos (o son defaults de otro proveedor) se rellenan.
 const BOT_API = {
   openai:{endpoint:"https://api.openai.com/v1/chat/completions", model:"gpt-4o-mini"},
-  deepseek:{endpoint:"https://api.deepseek.com/chat/completions", model:"deepseek-chat"},
+  deepseek:{endpoint:"https://api.deepseek.com/chat/completions", model:"deepseek-v4-flash"},
   anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-haiku-4-5"},
 };
 function applyBotDefaults(){
