@@ -1192,12 +1192,11 @@ async function loadBot(){
   applyBotDefaults();
 }
 // URLs/modelos por defecto por proveedor. Al cambiar el proveedor, si el
-// endpoint/modelo están vacíos (o son el default del OTRO proveedor) se
-// rellenan solos.
+// endpoint/modelo están vacíos (o son defaults de otro proveedor) se rellenan.
 const BOT_API = {
   openai:{endpoint:"https://api.openai.com/v1/chat/completions", model:"gpt-4o-mini"},
   deepseek:{endpoint:"https://api.deepseek.com/chat/completions", model:"deepseek-chat"},
-  anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-3-5-haiku-latest"},
+  anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-haiku-4-5"},
 };
 function applyBotDefaults(){
   const p=g("botProvider").value;
