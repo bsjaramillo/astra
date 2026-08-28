@@ -141,10 +141,14 @@ impl BotEngine {
             if !reply.is_empty() {
                 if is_pm {
                     if let Some(u) = pool.get_by_name(&from) {
-                        let _ = u.send_pvt(&cfg.name, &reply);
+                        for chunk in split_chunks(&reply, MAX_MSG_LEN) {
+                            let _ = u.send_pvt(&cfg.name, &chunk);
+                        }
                     }
                 } else {
-                    broadcast_public(&pool, &cfg.name, &reply);
+                    for chunk in split_chunks(&reply, MAX_MSG_LEN) {
+                        broadcast_public(&pool, &cfg.name, &chunk);
+                    }
                 }
                 if cfg.conversation_memory {
                     memory.push(&from, "assistant", &reply, cfg.memory_turns);
@@ -154,6 +158,42 @@ impl BotEngine {
             release(&in_flight, &in_flight_count, &cooldown, &from);
         });
     }
+}
+
+/// Máximo de caracteres por mensaje de chat (paridad con el corte de sb0t/
+/// Astra en `truncate_message`). Respuestas más largas se dividen en varias.
+const MAX_MSG_LEN: usize = 300;
+
+/// Divide `text` en trozos de hasta `max` caracteres, cortando de preferencia
+/// en el último espacio para no partir palabras. Devuelve un solo trozo si el
+/// texto ya cabe.
+fn split_chunks(text: &str, max: usize) -> Vec<String> {
+    if max == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+    if text.chars().count() <= max {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        // Byte index del corte: los primeros `max` chars (o el final).
+        let limit = rest
+            .char_indices()
+            .nth(max)
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        let window = &rest[..limit];
+        // Cortar en el último espacio dentro de la ventana (evita partir palabras).
+        let cut = window
+            .rfind(' ')
+            .filter(|&i| i > 0)
+            .map(|i| i + 1)
+            .unwrap_or(limit);
+        out.push(rest[..cut].to_string());
+        rest = &rest[cut..];
+    }
+    out
 }
 
 fn release(
@@ -182,10 +222,14 @@ impl Bot for BotEngine {
         }
         if cfg.greet_as_pm {
             if let Some(u) = ctx.user_pool.get_by_name(name) {
-                let _ = u.send_pvt(&cfg.name, &text);
+                for chunk in split_chunks(&text, MAX_MSG_LEN) {
+                    let _ = u.send_pvt(&cfg.name, &chunk);
+                }
             }
         } else {
-            broadcast_public(&ctx.user_pool, &cfg.name, &text);
+            for chunk in split_chunks(&text, MAX_MSG_LEN) {
+                broadcast_public(&ctx.user_pool, &cfg.name, &chunk);
+            }
         }
     }
 
@@ -339,6 +383,42 @@ mod tests {
     fn render_greet_placeholders() {
         assert_eq!(render_greet("hola +n en +rn", "Ana", "Mi Sala"), "hola Ana en Mi Sala");
         assert_eq!(render_greet("solo hola", "Ana", "Mi Sala"), "solo hola");
+    }
+
+    #[test]
+    fn split_chunks_short_text() {
+        assert_eq!(split_chunks("hola", 300), vec!["hola".to_string()]);
+        assert_eq!(split_chunks("", 300), vec![String::new()]);
+    }
+
+    #[test]
+    fn split_chunks_respects_max() {
+        let text = "uno dos tres cuatro cinco seis siete ocho nueve diez";
+        let chunks = split_chunks(text, 10);
+        assert!(chunks.len() > 1, "debería dividirse");
+        for c in &chunks {
+            assert!(c.chars().count() <= 10, "chunk de {} > 10: '{}'", c.chars().count(), c);
+        }
+        // Se conserva el contenido completo.
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn split_chunks_breaks_on_words() {
+        let text = "palabra_a palabra_b palabra_c palabra_d";
+        let chunks = split_chunks(text, 15);
+        assert!(chunks.iter().all(|c| !c.starts_with(' ')), "ningún chunk debe empezar con espacio");
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn split_chunks_hard_cuts_long_word() {
+        // Sin espacios: corta duro en el límite.
+        let text = "x".repeat(100);
+        let chunks = split_chunks(&text, 30);
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 30));
+        assert_eq!(chunks.concat(), text);
     }
 
     #[test]

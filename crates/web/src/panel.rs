@@ -642,7 +642,7 @@ const TABS = [
 ];
 // Pestañas que NO se auto-refrescan (tienen formularios que se borrarían al
 // re-renderizar mientras el admin escribe).
-const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","avatares","motd","plantillas"]);
+const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","avatares","motd","plantillas","bot"]);
 
 /* ============================ helpers ============================ */
 async function api(path, opts={}) {
@@ -1188,6 +1188,23 @@ async function loadBot(){
   set("botProvider",llm.provider); set("botEndpoint",llm.endpoint); set("botApiKey",llm.api_key);
   set("botModel",llm.model); set("botTemp",llm.temperature); set("botMaxTokens",llm.max_tokens);
   set("botPrompt",llm.system_prompt); set("botFallback",c.fallback_response);
+  applyBotDefaults();
+}
+// URLs/modelos por defecto por proveedor. Al cambiar el proveedor, si el
+// endpoint/modelo están vacíos (o son el default del OTRO proveedor) se
+// rellenan solos.
+const BOT_API = {
+  openai:{endpoint:"https://api.openai.com/v1/chat/completions", model:"gpt-4o-mini"},
+  anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-3-5-haiku-latest"},
+};
+function applyBotDefaults(){
+  const p=g("botProvider").value;
+  const def=BOT_API[p]; if(!def) return;
+  const other=BOT_API[p==="openai"?"anthropic":"openai"];
+  const ep=g("botEndpoint").value.trim();
+  if(!ep || ep===other.endpoint) g("botEndpoint").value=def.endpoint;
+  const m=g("botModel").value.trim();
+  if(!m || m===other.model) g("botModel").value=def.model;
 }
 async function saveBot(){
   const g=(id)=>document.getElementById(id);
@@ -1298,7 +1315,7 @@ function wire(){
   if(g("cmdRun")){const rc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=rc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")rc();};}
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
   if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }
-  if(g("botSave")){ loadBot(); g("botSave").onclick=saveBot; }
+  if(g("botSave")){ loadBot(); g("botSave").onclick=saveBot; g("botProvider").onchange=applyBotDefaults; }
   if(g("tplEd")){ loadPlantillas(); g("tplSave").onclick=savePlantillas; }
   if(g("cfgSrvSave")){ fillServerCfg(); g("cfgSrvSave").onclick=saveServerCfg; }
   if(g("cfgDirSave")){ g("cfgDirSave").onclick=saveDirectoryCfg; }
