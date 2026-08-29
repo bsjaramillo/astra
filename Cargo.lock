@@ -175,8 +175,12 @@ dependencies = [
 name = "astra-bot"
 version = "0.2.0-beta.6"
 dependencies = [
+ "astra-commands",
+ "astra-scripting",
  "async-trait",
+ "bytes",
  "parking_lot",
+ "proto-ares",
  "reqwest",
  "serde",
  "serde_json",

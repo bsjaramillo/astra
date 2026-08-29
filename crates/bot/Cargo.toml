@@ -8,6 +8,9 @@ authors.workspace = true
 
 [dependencies]
 server-core = { path = "../server-core" }
+astra-commands = { path = "../commands" }
+astra-scripting = { path = "../scripting" }
+proto-ares = { path = "../proto-ares" }
 
 tokio = { workspace = true }
 reqwest = { workspace = true }
@@ -16,3 +19,4 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }

@@ -1378,7 +1378,7 @@ fn publish_raw_link(ctx: &AppContext, msg: u8, payload: &[u8]) {
 /// Maneja MSG_CHAT_CLIENT_PUBLIC (10).
 /// Formato: `str text`
 async fn handle_public(
-    ctx: &AppContext,
+    ctx: &Arc<AppContext>,
     user: &Arc<server_core::user_pool::AresUser>,
     data: &[u8],
     scripting: &ScriptHandle,
@@ -1639,7 +1639,7 @@ async fn handle_emote(
 /// Maneja MSG_CHAT_CLIENT_PVT (25).
 /// Formato: `str target_name, str text`
 async fn handle_pvt(
-    ctx: &AppContext,
+    ctx: &Arc<AppContext>,
     user: &Arc<server_core::user_pool::AresUser>,
     data: &[u8],
     scripting: &astra_scripting::ScriptHandle,
@@ -1737,7 +1737,7 @@ async fn handle_pvt(
 /// Paridad `TCPProcessor.CustomData` de sb0t: se entrega al target LOCAL si
 /// existe y es un custom client; sólo si no está local se reenvía al link.
 fn handle_custom_data(
-    ctx: &AppContext,
+    ctx: &Arc<AppContext>,
     user: &Arc<server_core::user_pool::AresUser>,
     data: &[u8],
     scripting: &ScriptHandle,

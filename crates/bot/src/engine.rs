@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
-use server_core::app::AppContext;
+use server_core::app::{AppContext, HistoryEntry};
 use server_core::bot::Bot;
 use server_core::db::Database;
-use server_core::user_pool::UserPool;
+use server_core::user_pool::{AresUser, UserPool};
 
 use crate::config::{BotConfig, TriggerMode};
 use crate::llm::{HttpLlm, LlmClient};
@@ -26,6 +26,8 @@ pub struct BotEngine {
     config: Arc<RwLock<BotConfig>>,
     memory: Arc<ConversationMemory>,
     llm: Arc<dyn LlmClient>,
+    /// Handle al motor de scripting (para los side-effects de los comandos).
+    scripting: astra_scripting::ScriptHandle,
     /// Última vez que el bot respondió a cada usuario (cooldown).
     cooldown: Arc<Mutex<HashMap<String, Instant>>>,
     /// Usuarios con una llamada al LLM en curso.
@@ -36,18 +38,23 @@ pub struct BotEngine {
 
 impl BotEngine {
     /// Crea el motor cargando la config desde la DB.
-    pub fn new(db: Arc<Database>) -> Arc<Self> {
-        Self::with_llm(db, Arc::new(HttpLlm))
+    pub fn new(db: Arc<Database>, scripting: astra_scripting::ScriptHandle) -> Arc<Self> {
+        Self::with_llm(db, scripting, Arc::new(HttpLlm))
     }
 
     /// Como [`new`](Self::new) pero con un cliente LLM propio (tests).
-    pub fn with_llm(db: Arc<Database>, llm: Arc<dyn LlmClient>) -> Arc<Self> {
+    pub fn with_llm(
+        db: Arc<Database>,
+        scripting: astra_scripting::ScriptHandle,
+        llm: Arc<dyn LlmClient>,
+    ) -> Arc<Self> {
         let config = Arc::new(RwLock::new(BotConfig::load(&db)));
         Arc::new(Self {
             db,
             config,
             memory: Arc::new(ConversationMemory::new()),
             llm,
+            scripting,
             cooldown: Arc::new(Mutex::new(HashMap::new())),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             in_flight_count: Arc::new(AtomicUsize::new(0)),
@@ -80,7 +87,7 @@ impl BotEngine {
     /// `greet_llm` está activo (con la pista de cómo invocar al bot según el
     /// trigger); si no (o si el LLM falla), usa el template `greet_message` +
     /// la misma pista.
-    fn spawn_greet(&self, ctx: &AppContext, name: &str) {
+    fn spawn_greet(&self, ctx: &Arc<AppContext>, name: &str) {
         let cfg = self.config.read().clone();
         let pool = ctx.user_pool.clone();
         let llm = self.llm.clone();
@@ -140,7 +147,7 @@ impl BotEngine {
 
     /// Lanza una respuesta (público o PM) en background, respetando cooldown,
     /// in-flight y tope global.
-    fn spawn_reply(&self, ctx: &AppContext, from: &str, text: &str, is_pm: bool) {
+    fn spawn_reply(&self, ctx: &Arc<AppContext>, from: &str, text: &str, is_pm: bool) {
         let cfg = self.config.read().clone();
 
         // Cooldown por usuario.
@@ -169,11 +176,19 @@ impl BotEngine {
         let room_name = ctx.settings.room_name.clone();
         let topic = ctx.current_room_topic();
         let server_bot_name = ctx.settings.bot_name.clone();
+        // Snapshot del historial público reciente (configurable; 0 = off).
+        let recent = if cfg.recent_history_lines > 0 {
+            ctx.recent_messages(cfg.recent_history_lines)
+        } else {
+            Vec::new()
+        };
+        let ctx = ctx.clone();
         let from = from.to_string();
         let text = text.to_string();
         let memory = self.memory.clone();
         let llm = self.llm.clone();
         let config = self.config.clone();
+        let scripting = self.scripting.clone();
         let cooldown = self.cooldown.clone();
         let in_flight = self.in_flight.clone();
         let in_flight_count = self.in_flight_count.clone();
@@ -195,10 +210,11 @@ impl BotEngine {
                 Vec::new()
             };
 
-            // Prompt enriquecido con el contexto de la sala (usuarios, topic).
+            // Prompt enriquecido con el contexto de la sala (usuarios, topic,
+            // comandos) y el historial público reciente.
             let mut llm_cfg = cfg.llm.clone();
             llm_cfg.system_prompt =
-                build_system_prompt(&cfg, &pool, &room_name, &topic, &server_bot_name);
+                build_system_prompt(&cfg, &pool, &room_name, &topic, &server_bot_name, &recent);
 
             let reply = match llm.chat(&llm_cfg, &history).await {
                 Ok(r) => r,
@@ -209,20 +225,53 @@ impl BotEngine {
             };
             let reply = normalize_reply(&reply);
 
-            if !reply.is_empty() {
+            // Si la ejecución de comandos está habilitada, el LLM puede pedir
+            // ejecutar uno con `[CMD] ... [/CMD]`. Se ejecuta CON EL NIVEL DEL
+            // SOLICITANTE (no con el del bot), así aplican las validaciones de
+            // permisos del comando (ejecutor vs objetivo).
+            let mut final_text = reply.clone();
+            if cfg.execute_commands {
+                let (clean, cmds) = extract_commands(&reply);
+                final_text = clean;
+                let mut extras: Vec<String> = Vec::new();
+                for cmd in cmds {
+                    extras.extend(execute_as_user(
+                        &ctx,
+                        &pool,
+                        &from,
+                        &cmd,
+                        &cfg.allowed_commands,
+                        &scripting,
+                    ));
+                }
+                if !extras.is_empty() {
+                    if !final_text.is_empty() {
+                        final_text.push(' ');
+                    }
+                    final_text.push_str(&extras.join(" | "));
+                }
+            }
+            let final_text = final_text.trim().to_string();
+            let final_text = if final_text.is_empty() {
+                cfg.fallback_response.clone()
+            } else {
+                final_text
+            };
+
+            if !final_text.is_empty() {
                 if is_pm {
                     if let Some(u) = pool.get_by_name(&from) {
-                        for chunk in split_chunks(&reply, MAX_MSG_LEN) {
+                        for chunk in split_chunks(&final_text, MAX_MSG_LEN) {
                             let _ = u.send_pvt(&cfg.name, &chunk);
                         }
                     }
                 } else {
-                    for chunk in split_chunks(&reply, MAX_MSG_LEN) {
+                    for chunk in split_chunks(&final_text, MAX_MSG_LEN) {
                         broadcast_public(&pool, &cfg.name, &chunk);
                     }
                 }
                 if cfg.conversation_memory {
-                    memory.push(&from, "assistant", &reply, cfg.memory_turns);
+                    memory.push(&from, "assistant", &final_text, cfg.memory_turns);
                 }
             }
 
@@ -284,7 +333,7 @@ fn release(
 }
 
 impl Bot for BotEngine {
-    fn on_join(&self, ctx: &AppContext, name: &str) {
+    fn on_join(&self, ctx: &Arc<AppContext>, name: &str) {
         let cfg = self.config.read().clone();
         if !cfg.enabled || !cfg.greet_on_join {
             return;
@@ -295,7 +344,7 @@ impl Bot for BotEngine {
         self.spawn_greet(ctx, name);
     }
 
-    fn on_public(&self, ctx: &AppContext, from: &str, text: &str) {
+    fn on_public(&self, ctx: &Arc<AppContext>, from: &str, text: &str) {
         let cfg = self.config.read().clone();
         if !cfg.enabled || !cfg.reply_in_room {
             return;
@@ -309,7 +358,7 @@ impl Bot for BotEngine {
         self.spawn_reply(ctx, from, text, false);
     }
 
-    fn on_private(&self, ctx: &AppContext, from: &str, text: &str) {
+    fn on_private(&self, ctx: &Arc<AppContext>, from: &str, text: &str) {
         let cfg = self.config.read().clone();
         if !cfg.enabled || !cfg.reply_by_pm {
             return;
@@ -338,8 +387,11 @@ impl Bot for BotEngine {
     }
 }
 
-/// ¿El mensaje dispara una respuesta del bot?
+/// ¿El mensaje dispara una respuesta del bot? El texto se limpia de códigos
+/// de color/formato antes de validar, para que un color (o un carácter
+/// zero-width unicode) antes del prefijo no rompa el trigger.
 fn trigger_matches(cfg: &BotConfig, text: &str) -> bool {
+    let text = strip_colors(text);
     match cfg.trigger {
         TriggerMode::Always => true,
         TriggerMode::Prefix => text.trim_start().starts_with(&cfg.trigger_prefix),
@@ -348,6 +400,40 @@ fn trigger_matches(cfg: &BotConfig, text: &str) -> bool {
             !name.is_empty() && text.to_lowercase().contains(&name)
         }
     }
+}
+
+/// Elimina códigos de color/formato de Ares/cb0t del texto (paridad
+/// `Helpers.StripColors` de cb0t): `\x03`/`\x05` + 2 dígitos, `\x02`, `\x06`,
+/// `\x07`, `\x09` y el soft-hyphen unicode `\xAD` (U+00AD). También quita
+/// caracteres de formato / zero-width unicode que algunos clientes inyectan
+/// delante del texto (ZWSP, ZWJ, BOM…) y que rompen la comparación de
+/// strings (p. ej. el trigger por prefijo).
+fn strip_colors(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c as u32 {
+            // Código de color con valor de 2 dígitos: `\x03NN` / `\x05NN`.
+            0x03 | 0x05 => {
+                let mut n = 0;
+                while n < 2 {
+                    match chars.peek().copied() {
+                        Some(d) if d.is_ascii_digit() => {
+                            chars.next();
+                            n += 1;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            // Códigos de formato simples.
+            0x02 | 0x06 | 0x07 | 0x09 | 0xAD => {}
+            // Caracteres zero-width / formato unicode.
+            0x200B | 0x200C | 0x200D | 0x2060 | 0xFEFF => {}
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Cómo invoca el usuario al bot, según el trigger configurado (para el
@@ -398,21 +484,60 @@ fn commands_context() -> String {
         .to_string()
 }
 
-/// Prompt de sistema con el contexto de la sala inyectado (point 8: el bot
-/// sabe quién está conectado y qué comandos existen).
+/// Formatea el historial público reciente como líneas legibles para el LLM
+/// (más recientes al final). Si no hay, lo dice explícitamente.
+fn recent_history_str(entries: &[HistoryEntry]) -> String {
+    if entries.is_empty() {
+        return "sin mensajes recientes".to_string();
+    }
+    entries
+        .iter()
+        .map(|e| {
+            if e.is_emote {
+                format!("- * {} {} *", e.name, e.text)
+            } else {
+                format!("- {}: {}", e.name, e.text)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Prompt de sistema con el contexto de la sala inyectado: el bot sabe quién
+/// está conectado, qué comandos existen y lo último que se habló en público.
+/// Si `execute_commands` está activo, se le indica cómo pedir ejecutar un
+/// comando (`[CMD] ... [/CMD]`).
 fn build_system_prompt(
     cfg: &BotConfig,
     pool: &UserPool,
     room_name: &str,
     topic: &str,
     server_bot_name: &str,
+    recent: &[HistoryEntry],
 ) -> String {
     let base = cfg.llm.system_prompt.trim();
+    let mut exec = String::new();
+    if cfg.execute_commands {
+        let scope = if cfg.allowed_commands.is_empty() {
+            "cualquier comando que sus permisos permitan".to_string()
+        } else {
+            format!("solo: /{}", cfg.allowed_commands.join(", /"))
+        };
+        exec = format!(
+            "\n\nPuedes EJECUTAR comandos de la sala si el usuario te lo pide ({}). \
+             El comando se ejecutará con los PERMISOS del usuario que lo pide, no con los tuyos. \
+             Para ejecutar uno, responde únicamente el comando entre [CMD] y [/CMD], \
+             por ejemplo: [CMD]/topic Nuevo tema[/CMD].",
+            scope
+        );
+    }
     format!(
-        "{}\n\n=== Contexto actual de la sala ===\n{}\n{}",
+        "{}\n\n=== Contexto actual de la sala ===\n{}\n{}\n\n=== Historial reciente de la sala ===\n{}{}",
         base,
         room_context(pool, cfg, room_name, topic, server_bot_name),
-        commands_context()
+        commands_context(),
+        recent_history_str(recent),
+        exec,
     )
 }
 
@@ -432,6 +557,136 @@ pub(crate) fn broadcast_public(pool: &UserPool, from: &str, text: &str) {
             let _ = u.send_public(from, text);
         }
     }
+}
+
+/// Busca `needle` en `haystack` desde `from`, case-insensitive (ASCII).
+/// Devuelve el byte offset, o `None`.
+fn find_ci(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || from > h.len() {
+        return None;
+    }
+    let mut i = from;
+    while i + n.len() <= h.len() {
+        if h[i..i + n.len()]
+            .iter()
+            .zip(n.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extrae las directivas `[CMD] ... [/CMD]` de la respuesta del LLM (si la
+/// ejecución de comandos está habilitada). Devuelve el texto limpio (sin las
+/// directivas) y la lista de comandos propuestos.
+fn extract_commands(reply: &str) -> (String, Vec<String>) {
+    const START: &str = "[CMD]";
+    const END: &str = "[/CMD]";
+    let mut clean = String::new();
+    let mut cmds: Vec<String> = Vec::new();
+    let mut rest = reply;
+    loop {
+        let Some(i) = find_ci(rest, START, 0) else {
+            clean.push_str(rest);
+            break;
+        };
+        clean.push_str(&rest[..i]);
+        let after = &rest[i + START.len()..];
+        match find_ci(after, END, 0) {
+            Some(j) => {
+                let cmd = after[..j].trim();
+                if !cmd.is_empty() {
+                    cmds.push(cmd.to_string());
+                }
+                rest = &after[j + END.len()..];
+            }
+            None => {
+                // Directiva sin cerrar: preservar el texto original tal cual.
+                clean.push_str(START);
+                clean.push_str(after);
+                break;
+            }
+        }
+    }
+    (clean, cmds)
+}
+
+/// Ejecuta un comando de la sala CON LA IDENTIDAD DEL SOLICITANTE (su nombre,
+/// nivel, GUID e IP), no con la del bot. Así las validaciones de nivel de cada
+/// comando (ejecutor vs objetivo) se aplican igual que si lo corriera el
+/// propio usuario: un Regular no puede banear a un Admin, etc. Devuelve las
+/// líneas de respuesta capturadas (lo que habría visto el usuario).
+fn execute_as_user(
+    ctx: &AppContext,
+    pool: &UserPool,
+    requester: &str,
+    command: &str,
+    allowed: &[String],
+    scripting: &astra_scripting::ScriptHandle,
+) -> Vec<String> {
+    let line = command.trim().trim_start_matches('/').trim();
+    if line.is_empty() {
+        return vec!["Comando vacío.".to_string()];
+    }
+    let (cmd, args) = match line.split_once(char::is_whitespace) {
+        Some((c, a)) => (c, a.trim()),
+        None => (line, ""),
+    };
+
+    // Allowlist: si está vacía, cualquier comando que el nivel permita.
+    if !allowed.is_empty() && !allowed.iter().any(|a| a.eq_ignore_ascii_case(cmd)) {
+        return vec![format!("No tengo permiso para ejecutar /{}.", cmd)];
+    }
+
+    let Some(requester_user) = pool.get_by_name(requester) else {
+        return vec![format!("No encuentro a '{}'.", requester)];
+    };
+
+    // Sintético con la identidad del solicitante + canal de captura.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bytes::Bytes>();
+    let mut u = AresUser::new(requester_user.id, requester_user.external_ip, requester_user.guid);
+    u.logged_in = true;
+    *u.name.write() = requester_user.name.read().clone();
+    *u.level.write() = *requester_user.level.read();
+    u.sender = Some(tx);
+    let u = Arc::new(u);
+
+    let (handled, events) = astra_commands::dispatch_builtin(ctx, scripting, &u, cmd, args);
+    for ev in events {
+        scripting.dispatch(ev);
+    }
+
+    let mut out = Vec::new();
+    while let Ok(pkt) = rx.try_recv() {
+        if !pkt.is_empty() {
+            let op = pkt[0];
+            if op == proto_ares::TcpMsg::ServerNosuch as u8 {
+                let mut r = proto_ares::PacketReader::new(&pkt[1..]);
+                if let Ok(text) = r.read_string_nt() {
+                    out.push(text);
+                }
+            } else if op == proto_ares::TcpMsg::Pmt as u8 {
+                let mut r = proto_ares::PacketReader::new(&pkt[1..]);
+                let _ = r.read_string_nt();
+                if let Ok(text) = r.read_string_nt() {
+                    out.push(text);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        if !handled {
+            out.push(format!("Comando desconocido: /{}", cmd));
+        } else {
+            out.push(format!("Listo (/{}).", cmd));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -461,6 +716,7 @@ mod tests {
     fn engine(db: Arc<Database>, reply: &str) -> Arc<BotEngine> {
         let e = BotEngine::with_llm(
             db,
+            astra_scripting::ScriptHandle::dummy(),
             Arc::new(MockLlm {
                 reply: reply.into(),
             }),
@@ -629,17 +885,41 @@ mod tests {
         let db = Database::in_memory().unwrap();
         let bot = engine(db, "hola");
         let cfg = bot.config_snapshot();
-        let prompt = build_system_prompt(
-            &cfg,
-            &ctx.user_pool,
-            "Mi Sala",
-            "topic de prueba",
-            "Astra",
-        );
+        let prompt = build_system_prompt(&cfg, &ctx.user_pool, "Mi Sala", "topic de prueba", "Astra", &[]);
         assert!(prompt.contains("Mi Sala"));
         assert!(prompt.contains("topic de prueba"));
         assert!(prompt.contains("erin"), "debe listar a los usuarios conectados");
         assert!(prompt.contains("/kick"), "debe listar los comandos");
+    }
+
+    #[test]
+    fn build_system_prompt_includes_recent_history() {
+        let hist = vec![
+            HistoryEntry {
+                name: "alice".into(),
+                text: "hola a todos".into(),
+                is_emote: false,
+                time_secs: 0,
+            },
+            HistoryEntry {
+                name: "bob".into(),
+                text: "baila".into(),
+                is_emote: true,
+                time_secs: 0,
+            },
+        ];
+        let s = recent_history_str(&hist);
+        assert!(s.contains("alice: hola a todos"), "got: {}", s);
+        assert!(s.contains("* bob baila *"), "got: {}", s);
+
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "hola");
+        let cfg = bot.config_snapshot();
+        let (ctx, _rx) = ctx_with_user("erin");
+        let prompt =
+            build_system_prompt(&cfg, &ctx.user_pool, "Mi Sala", "t", "Astra", &hist);
+        assert!(prompt.contains("Historial reciente de la sala"));
+        assert!(prompt.contains("alice: hola a todos"));
     }
 
     #[test]
@@ -703,6 +983,136 @@ mod tests {
                 .await
                 .is_err(),
             "no debía haber una segunda respuesta inmediata"
+        );
+    }
+
+    #[test]
+    fn trigger_contains_ignores_color_codes() {
+        let mut cfg = BotConfig::default();
+        cfg.name = "Nova".into();
+        cfg.trigger = TriggerMode::Contains;
+        assert!(trigger_matches(&cfg, "hola \x0302Nova"));
+        assert!(trigger_matches(&cfg, "\u{00AD}Nova\u{00AD}"));
+    }
+
+    #[test]
+    fn trigger_prefix_ignores_color_codes() {
+        let mut cfg = BotConfig::default();
+        cfg.name = "Nova".into();
+        cfg.trigger = TriggerMode::Prefix;
+        cfg.trigger_prefix = "!".into();
+        // Color Ares antes del prefijo.
+        assert!(trigger_matches(&cfg, "\x03!hola"));
+        assert!(trigger_matches(&cfg, "\x0303!hola"));
+        assert!(trigger_matches(&cfg, "\x02!hola"));
+        // Soft-hyphen unicode y zero-width antes del prefijo.
+        assert!(trigger_matches(&cfg, "\u{00AD}!hola"));
+        assert!(trigger_matches(&cfg, "\u{200B}!hola"));
+        assert!(trigger_matches(&cfg, "\u{FEFF}!hola"));
+        // Sin prefijo no dispara.
+        assert!(!trigger_matches(&cfg, "hola"));
+    }
+
+    #[test]
+    fn strip_colors_keeps_text() {
+        assert_eq!(strip_colors("hola \x0302mundo"), "hola mundo");
+        assert_eq!(strip_colors("\x0501"), ""); // código de color completo
+        assert_eq!(strip_colors("\x05ab"), "ab"); // \x05 sin dígitos: solo el marcador
+        assert_eq!(strip_colors("!ping"), "!ping");
+    }
+
+    #[test]
+    fn extract_commands_parses_directives() {
+        let (clean, cmds) = extract_commands("Listo [CMD]/topic nuevo[/CMD] y ya");
+        assert_eq!(clean, "Listo  y ya");
+        assert_eq!(cmds, vec!["/topic nuevo"]);
+
+        let (clean, cmds) = extract_commands("[cmd]/kick bob[/cmd]");
+        assert_eq!(clean, "");
+        assert_eq!(cmds, vec!["/kick bob"]);
+
+        let (clean, cmds) = extract_commands("sin comandos");
+        assert_eq!(clean, "sin comandos");
+        assert!(cmds.is_empty());
+
+        // Directiva sin cerrar: se deja como texto.
+        let (clean, cmds) = extract_commands("hola [CMD]/topic");
+        assert_eq!(clean, "hola [CMD]/topic");
+        assert!(cmds.is_empty());
+    }
+
+    fn ctx_with_user_level(name: &str, level: server_core::ILevel) -> Arc<AppContext> {
+        let (ctx, _rx) = ctx_with_user(name);
+        if let Some(u) = ctx.user_pool.get_by_name(name) {
+            *u.level.write() = level;
+        }
+        ctx
+    }
+
+    #[test]
+    fn execute_as_user_uses_requester_level() {
+        // Moderator+ puede /topic.
+        let ctx = ctx_with_user_level("mod", server_core::ILevel::Moderator);
+        let dummy = astra_scripting::ScriptHandle::dummy();
+        let out = execute_as_user(&ctx, &ctx.user_pool, "mod", "/topic hola", &[], &dummy);
+        assert!(
+            out.iter().any(|l| l.contains("Topic updated.")),
+            "out: {:?}",
+            out
+        );
+        assert_eq!(ctx.current_room_topic(), "hola");
+    }
+
+    #[test]
+    fn execute_as_user_rejects_low_level() {
+        // Regular NO puede /topic → la validación del comando lo rechaza
+        // usando el nivel del SOLICITANTE.
+        let ctx = ctx_with_user_level("regular", server_core::ILevel::Regular);
+        let dummy = astra_scripting::ScriptHandle::dummy();
+        let out = execute_as_user(&ctx, &ctx.user_pool, "regular", "/topic x", &[], &dummy);
+        assert!(
+            out.iter().any(|l| l.contains("Access denied")),
+            "out: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn execute_as_user_enforces_allowlist() {
+        let ctx = ctx_with_user_level("owner", server_core::ILevel::Owner);
+        let dummy = astra_scripting::ScriptHandle::dummy();
+        // Allowlist sin "topic" → rechazado aunque el nivel permita.
+        let out = execute_as_user(
+            &ctx,
+            &ctx.user_pool,
+            "owner",
+            "/topic x",
+            &["ban".into()],
+            &dummy,
+        );
+        assert!(
+            out.iter().any(|l| l.contains("No tengo permiso")),
+            "out: {:?}",
+            out
+        );
+        // Allowlist vacía = cualquier comando permitido por nivel.
+        let out = execute_as_user(&ctx, &ctx.user_pool, "owner", "/topic y", &[], &dummy);
+        assert!(
+            out.iter().any(|l| l.contains("Topic updated.")),
+            "out: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn execute_as_user_unknown_command() {
+        let ctx = ctx_with_user_level("owner", server_core::ILevel::Owner);
+        let dummy = astra_scripting::ScriptHandle::dummy();
+        let out = execute_as_user(&ctx, &ctx.user_pool, "owner", "/noexiste", &[], &dummy);
+        assert!(
+            out.iter().any(|l| l.contains("noexiste")),
+            "out: {:?}",
+            out
         );
     }
 }

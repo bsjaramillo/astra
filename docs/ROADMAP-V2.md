@@ -1216,33 +1216,34 @@ admin (pestaña "🤖 Bot agente") y en el código en `crates/bot`.
   despedidas, aniversarios de usuario) — hoy solo join/mención/PM.
 - **`/admin/bot`**: falta mostrar en `state_json` el estado del bot
   (enabled/nombre) para el header/inicio del panel.
-- **Ejecución de comandos por el bot** (punto 8, fase 2): el contexto de
-  usuarios conectados y la lista de comandos YA se inyecta en el prompt
-  (`build_system_prompt`/`room_context`/`commands_context` en `engine.rs`);
-  la EJECUCIÓN está planificada (ver plan abajo).
 
-### Plan: ejecución de comandos por el bot (punto 8 — fase 2)
+### Ejecución de comandos por el bot — IMPLEMENTADO (2026-08-28)
 
-Objetivo: que el bot, además de *conocer* los comandos, pueda *ejecutarlos*
-cuando un usuario se lo pide ("Nova, banea a X", "Nova, cambia el topic a …").
+El bot puede **ejecutar comandos** que un usuario le pida ("Nova, cambia el
+topic a X", "Nova, banea a Carol"), con la seguridad clave: **el comando se
+ejecuta con la identidad y el NIVEL del usuario que lo pide**, no con los del
+bot. Así las validaciones de permisos del propio sistema (ejecutor vs
+objetivo) aplican igual que si lo corriera el usuario — un Regular no puede
+banear a un Admin.
 
-1. **Protocolo LLM → engine**: el bot responde con una directiva estructurada
-   en su reply, p. ej. `[CMD] /topic Nuevo tema [/CMD]`. El engine parsea la
-   respuesta en busca de `[CMD]...[/CMD]`.
-2. **Ejecutor**: ejecutar el comando con un `AresUser` sintético del bot
-   (id 0, nivel Owner) vía `astra_commands::dispatch_builtin`, capturando la
-   salida (PMs del bot) para no perderlas en un socket inexistente.
-3. **Confirmación**: tras ejecutar, segunda llamada al LLM con el resultado
-   para que redacte una respuesta natural al usuario (2 llamadas por comando).
-4. **Allowlist + seguridad (decisiones pendientes)**:
-   - ¿Qué comandos puede ejecutar? Propuesta segura: `/topic`, `/status`,
-     `/kick`, `/muzzle`, `/unmuzzle`, `/ban`, `/unban`, `/greets on|off`.
-   - ¿Política de autorización? Riesgo de prompt-injection (un usuario pide
-     "Nova, banea a Carol"). Opciones: solo ejecutar peticiones de Owner/Admin;
-     confirmar antes de acciones destructivas (ban/kick); rate-limit.
-   - La config expondría `bot.execute_commands: bool` (default OFF) + allowlist.
-5. **Coste/UX**: 2 llamadas LLM por comando; fallback a "no puedo hacer eso"
-   si el comando no está en la allowlist o el resultado falla.
-
-Estos puntos 2-5 requieren decisión del admin antes de implementar (el bot
-ejecutando ban/kick por criterio de un LLM es un vector de riesgo real).
+- **Config**: `execute_commands: bool` (default OFF, vector de riesgo) +
+  `allowed_commands: Vec<String>` (vacío = todos los que el nivel permita).
+  En el panel: toggle "Permitir ejecutar comandos" + campo de allowlist.
+- **Protocolo LLM → engine**: cuando está habilitado, el prompt instruye al
+  LLM a responder únicamente `[CMD] ... [/CMD]` (p. ej. `[CMD]/topic Nuevo
+  tema[/CMD]`). `extract_commands` parsea la directiva (case-insensitive) y
+  limpia el resto del texto.
+- **Ejecutor**: `execute_as_user` (`engine.rs`) construye un `AresUser`
+  sintético CON el nombre, nivel, GUID e IP del solicitante + canal de
+  captura, y llama a `astra_commands::dispatch_builtin`. La salida (líneas de
+  sistema / PMs) se captura y se devuelve al solicitante como respuesta del
+  bot. Los side-effects (ScriptEvents) se reenvían al scripting real.
+- **Allowlist**: si `allowed_commands` no está vacía, solo esos comandos (sin
+  `/`); si está vacía, cualquier comando que el nivel del solicitante permita.
+- **Trait `Bot`**: ahora recibe `&Arc<AppContext>` (el motor clona el ctx para
+  el trabajo en background). Los hooks TCP/web se ajustaron en consecuencia.
+- **Tests** (33 en astra-bot): parseo de directivas (incluida la no cerrada),
+  ejecución con el nivel del solicitante (Moderator ok / Regular denegado),
+  allowlist, comando desconocido.
+- Coste: 1 llamada LLM por comando (se relaya la salida real del comando, sin
+  segunda llamada de redacción).

@@ -398,12 +398,15 @@ const I18N = {
     bot_reply_h:"💬 Conversación", bot_reply_room:"Responder menciones en sala", bot_reply_pm:"Responder PMs",
     bot_trigger:"Disparador", bot_trigger_contains:"Cuando mencionan su nombre", bot_trigger_prefix:"Cuando el mensaje empieza con", bot_trigger_always:"Responder a todo",
     bot_prefix_l:"Prefijo", bot_memory:"Recordar conversación", bot_memory_turns:"Turns de memoria",
+    bot_history_lines:"Msgs. recientes de sala (0=off)",
     bot_cooldown:"Cooldown (seg)", bot_max_inflight:"Máx. llamadas simultáneas",
     bot_llm_h:"🤖 Proveedor LLM", bot_provider:"Proveedor", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
     bot_api_key:"API key (obligatoria)", bot_api_key_req:"La API key del LLM es obligatoria.", bot_model:"Modelo", bot_temp:"Temperatura", bot_max_tokens:"Máx. tokens",
     bot_prompt:"Prompt de sistema (personalidad)", bot_prompt_ph:"Eres Nova, un asistente amable y cercano...",
     bot_fallback:"Respuesta si el LLM falla",
+    bot_exec_h:"Ejecución de comandos", bot_exec_note:"El bot puede ejecutar comandos que el usuario le pida. Se ejecutan con el NIVEL del usuario que lo pide (un Regular no puede banear a un Admin). Apagado por defecto.",
+    bot_exec_on:"Permitir ejecutar comandos", bot_allowed_cmds:"Comandos permitidos (vacío = todos por nivel, separados por coma)",
     bot_saved:"Bot guardado.",
   },
   en:{
@@ -555,12 +558,15 @@ const I18N = {
     bot_reply_h:"💬 Conversation", bot_reply_room:"Reply to mentions in room", bot_reply_pm:"Reply to PMs",
     bot_trigger:"Trigger", bot_trigger_contains:"When they mention its name", bot_trigger_prefix:"When the message starts with", bot_trigger_always:"Reply to everything",
     bot_prefix_l:"Prefix", bot_memory:"Remember conversation", bot_memory_turns:"Memory turns",
+    bot_history_lines:"Recent room msgs (0=off)",
     bot_cooldown:"Cooldown (sec)", bot_max_inflight:"Max concurrent calls",
     bot_llm_h:"🤖 LLM provider", bot_provider:"Provider", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
     bot_api_key:"API key (required)", bot_api_key_req:"The LLM API key is required.", bot_model:"Model", bot_temp:"Temperature", bot_max_tokens:"Max tokens",
     bot_prompt:"System prompt (personality)", bot_prompt_ph:"You are Nova, a friendly assistant...",
     bot_fallback:"Reply if the LLM fails",
+    bot_exec_h:"Command execution", bot_exec_note:"The bot can run commands users ask for. They run with the REQUESTING user's level (a Regular can't ban an Admin). Off by default.",
+    bot_exec_on:"Allow executing commands", bot_allowed_cmds:"Allowed commands (blank = all by level, comma separated)",
     bot_saved:"Bot saved.",
   }
 };
@@ -1152,9 +1158,15 @@ function renderBot(){
       <label class="fld"><span class="switch"><input type="checkbox" id="botMemory"><span class="slider"></span></span>${t("bot_memory")}</label>
       <div class="rowend">
         <label class="fld"><span>${t("bot_memory_turns")}</span><input id="botMemoryTurns" type="number" min="1" max="50"></label>
+        <label class="fld"><span>${t("bot_history_lines")}</span><input id="botHistoryLines" type="number" min="0" max="50"></label>
         <label class="fld"><span>${t("bot_cooldown")}</span><input id="botCooldown" type="number" min="0" max="120"></label>
         <label class="fld"><span>${t("bot_max_inflight")}</span><input id="botMaxInflight" type="number" min="1" max="16"></label>
       </div>
+    </div>
+    <div class="card"><h3>⚡ ${t("bot_exec_h")}</h3>
+      <div class="note">${t("bot_exec_note")}</div>
+      <label class="fld"><span class="switch"><input type="checkbox" id="botExecCmds"><span class="slider"></span></span>${t("bot_exec_on")}</label>
+      <label class="fld"><span>${t("bot_allowed_cmds")}</span><input id="botAllowedCmds" placeholder="topic, kick, ban"></label>
     </div>
     <div class="card"><h3>${t("bot_llm_h")}</h3>
       <label class="fld"><span>${t("bot_provider")}</span>
@@ -1187,7 +1199,9 @@ async function loadBot(){
   chk("botReplyRoom",c.reply_in_room); chk("botReplyPm",c.reply_by_pm);
   set("botTrigger",c.trigger); set("botPrefix",c.trigger_prefix);
   chk("botMemory",c.conversation_memory); set("botMemoryTurns",c.memory_turns);
+  set("botHistoryLines",c.recent_history_lines);
   set("botCooldown",c.cooldown_secs); set("botMaxInflight",c.max_in_flight);
+  chk("botExecCmds",c.execute_commands); set("botAllowedCmds",(c.allowed_commands||[]).join(","));
   const llm=c.llm||{};
   set("botProvider",llm.provider); set("botEndpoint",llm.endpoint); set("botApiKey",llm.api_key);
   set("botModel",llm.model); set("botTemp",llm.temperature); set("botMaxTokens",llm.max_tokens);
@@ -1234,8 +1248,11 @@ async function saveBot(){
     trigger_prefix:g("botPrefix").value,
     conversation_memory:g("botMemory").checked,
     memory_turns:parseInt(g("botMemoryTurns").value)||12,
+    recent_history_lines:parseInt(g("botHistoryLines").value)||0,
     cooldown_secs:parseInt(g("botCooldown").value)||3,
     max_in_flight:parseInt(g("botMaxInflight").value)||4,
+    execute_commands:g("botExecCmds").checked,
+    allowed_commands:g("botAllowedCmds").value.split(",").map(s=>s.trim()).filter(Boolean),
     llm:{
       provider:g("botProvider").value,
       endpoint:g("botEndpoint").value.trim()||base.llm?.endpoint||"",

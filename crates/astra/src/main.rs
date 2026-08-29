@@ -293,13 +293,6 @@ async fn main() -> anyhow::Result<()> {
         ctx.bans.len()
     );
 
-    // Bot agente inteligente (identidad propia, configurable desde el panel).
-    let bot = astra_bot::BotEngine::new(db.clone());
-    if bot.is_enabled() {
-        info!("bot agente activo: '{}'", bot.bot_name());
-    }
-    *ctx.bot.write() = Some(bot);
-
     // Inicializar sistema de scripting (boa_engine)
     let scripts_dir = std::path::PathBuf::from(&settings.data_dir).join("scripts");
     let scripting_manager = astra_scripting::ScriptManager::new(ctx.clone(), scripts_dir.clone());
@@ -308,6 +301,15 @@ async fn main() -> anyhow::Result<()> {
         "scripting inicializado en {} (handle Send + Clone para dispatchear eventos)",
         scripts_dir.display()
     );
+
+    // Bot agente inteligente (identidad propia, configurable desde el panel).
+    // Recibe el handle de scripting para los side-effects de los comandos que
+    // el bot ejecute (los comandos se ejecutan con el nivel del solicitante).
+    let bot = astra_bot::BotEngine::new(db.clone(), scripting.clone());
+    if bot.is_enabled() {
+        info!("bot agente activo: '{}'", bot.bot_name());
+    }
+    *ctx.bot.write() = Some(bot);
     // Gate de vroom (onVroomJoinCheck): server-core no puede depender del
     // scripting, así que se inyecta como closure (mismo patrón que
     // ScriptingHooks).

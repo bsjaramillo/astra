@@ -74,7 +74,7 @@ impl Default for LlmConfig {
             max_tokens: 400,
             system_prompt: "Eres Nova, un asistente amable y cercano en una sala de chat.\
              Responde de forma breve y natural, en el idioma del usuario.".into(),
-            timeout_secs: 20,
+            timeout_secs: 30,
         }
     }
 }
@@ -110,6 +110,17 @@ pub struct BotConfig {
     pub conversation_memory: bool,
     /// Turns de historial por usuario que se envían al LLM.
     pub memory_turns: usize,
+    /// Cuántos mensajes públicos recientes de la sala se inyectan al contexto
+    /// del prompt (`0` = desactivado).
+    pub recent_history_lines: usize,
+    /// Permitir que el bot EJECUTE comandos de la sala cuando un usuario se
+    /// lo pide. El comando se ejecuta con el nivel del usuario que lo pide
+    /// (no con el del bot), así aplican las validaciones de permisos reales.
+    /// Default OFF (vector de riesgo: el LLM puede malinterpretar una petición).
+    pub execute_commands: bool,
+    /// Allowlist de comandos que el bot puede ejecutar (sin `/`). Vacía =
+    /// todos los que el nivel del solicitante permita.
+    pub allowed_commands: Vec<String>,
     /// Segundos de enfriamiento por usuario (anti-spam de llamadas al LLM).
     pub cooldown_secs: u64,
     /// Máximo de llamadas al LLM en vuelo simultáneas.
@@ -135,6 +146,9 @@ impl Default for BotConfig {
             trigger_prefix: "!".into(),
             conversation_memory: true,
             memory_turns: 12,
+            recent_history_lines: 15,
+            execute_commands: false,
+            allowed_commands: Vec::new(),
             cooldown_secs: 3,
             max_in_flight: 4,
             llm: LlmConfig::default(),

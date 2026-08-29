@@ -958,7 +958,7 @@ fn handle_ws_command(
 }
 
 fn handle_ws_public(
-    ctx: &AppContext,
+    ctx: &Arc<AppContext>,
     user: &Arc<AresUser>,
     mut text: String,
     scripting: &astra_scripting::ScriptHandle,
@@ -1129,7 +1129,7 @@ fn handle_ws_buzz(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 }
 
 fn handle_ws_pm(
-    ctx: &AppContext,
+    ctx: &Arc<AppContext>,
     user: &Arc<AresUser>,
     args: &str,
     scripting: &astra_scripting::ScriptHandle,

@@ -12,7 +12,8 @@
 //! # use std::sync::Arc;
 //! # use server_core::db::Database;
 //! # let db: Arc<Database> = Database::in_memory().unwrap();
-//! let bot = astra_bot::BotEngine::new(db);
+//! let scripting = astra_scripting::ScriptHandle::dummy();
+//! let bot = astra_bot::BotEngine::new(db, scripting);
 //! // ctx.bot = Some(bot);  // AppContext::bot: Option<Arc<dyn Bot>>
 //! ```
 //!

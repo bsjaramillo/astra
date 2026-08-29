@@ -41,6 +41,38 @@ impl LlmClient for HttpLlm {
             return Err("llm.api_key requerida".into());
         }
         let timeout = Duration::from_secs(cfg.timeout_secs.max(1));
+
+        // Reintento ante errores TRANSITORIOS (429 / 5xx / respuesta vacía /
+        // "insufficient_system_resource"): DeepSeek y otros providers devuelven
+        // estos fallos cuando están sobrecargados y suelen resolverse solos.
+        const MAX_RETRIES: usize = 2;
+        let mut last_err = String::new();
+        for attempt in 0..=MAX_RETRIES {
+            match self.chat_once(cfg, messages, timeout).await {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    if attempt < MAX_RETRIES && is_transient(&e) {
+                        let backoff_ms = 300 * (1 << attempt);
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        last_err = e;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err)
+    }
+}
+
+impl HttpLlm {
+    /// Un intento de llamada (sin reintento).
+    async fn chat_once(
+        &self,
+        cfg: &LlmConfig,
+        messages: &[ChatMessage],
+        timeout: Duration,
+    ) -> Result<String, String> {
         match cfg.provider {
             LlmProvider::Openai | LlmProvider::Deepseek => {
                 openai_chat(cfg, messages, timeout).await
@@ -48,6 +80,27 @@ impl LlmClient for HttpLlm {
             LlmProvider::Anthropic => anthropic_chat(cfg, messages, timeout).await,
         }
     }
+}
+
+/// ¿El error es transitorio (merece reintento)? 429, 5xx, respuesta vacía y
+/// el "insufficient_system_resource" de DeepSeek. Los 4xx restantes
+/// (400/401/402/422) son permanentes (config inválida, saldo, etc.) y los
+/// errores de red/timeout no se reintentan para no alargar la espera.
+fn is_transient(e: &str) -> bool {
+    if e.contains("insufficient_system_resource") {
+        return true;
+    }
+    if let Some(rest) = e.strip_prefix("llm http ") {
+        if let Some(code) = rest
+            .split(':')
+            .next()
+            .and_then(|c| c.trim().parse::<u16>().ok())
+        {
+            return code == 429 || (500..=599).contains(&code);
+        }
+        return false;
+    }
+    e == "respuesta LLM vacía"
 }
 
 async fn openai_chat(
@@ -102,18 +155,23 @@ async fn openai_chat(
         .ok_or_else(|| format!("respuesta LLM inesperada: {}", truncate(&bytes)))?
         .trim()
         .to_string();
+    let finish_reason = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|r| r.as_str());
+    // DeepSeek: cuando el servidor está sobrecargado responde con
+    // finish_reason "insufficient_system_resource" (a veces con content vacío).
+    // Es transitorio → se reintenta.
+    if finish_reason == Some("insufficient_system_resource") {
+        return Err("llm http 503: insufficient_system_resource (servidor sobrecargado)".into());
+    }
     if content.is_empty() {
         return Err("respuesta LLM vacía".into());
     }
     // finish_reason == "length": el modelo se quedó sin tokens a mitad de la
     // respuesta. Marcarlo con "…" para que no parezca un corte silencioso.
-    let truncated = v
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("finish_reason"))
-        .and_then(|r| r.as_str())
-        == Some("length");
-    if truncated {
+    if finish_reason == Some("length") {
         Ok(format!("{} …", content))
     } else {
         Ok(content)
@@ -216,5 +274,22 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt.block_on(HttpLlm.chat(&cfg, &[])).unwrap_err();
         assert!(err.contains("api_key"));
+    }
+
+    #[test]
+    fn transient_error_classification() {
+        // Transitorios: 429, 5xx, respuesta vacía, resource insuficiente.
+        assert!(is_transient("llm http 429: too many requests"));
+        assert!(is_transient("llm http 503: service unavailable"));
+        assert!(is_transient("llm http 500: boom"));
+        assert!(is_transient("respuesta LLM vacía"));
+        assert!(is_transient("llm http 503: insufficient_system_resource (servidor sobrecargado)"));
+        // Permanentes: no se reintentan.
+        assert!(!is_transient("llm http 400: bad request"));
+        assert!(!is_transient("llm http 401: invalid key"));
+        assert!(!is_transient("llm http 402: insufficient balance"));
+        assert!(!is_transient("llm http 422: invalid model"));
+        assert!(!is_transient("llm request: timeout (red)"));
+        assert!(!is_transient("llm json: parse error"));
     }
 }
