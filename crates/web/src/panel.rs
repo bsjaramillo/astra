@@ -147,6 +147,15 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
   code{background:var(--surface3);padding:1px 6px;border-radius:6px;font-size:12.5px}
   .note{background:var(--acc-soft);border:1px solid rgba(255,122,26,.25);border-radius:10px;padding:11px 13px;font-size:13px;color:#ffd0a8;margin-bottom:14px}
   .warnbox{background:rgba(255,176,32,.1);border:1px solid rgba(255,176,32,.3);border-radius:10px;padding:11px 13px;font-size:13px;color:#ffdca0;margin-bottom:14px}
+  details.bothelp{margin-top:12px;border:1px solid var(--border);border-radius:10px;padding:10px 13px;background:rgba(0,0,0,.12)}
+  details.bothelp summary{cursor:pointer;font-weight:600;color:var(--acc);font-size:13.5px;outline:none}
+  details.bothelp .help-txt{color:var(--mut);font-size:13px;margin:8px 0 0}
+  .tblwrap{overflow-x:auto;margin:10px 0}
+  table.helptbl{width:100%;border-collapse:collapse;font-size:12.5px}
+  table.helptbl th,table.helptbl td{border:1px solid var(--border);padding:6px 8px;text-align:left;vertical-align:top}
+  table.helptbl th{color:var(--mut2);text-transform:uppercase;font-size:11px;letter-spacing:.04em;font-weight:700}
+  table.helptbl a{color:var(--acc)}
+  table.helptbl code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 
   #console-out{background:#0a0c10;border:1px solid var(--border);border-radius:12px;padding:12px;height:340px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;white-space:pre-wrap;line-height:1.5}
 
@@ -407,6 +416,18 @@ const I18N = {
     bot_fallback:"Respuesta si el LLM falla",
     bot_exec_h:"Ejecución de comandos", bot_exec_note:"El bot puede ejecutar comandos que el usuario le pida. Se ejecutan con el NIVEL del usuario que lo pide (un Regular no puede banear a un Admin). Apagado por defecto.",
     bot_exec_on:"Permitir ejecutar comandos", bot_allowed_cmds:"Comandos permitidos (vacío = todos por nivel, separados por coma)",
+    bot_help:"¿Cómo configurar la API key?",
+    bot_help_intro:"La API key es obligatoria (todos los proveedores la requieren). El endpoint debe ser el COMPLETO de la llamada y el modelo debe existir en el proveedor. Casi todos usan saldo prepago.",
+    bot_help_provider:"Proveedor", bot_help_endpoint:"Endpoint", bot_help_model:"Modelo default",
+    bot_help_key:"Generar API key", bot_help_balance:"Saldo / recarga",
+    bot_help_balance_openai:"Prepago: recarga en platform.openai.com → Billing.",
+    bot_help_balance_deepseek:"Prepago obligatorio: recarga / top-up en platform.deepseek.com.",
+    bot_help_balance_anthropic:"Créditos prepago: recarga en platform.anthropic.com → Billing.",
+    bot_help_compat:"OpenAI-compatible (Groq, Ollama, LM Studio, vLLM, Mistral…)",
+    bot_help_compat_endpoint:"El del servicio (ej. Groq: https://api.groq.com/openai/v1/chat/completions)",
+    bot_help_compat_key:"La key del servicio (ej. console.groq.com).",
+    bot_help_compat_balance:"Varía: Groq tiene tier gratis. Ollama/LM Studio local: sin key ni saldo.",
+    bot_help_note:"Si el bot responde el mensaje de fallback, mirá el log «bot: error LLM para 'X': …». 401 = key inválida · 402 = sin saldo · 422 = modelo/endpoint mal · 429/503/insufficient_system_resource = transitorio (se reintenta) · timeout → subir timeout_secs.",
     bot_saved:"Bot guardado.",
   },
   en:{
@@ -567,6 +588,18 @@ const I18N = {
     bot_fallback:"Reply if the LLM fails",
     bot_exec_h:"Command execution", bot_exec_note:"The bot can run commands users ask for. They run with the REQUESTING user's level (a Regular can't ban an Admin). Off by default.",
     bot_exec_on:"Allow executing commands", bot_allowed_cmds:"Allowed commands (blank = all by level, comma separated)",
+    bot_help:"How to configure the API key?",
+    bot_help_intro:"The API key is required (all providers). The endpoint must be the full chat URL and the model must exist in the provider. Most providers use prepaid balance.",
+    bot_help_provider:"Provider", bot_help_endpoint:"Endpoint", bot_help_model:"Default model",
+    bot_help_key:"Generate API key", bot_help_balance:"Balance / top-up",
+    bot_help_balance_openai:"Prepaid: top up at platform.openai.com → Billing.",
+    bot_help_balance_deepseek:"Prepaid (required): top up at platform.deepseek.com.",
+    bot_help_balance_anthropic:"Prepaid credits: top up at platform.anthropic.com → Billing.",
+    bot_help_compat:"OpenAI-compatible (Groq, Ollama, LM Studio, vLLM, Mistral…)",
+    bot_help_compat_endpoint:"Service endpoint (e.g. Groq: https://api.groq.com/openai/v1/chat/completions)",
+    bot_help_compat_key:"Service key (e.g. console.groq.com).",
+    bot_help_compat_balance:"Varies: Groq has a free tier. Local Ollama/LM Studio: no key or balance.",
+    bot_help_note:"If the bot replies with the fallback, check the log «bot: error LLM para 'X': …». 401 = invalid key · 402 = no balance · 422 = wrong model/endpoint · 429/503/insufficient_system_resource = transient (retried) · timeout → raise timeout_secs.",
     bot_saved:"Bot saved.",
   }
 };
@@ -1184,6 +1217,29 @@ function renderBot(){
       </div>
       <label class="fld"><span>${t("bot_prompt")}</span><textarea id="botPrompt" spellcheck="false" style="height:90px" placeholder="${esc(t("bot_prompt_ph"))}"></textarea></label>
       <label class="fld"><span>${t("bot_fallback")}</span><input id="botFallback"></label>
+      <details class="bothelp"><summary>❓ ${t("bot_help")}</summary>
+        <p class="help-txt">${t("bot_help_intro")}</p>
+        <div class="tblwrap"><table class="helptbl">
+          <thead><tr>
+            <th>${t("bot_help_provider")}</th><th>${t("bot_help_endpoint")}</th>
+            <th>${t("bot_help_model")}</th><th>${t("bot_help_key")}</th><th>${t("bot_help_balance")}</th>
+          </tr></thead>
+          <tbody>
+            <tr><td>OpenAI</td><td><code>https://api.openai.com/v1/chat/completions</code></td><td><code>gpt-4o-mini</code></td>
+              <td><a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com</a></td>
+              <td>${t("bot_help_balance_openai")}</td></tr>
+            <tr><td>DeepSeek</td><td><code>https://api.deepseek.com/chat/completions</code></td><td><code>deepseek-v4-flash</code></td>
+              <td><a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">platform.deepseek.com</a></td>
+              <td>${t("bot_help_balance_deepseek")}</td></tr>
+            <tr><td>Anthropic</td><td><code>https://api.anthropic.com/v1/messages</code></td><td><code>claude-haiku-4-5</code></td>
+              <td><a href="https://platform.anthropic.com/settings/keys" target="_blank" rel="noopener">platform.anthropic.com</a></td>
+              <td>${t("bot_help_balance_anthropic")}</td></tr>
+            <tr><td>${t("bot_help_compat")}</td><td>${t("bot_help_compat_endpoint")}</td><td>—</td>
+              <td>${t("bot_help_compat_key")}</td><td>${t("bot_help_compat_balance")}</td></tr>
+          </tbody>
+        </table></div>
+        <div class="note">${t("bot_help_note")}</div>
+      </details>
     </div>
     <div class="rowend"><button class="btn primary" id="botSave">${t("common_save")}</button></div>`;
 }
