@@ -140,7 +140,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "astra"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "anyhow",
  "astra-bot",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "astra-bot"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "astra-captcha"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "image",
  "rand 0.8.8",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "astra-commands"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "anyhow",
  "astra-scripting",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "astra-link"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "aes",
  "anyhow",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "astra-scripting"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "astra-udp"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "astra-web"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "anyhow",
  "astra-bot",
@@ -1426,9 +1426,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
+checksum = "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1747,9 +1747,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
@@ -2373,7 +2373,7 @@ dependencies = [
 
 [[package]]
 name = "proto-ares"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "aes",
  "byteorder",
@@ -2822,7 +2822,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.6"
 dependencies = [
  "anyhow",
  "astra-captcha",
