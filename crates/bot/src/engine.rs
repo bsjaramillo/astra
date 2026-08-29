@@ -14,6 +14,7 @@ use parking_lot::{Mutex, RwLock};
 use server_core::app::{AppContext, HistoryEntry};
 use server_core::bot::Bot;
 use server_core::db::Database;
+use server_core::text_effects::strip_colors;
 use server_core::user_pool::{AresUser, UserPool};
 
 use crate::config::{BotConfig, TriggerMode};
@@ -229,10 +230,18 @@ impl BotEngine {
             // ejecutar uno con `[CMD] ... [/CMD]`. Se ejecuta CON EL NIVEL DEL
             // SOLICITANTE (no con el del bot), así aplican las validaciones de
             // permisos del comando (ejecutor vs objetivo).
-            let mut final_text = reply.clone();
+            let (clean, mut cmds) = extract_commands(&reply);
+            let mut final_text = clean;
+            if cmds.is_empty() {
+                // Fallback: si el LLM no usó la directiva pero respondió con
+                // un comando directo ("/topic x"), tratarlo como tal.
+                let t = final_text.trim_start().to_string();
+                if t.starts_with('/') || t.starts_with('#') {
+                    cmds.push(t);
+                    final_text = String::new();
+                }
+            }
             if cfg.execute_commands {
-                let (clean, cmds) = extract_commands(&reply);
-                final_text = clean;
                 let mut extras: Vec<String> = Vec::new();
                 for cmd in cmds {
                     extras.extend(execute_as_user(
@@ -250,6 +259,9 @@ impl BotEngine {
                     }
                     final_text.push_str(&extras.join(" | "));
                 }
+            } else {
+                // Ejecución deshabilitada: no se procesa ninguna directiva.
+                final_text = reply.clone();
             }
             let final_text = final_text.trim().to_string();
             let final_text = if final_text.is_empty() {
@@ -400,40 +412,6 @@ fn trigger_matches(cfg: &BotConfig, text: &str) -> bool {
             !name.is_empty() && text.to_lowercase().contains(&name)
         }
     }
-}
-
-/// Elimina códigos de color/formato de Ares/cb0t del texto (paridad
-/// `Helpers.StripColors` de cb0t): `\x03`/`\x05` + 2 dígitos, `\x02`, `\x06`,
-/// `\x07`, `\x09` y el soft-hyphen unicode `\xAD` (U+00AD). También quita
-/// caracteres de formato / zero-width unicode que algunos clientes inyectan
-/// delante del texto (ZWSP, ZWJ, BOM…) y que rompen la comparación de
-/// strings (p. ej. el trigger por prefijo).
-fn strip_colors(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c as u32 {
-            // Código de color con valor de 2 dígitos: `\x03NN` / `\x05NN`.
-            0x03 | 0x05 => {
-                let mut n = 0;
-                while n < 2 {
-                    match chars.peek().copied() {
-                        Some(d) if d.is_ascii_digit() => {
-                            chars.next();
-                            n += 1;
-                        }
-                        _ => break,
-                    }
-                }
-            }
-            // Códigos de formato simples.
-            0x02 | 0x06 | 0x07 | 0x09 | 0xAD => {}
-            // Caracteres zero-width / formato unicode.
-            0x200B | 0x200C | 0x200D | 0x2060 | 0xFEFF => {}
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// Cómo invoca el usuario al bot, según el trigger configurado (para el
@@ -1114,5 +1092,97 @@ mod tests {
             "out: {:?}",
             out
         );
+    }
+
+    #[tokio::test]
+    async fn full_execute_flow_on_public() {
+        // El flujo completo: on_public → LLM responde con [CMD] → se ejecuta
+        // con el nivel del solicitante → el topic cambia.
+        let (ctx, mut rx) = ctx_with_user("owner");
+        if let Some(u) = ctx.user_pool.get_by_name("owner") {
+            *u.level.write() = server_core::ILevel::Owner;
+        }
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "[CMD]/topic hola mundo[/CMD]");
+        let mut cfg = bot.config_snapshot();
+        cfg.execute_commands = true;
+        cfg.reply_in_room = true;
+        *bot.config.write() = cfg;
+
+        bot.on_public(&ctx, "owner", "Nova cambia el topic");
+
+        // El /topic primero difunde el TOPIC a la sala; luego llega la
+        // respuesta del bot con el resultado. Consumimos hasta encontrarla.
+        let mut found = false;
+        for _ in 0..5 {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout esperando respuesta")
+                .unwrap();
+            if msg.starts_with("PUBLIC:") && msg.contains("Topic updated.") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "no llegó la respuesta 'Topic updated.'");
+        assert_eq!(ctx.current_room_topic(), "hola mundo");
+    }
+
+    #[tokio::test]
+    async fn full_execute_flow_bare_command_fallback() {
+        // El LLM responde con un comando directo (sin la directiva [CMD]):
+        // el fallback lo ejecuta igual.
+        let (ctx, _rx) = ctx_with_user("owner");
+        if let Some(u) = ctx.user_pool.get_by_name("owner") {
+            *u.level.write() = server_core::ILevel::Owner;
+        }
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "/topic directo");
+        let mut cfg = bot.config_snapshot();
+        cfg.execute_commands = true;
+        *bot.config.write() = cfg;
+
+        bot.on_public(&ctx, "owner", "Nova cambia el topic");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(ctx.current_room_topic(), "directo");
+    }
+
+    #[tokio::test]
+    async fn full_execute_flow_case_insensitive_name() {
+        // El nick del solicitante con MAYÚSCULAS se resuelve igual aunque el
+        // bot reciba el nombre en minúsculas (get_by_name es case-insensitive).
+        let (ctx, _rx) = ctx_with_user("Owner");
+        if let Some(u) = ctx.user_pool.get_by_name("Owner") {
+            *u.level.write() = server_core::ILevel::Owner;
+        }
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "[CMD]/status hola[/CMD]");
+        let mut cfg = bot.config_snapshot();
+        cfg.execute_commands = true;
+        *bot.config.write() = cfg;
+        // "owner" (minúsculas) vs nick "Owner".
+        bot.on_public(&ctx, "owner", "Nova cambia el status");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(ctx.room_status(), "hola");
+    }
+
+    #[tokio::test]
+    async fn full_execute_flow_colored_nick() {
+        // El nick del solicitante tiene un código de color (\x03Owner) pero el
+        // bot recibe/usa el nombre "limpio" (Owner): la resolución lo encuentra
+        // igual y el comando se ejecuta con su nivel.
+        let (ctx, _rx) = ctx_with_user("\x03Owner");
+        if let Some(u) = ctx.user_pool.get_by_name("Owner") {
+            *u.level.write() = server_core::ILevel::Owner;
+        }
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "[CMD]/status hola[/CMD]");
+        let mut cfg = bot.config_snapshot();
+        cfg.execute_commands = true;
+        *bot.config.write() = cfg;
+
+        bot.on_public(&ctx, "Owner", "Nova cambia el status");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(ctx.room_status(), "hola");
     }
 }

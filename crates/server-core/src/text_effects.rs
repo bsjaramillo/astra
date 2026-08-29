@@ -30,6 +30,39 @@ pub fn set_colors(text: &str) -> String {
         .replace("\u{2}9", "\u{9}")
 }
 
+/// Elimina los códigos de color/formato de Ares/cb0t de un texto (paridad
+/// `Helpers.StripColors` de cb0t): `\x03`/`\x05` + 2 dígitos, `\x02`, `\x06`,
+/// `\x07`, `\x09` y el soft-hyphen unicode `\xAD` (U+00AD). También quita
+/// caracteres de formato / zero-width unicode (ZWSP, ZWJ, BOM…) que rompen
+/// la comparación de strings — p. ej. para resolver nicks con color.
+pub fn strip_colors(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c as u32 {
+            // Código de color con valor de 2 dígitos: `\x03NN` / `\x05NN`.
+            0x03 | 0x05 => {
+                let mut n = 0;
+                while n < 2 {
+                    match chars.peek().copied() {
+                        Some(d) if d.is_ascii_digit() => {
+                            chars.next();
+                            n += 1;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            // Códigos de formato simples.
+            0x02 | 0x06 | 0x07 | 0x09 | 0xAD => {}
+            // Caracteres zero-width / formato unicode.
+            0x200B | 0x200C | 0x200D | 0x2060 | 0xFEFF => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Aplica las transformaciones "de castigo" per-usuario a un texto público
 /// saliente, según los flags del usuario (`kiddied`, `lowered`).
 ///

@@ -489,6 +489,13 @@ impl Default for UserPool {
     }
 }
 
+/// Normaliza un nick para usarlo como clave del índice `by_name`: minúsculas
+/// + sin códigos de color/formato. Así un nick coloreado (`\x03John`) se
+/// resuelve con su nombre "limpio" (`John`), y viceversa.
+fn normalize_name(name: &str) -> String {
+    crate::text_effects::strip_colors(name).to_lowercase()
+}
+
 impl UserPool {
     /// Crea un pool vacío.
     pub fn new() -> Self {
@@ -509,7 +516,7 @@ impl UserPool {
         let mut users = self.users.write();
         let mut by_name = self.by_name.write();
         let name = user.name.read().clone();
-        by_name.insert(name.to_lowercase(), user.clone());
+        by_name.insert(normalize_name(&name), user.clone());
         users.insert(user.id, user);
     }
 
@@ -519,7 +526,7 @@ impl UserPool {
         let mut by_name = self.by_name.write();
         if let Some(user) = users.remove(&id) {
             let name = user.name.read().clone();
-            by_name.remove(&name.to_lowercase());
+            by_name.remove(&normalize_name(&name));
         }
     }
 
@@ -528,17 +535,18 @@ impl UserPool {
         self.users.read().get(&id).cloned()
     }
 
-    /// Devuelve un usuario por nick (case-insensitive).
+    /// Devuelve un usuario por nick (case-insensitive y sin códigos de color:
+    /// un nick coloreado se resuelve por su nombre "limpio").
     pub fn get_by_name(&self, name: &str) -> Option<Arc<AresUser>> {
-        self.by_name.read().get(&name.to_lowercase()).cloned()
+        self.by_name.read().get(&normalize_name(name)).cloned()
     }
 
     /// Actualiza el índice por nick de un usuario ya registrado.
     pub fn rename(&self, id: u16, old_name: &str, new_name: &str) {
         let mut by_name = self.by_name.write();
-        by_name.remove(&old_name.to_lowercase());
+        by_name.remove(&normalize_name(old_name));
         if let Some(user) = self.users.read().get(&id).cloned() {
-            by_name.insert(new_name.to_lowercase(), user);
+            by_name.insert(normalize_name(new_name), user);
         }
     }
 
@@ -617,5 +625,27 @@ mod tests {
         u.killed_notified().await;
         u.killed_notified().await;
         assert!(u.is_killed());
+    }
+
+    #[test]
+    fn get_by_name_resolves_colored_nick() {
+        // Un nick coloreado (\x03 + dígitos) se resuelve por su nombre "limpio"
+        // y case-insensitive.
+        let pool = UserPool::new();
+        let mut u = user();
+        *u.name.write() = "\x03John".to_string();
+        u.logged_in = true;
+        pool.add(Arc::new(u));
+
+        assert!(pool.get_by_name("John").is_some());
+        assert!(pool.get_by_name("john").is_some());
+        assert!(pool.get_by_name("\x0301John").is_some());
+        assert!(pool.get_by_name("Johnny").is_none());
+
+        // rename mantiene el índice limpio.
+        let id = pool.users()[0].id;
+        pool.rename(id, "John", "\x05Jane");
+        assert!(pool.get_by_name("John").is_none());
+        assert!(pool.get_by_name("Jane").is_some());
     }
 }
