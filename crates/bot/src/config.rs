@@ -49,7 +49,7 @@ pub struct LlmConfig {
     ///   Ollama/Groq/DeepSeek/etc.)
     /// - anthropic: `https://api.anthropic.com/v1/messages`
     pub endpoint: String,
-    /// API key. Vacía para endpoints locales sin auth (Ollama).
+    /// API key. OBLIGATORIA (todos los providers la requieren).
     pub api_key: String,
     /// Modelo (ej. `gpt-4o-mini`, `claude-haiku-4-5`, `deepseek-v4-flash`).
     pub model: String,
@@ -71,7 +71,7 @@ impl Default for LlmConfig {
             api_key: String::new(),
             model: "gpt-4o-mini".into(),
             temperature: 0.7,
-            max_tokens: 200,
+            max_tokens: 400,
             system_prompt: "Eres Nova, un asistente amable y cercano en una sala de chat.\
              Responde de forma breve y natural, en el idioma del usuario.".into(),
             timeout_secs: 20,
@@ -92,7 +92,11 @@ pub struct BotConfig {
     pub greet_on_join: bool,
     /// Saludo por PM (true) o en público (false).
     pub greet_as_pm: bool,
-    /// Mensaje de saludo. Placeholder `+n` = nick, `+rn` = nombre de sala.
+    /// Generar el saludo con el LLM (true). Si es `false` (o el LLM falla),
+    /// se usa [`Self::greet_message`].
+    pub greet_llm: bool,
+    /// Mensaje de saludo (fallback / modo no-LLM). Placeholder `+n` = nick,
+    /// `+rn` = nombre de sala.
     pub greet_message: String,
     /// Responder menciones en público.
     pub reply_in_room: bool,
@@ -123,6 +127,7 @@ impl Default for BotConfig {
             name: "Nova".into(),
             greet_on_join: true,
             greet_as_pm: true,
+            greet_llm: true,
             greet_message: "¡Hola +n! Bienvenido a +rn. 🙂".into(),
             reply_in_room: true,
             reply_by_pm: true,

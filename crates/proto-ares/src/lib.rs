@@ -17,6 +17,7 @@
 pub mod crypto;
 pub mod messages;
 pub mod packet;
+pub mod pm_crypto;
 pub mod reader;
 pub mod writer;
 pub mod udp_packets;

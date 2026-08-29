@@ -183,11 +183,6 @@ pub async fn handle_connection(
             ip: user.external_ip.to_string(),
         });
         scripting.dispatch(ScriptEvent::LoginGranted { name: jname });
-        // Bot agente: saludo configurable al entrar.
-        if let Some(bot) = ctx.bot.read().as_ref() {
-            let jname = user.name.read().clone();
-            bot.on_join(&ctx, &jname);
-        }
     }
 
     // Broadcast del JOIN a la sala — salvo que sea un HIJACK (el mismo
@@ -224,6 +219,12 @@ pub async fn handle_connection(
     send_greet_ws(&ctx, &user, &ws_text_tx);
     // MOTD (message of the day), tras el greet.
     send_motd_ws(&ctx, &user, &ws_text_tx);
+    // Bot agente: saludo configurable. Va DESPUÉS del estado inicial, del
+    // JOIN a la sala y del greet/MOTD para que el usuario ya esté "dentro".
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        let jname = user.name.read().clone();
+        bot.on_join(&ctx, &jname);
+    }
     // Feeds de admin: ipsend (IP del que entra) y logsend (log de join),
     // paridad con el path TCP (tcp_handler.rs) — un join WEB también debe
     // disparar los feeds para los admin suscritos.

@@ -37,6 +37,9 @@ impl LlmClient for HttpLlm {
         if cfg.model.is_empty() {
             return Err("llm.model vacío".into());
         }
+        if cfg.api_key.is_empty() {
+            return Err("llm.api_key requerida".into());
+        }
         let timeout = Duration::from_secs(cfg.timeout_secs.max(1));
         match cfg.provider {
             LlmProvider::Openai | LlmProvider::Deepseek => {
@@ -100,7 +103,18 @@ async fn openai_chat(
         .trim()
         .to_string();
     if content.is_empty() {
-        Err("respuesta LLM vacía".into())
+        return Err("respuesta LLM vacía".into());
+    }
+    // finish_reason == "length": el modelo se quedó sin tokens a mitad de la
+    // respuesta. Marcarlo con "…" para que no parezca un corte silencioso.
+    let truncated = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|r| r.as_str())
+        == Some("length");
+    if truncated {
+        Ok(format!("{} …", content))
     } else {
         Ok(content)
     }
@@ -159,7 +173,16 @@ async fn anthropic_chat(
     if content.is_empty() {
         Err("respuesta LLM vacía".into())
     } else {
-        Ok(content)
+        // stop_reason == "max_tokens": respuesta cortada por el límite.
+        let truncated = v
+            .get("stop_reason")
+            .and_then(|r| r.as_str())
+            == Some("max_tokens");
+        if truncated {
+            Ok(format!("{} …", content))
+        } else {
+            Ok(content)
+        }
     }
 }
 
@@ -175,10 +198,23 @@ mod tests {
     fn rejects_empty_endpoint() {
         let cfg = LlmConfig {
             endpoint: String::new(),
+            api_key: "k".into(),
             ..LlmConfig::default()
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt.block_on(HttpLlm.chat(&cfg, &[])).unwrap_err();
         assert!(err.contains("endpoint"));
+    }
+
+    #[test]
+    fn rejects_empty_api_key() {
+        let cfg = LlmConfig {
+            endpoint: "https://x".into(),
+            api_key: String::new(),
+            ..LlmConfig::default()
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(HttpLlm.chat(&cfg, &[])).unwrap_err();
+        assert!(err.contains("api_key"));
     }
 }

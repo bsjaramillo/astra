@@ -208,10 +208,6 @@ pub async fn handle_tcp_client(
         name: user.name.read().clone(),
         ip: user.external_ip.to_string(),
     });
-    // Bot agente: saludo configurable al entrar.
-    if let Some(bot) = ctx.bot.read().as_ref() {
-        bot.on_join(&ctx, &user.name.read().clone());
-    }
 
     // Greet de bienvenida (PM del bot al usuario que entra)
     send_greet(&ctx, &user);
@@ -222,6 +218,13 @@ pub async fn handle_tcp_client(
     ctx.replay_history(&user);
     // Anuncio "was last seen as..." si el flag `lastseen` está activo.
     ctx.announce_last_seen(&user);
+
+    // Bot agente: saludo configurable. Va DESPUÉS de todo el estado inicial
+    // (topic, userlist, JOIN a la sala, greet/MOTD) para que el usuario ya
+    // esté "dentro" cuando llega el saludo.
+    if let Some(bot) = ctx.bot.read().as_ref() {
+        bot.on_join(&ctx, &user.name.read().clone());
+    }
 
     // Feeds de admin: ipsend (IP del que entra) y logsend (log de join).
     {
@@ -1793,6 +1796,19 @@ fn handle_custom_data(
 
     match ident.as_str() {
         "cb0t_pm_msg" => {
+            // PM enriquecido de cb0t dirigido al BOT agente: el texto viaja
+            // cifrado con el "soft crypto" de cb0t (PMCrypto), derivando el
+            // IV del nombre del RECEPTOR. Si el receptor es el bot, se
+            // descifra con su nombre y se lo pasa a `on_private`.
+            if let Some(bot) = ctx.bot.read().as_ref() {
+                if bot.is_enabled() && target_name.eq_ignore_ascii_case(&bot.bot_name()) {
+                    let bot_name = bot.bot_name();
+                    if let Some(text) = proto_ares::pm_crypto::soft_decrypt(&bot_name, payload) {
+                        bot.on_private(ctx, &from, &text);
+                    }
+                    return;
+                }
+            }
             let Some(target) = target else {
                 send_offline();
                 return;

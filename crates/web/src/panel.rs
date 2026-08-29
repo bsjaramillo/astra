@@ -393,14 +393,15 @@ const I18N = {
     bot_note:"Se aplica en vivo. El bot aparece en la lista de usuarios solo cuando está activo.",
     bot_enabled:"Activar bot", bot_name_l:"Nombre", bot_name_ph:"ej. Nova",
     bot_greet_h:"👋 Saludos al entrar", bot_greet_on:"Saludar a quien entra", bot_greet_pm:"Saludo por PM (si no, en sala)",
-    bot_greet_msg:"Mensaje de saludo", bot_greet_ph:"¡Hola +n! Bienvenido a +rn.",
+    bot_greet_llm:"Generar el saludo con el LLM",
+    bot_greet_msg:"Mensaje de saludo (fallback si el LLM falla)", bot_greet_ph:"¡Hola +n! Bienvenido a +rn.",
     bot_reply_h:"💬 Conversación", bot_reply_room:"Responder menciones en sala", bot_reply_pm:"Responder PMs",
     bot_trigger:"Disparador", bot_trigger_contains:"Cuando mencionan su nombre", bot_trigger_prefix:"Cuando el mensaje empieza con", bot_trigger_always:"Responder a todo",
     bot_prefix_l:"Prefijo", bot_memory:"Recordar conversación", bot_memory_turns:"Turns de memoria",
     bot_cooldown:"Cooldown (seg)", bot_max_inflight:"Máx. llamadas simultáneas",
     bot_llm_h:"🤖 Proveedor LLM", bot_provider:"Proveedor", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
-    bot_api_key:"API key (vacía si es local)", bot_model:"Modelo", bot_temp:"Temperatura", bot_max_tokens:"Máx. tokens",
+    bot_api_key:"API key (obligatoria)", bot_api_key_req:"La API key del LLM es obligatoria.", bot_model:"Modelo", bot_temp:"Temperatura", bot_max_tokens:"Máx. tokens",
     bot_prompt:"Prompt de sistema (personalidad)", bot_prompt_ph:"Eres Nova, un asistente amable y cercano...",
     bot_fallback:"Respuesta si el LLM falla",
     bot_saved:"Bot guardado.",
@@ -549,14 +550,15 @@ const I18N = {
     bot_note:"Applied live. The bot shows in the user list only while active.",
     bot_enabled:"Enable bot", bot_name_l:"Name", bot_name_ph:"e.g. Nova",
     bot_greet_h:"👋 Join greetings", bot_greet_on:"Greet users on join", bot_greet_pm:"Greet by PM (otherwise in room)",
-    bot_greet_msg:"Greeting message", bot_greet_ph:"Welcome +n to +rn!",
+    bot_greet_llm:"Generate the greeting with the LLM",
+    bot_greet_msg:"Greeting message (fallback if the LLM fails)", bot_greet_ph:"Welcome +n to +rn!",
     bot_reply_h:"💬 Conversation", bot_reply_room:"Reply to mentions in room", bot_reply_pm:"Reply to PMs",
     bot_trigger:"Trigger", bot_trigger_contains:"When they mention its name", bot_trigger_prefix:"When the message starts with", bot_trigger_always:"Reply to everything",
     bot_prefix_l:"Prefix", bot_memory:"Remember conversation", bot_memory_turns:"Memory turns",
     bot_cooldown:"Cooldown (sec)", bot_max_inflight:"Max concurrent calls",
     bot_llm_h:"🤖 LLM provider", bot_provider:"Provider", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
-    bot_api_key:"API key (blank if local)", bot_model:"Model", bot_temp:"Temperature", bot_max_tokens:"Max tokens",
+    bot_api_key:"API key (required)", bot_api_key_req:"The LLM API key is required.", bot_model:"Model", bot_temp:"Temperature", bot_max_tokens:"Max tokens",
     bot_prompt:"System prompt (personality)", bot_prompt_ph:"You are Nova, a friendly assistant...",
     bot_fallback:"Reply if the LLM fails",
     bot_saved:"Bot saved.",
@@ -1134,6 +1136,7 @@ function renderBot(){
     <div class="card"><h3>${t("bot_greet_h")}</h3>
       <label class="fld"><span class="switch"><input type="checkbox" id="botGreetOn"><span class="slider"></span></span>${t("bot_greet_on")}</label>
       <label class="fld"><span class="switch"><input type="checkbox" id="botGreetPm"><span class="slider"></span></span>${t("bot_greet_pm")}</label>
+      <label class="fld"><span class="switch"><input type="checkbox" id="botGreetLlm"><span class="slider"></span></span>${t("bot_greet_llm")}</label>
       <label class="fld"><span>${t("bot_greet_msg")}</span><input id="botGreetMsg" placeholder="${esc(t("bot_greet_ph"))}"></label>
     </div>
     <div class="card"><h3>${t("bot_reply_h")}</h3>
@@ -1161,7 +1164,7 @@ function renderBot(){
           <option value="anthropic">${t("bot_provider_anthropic")}</option>
         </select></label>
       <label class="fld"><span>${t("bot_endpoint")}</span><input id="botEndpoint" placeholder="${esc(t("bot_endpoint_ph"))}"></label>
-      <label class="fld"><span>${t("bot_api_key")}</span><input id="botApiKey" type="password" autocomplete="off"></label>
+      <label class="fld"><span>${t("bot_api_key")}</span><input id="botApiKey" type="password" required autocomplete="off"></label>
       <div class="rowend">
         <label class="fld"><span>${t("bot_model")}</span><input id="botModel" placeholder="gpt-4o-mini"></label>
         <label class="fld"><span>${t("bot_temp")}</span><input id="botTemp" type="number" step="0.1" min="0" max="2"></label>
@@ -1180,7 +1183,7 @@ async function loadBot(){
   const set=(id,v)=>{ const el=document.getElementById(id); if(el && v!=null) el.value=v; };
   const chk=(id,v)=>{ const el=document.getElementById(id); if(el) el.checked=!!v; };
   chk("botEnabled",c.enabled); set("botName",c.name);
-  chk("botGreetOn",c.greet_on_join); chk("botGreetPm",c.greet_as_pm); set("botGreetMsg",c.greet_message);
+  chk("botGreetOn",c.greet_on_join); chk("botGreetPm",c.greet_as_pm); chk("botGreetLlm",c.greet_llm); set("botGreetMsg",c.greet_message);
   chk("botReplyRoom",c.reply_in_room); chk("botReplyPm",c.reply_by_pm);
   set("botTrigger",c.trigger); set("botPrefix",c.trigger_prefix);
   chk("botMemory",c.conversation_memory); set("botMemoryTurns",c.memory_turns);
@@ -1199,6 +1202,7 @@ const BOT_API = {
   anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-haiku-4-5"},
 };
 function applyBotDefaults(force=false){
+  const g=(id)=>document.getElementById(id);
   const p=g("botProvider").value;
   const def=BOT_API[p]; if(!def) return;
   if(force){
@@ -1215,12 +1219,14 @@ function applyBotDefaults(force=false){
 }
 async function saveBot(){
   const g=(id)=>document.getElementById(id);
+  if(!g("botApiKey").value.trim()){ toast(t("bot_api_key_req"),"err"); return; }
   const base=BOTCFG||{};
   const c={
     enabled:g("botEnabled").checked,
     name:g("botName").value.trim()||base.name||"",
     greet_on_join:g("botGreetOn").checked,
     greet_as_pm:g("botGreetPm").checked,
+    greet_llm:g("botGreetLlm").checked,
     greet_message:g("botGreetMsg").value,
     reply_in_room:g("botReplyRoom").checked,
     reply_by_pm:g("botReplyPm").checked,

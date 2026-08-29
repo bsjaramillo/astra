@@ -76,6 +76,68 @@ impl BotEngine {
         Ok(())
     }
 
+    /// Saludo de bienvenida en background: generado por el LLM si
+    /// `greet_llm` está activo (con la pista de cómo invocar al bot según el
+    /// trigger); si no (o si el LLM falla), usa el template `greet_message` +
+    /// la misma pista.
+    fn spawn_greet(&self, ctx: &AppContext, name: &str) {
+        let cfg = self.config.read().clone();
+        let pool = ctx.user_pool.clone();
+        let llm = self.llm.clone();
+        let config = self.config.clone();
+        let name = name.to_string();
+        let room = ctx.settings.room_name.clone();
+        let bot_name = cfg.name.clone();
+        let use_llm = cfg.greet_llm;
+        let fallback = cfg.greet_message.clone();
+        let greet_as_pm = cfg.greet_as_pm;
+        let hint = trigger_hint(&cfg);
+
+        tokio::spawn(async move {
+            let cfg = config.read().clone();
+            if !cfg.enabled {
+                return;
+            }
+            let text = if use_llm {
+                let mut llm_cfg = cfg.llm.clone();
+                llm_cfg.system_prompt = format!(
+                    "Eres {}, el bot de la sala '{}'.\n\
+                     Un usuario llamado '{}' acaba de entrar.\n\
+                     Salúdalo con 1 o 2 frases cálidas y dile cómo invocarte: {}.\n\
+                     Responde en español, breve y natural.",
+                    bot_name, room, name, hint
+                );
+                match llm.chat(&llm_cfg, &[]).await {
+                    Ok(r) => normalize_reply(&r),
+                    Err(e) => {
+                        tracing::warn!("bot: error LLM en saludo para '{}': {}", name, e);
+                        format!("{} {}", render_greet(&fallback, &name, &room), hint)
+                    }
+                }
+            } else {
+                let t = render_greet(&fallback, &name, &room);
+                if t.is_empty() {
+                    return;
+                }
+                format!("{} {}", t, hint)
+            };
+            if text.is_empty() {
+                return;
+            }
+            if greet_as_pm {
+                if let Some(u) = pool.get_by_name(&name) {
+                    for chunk in split_chunks(&text, MAX_MSG_LEN) {
+                        let _ = u.send_pvt(&bot_name, &chunk);
+                    }
+                }
+            } else {
+                for chunk in split_chunks(&text, MAX_MSG_LEN) {
+                    broadcast_public(&pool, &bot_name, &chunk);
+                }
+            }
+        });
+    }
+
     /// Lanza una respuesta (público o PM) en background, respetando cooldown,
     /// in-flight y tope global.
     fn spawn_reply(&self, ctx: &AppContext, from: &str, text: &str, is_pm: bool) {
@@ -104,6 +166,9 @@ impl BotEngine {
         }
 
         let pool = ctx.user_pool.clone();
+        let room_name = ctx.settings.room_name.clone();
+        let topic = ctx.current_room_topic();
+        let server_bot_name = ctx.settings.bot_name.clone();
         let from = from.to_string();
         let text = text.to_string();
         let memory = self.memory.clone();
@@ -130,7 +195,12 @@ impl BotEngine {
                 Vec::new()
             };
 
-            let reply = match llm.chat(&cfg.llm, &history).await {
+            // Prompt enriquecido con el contexto de la sala (usuarios, topic).
+            let mut llm_cfg = cfg.llm.clone();
+            llm_cfg.system_prompt =
+                build_system_prompt(&cfg, &pool, &room_name, &topic, &server_bot_name);
+
+            let reply = match llm.chat(&llm_cfg, &history).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!("bot: error LLM para '{}': {}", from, e);
@@ -222,21 +292,7 @@ impl Bot for BotEngine {
         if name.is_empty() || name == cfg.name || name == ctx.settings.bot_name {
             return;
         }
-        let text = render_greet(&cfg.greet_message, name, &ctx.settings.room_name);
-        if text.is_empty() {
-            return;
-        }
-        if cfg.greet_as_pm {
-            if let Some(u) = ctx.user_pool.get_by_name(name) {
-                for chunk in split_chunks(&text, MAX_MSG_LEN) {
-                    let _ = u.send_pvt(&cfg.name, &chunk);
-                }
-            }
-        } else {
-            for chunk in split_chunks(&text, MAX_MSG_LEN) {
-                broadcast_public(&ctx.user_pool, &cfg.name, &chunk);
-            }
-        }
+        self.spawn_greet(ctx, name);
     }
 
     fn on_public(&self, ctx: &AppContext, from: &str, text: &str) {
@@ -294,6 +350,72 @@ fn trigger_matches(cfg: &BotConfig, text: &str) -> bool {
     }
 }
 
+/// Cómo invoca el usuario al bot, según el trigger configurado (para el
+/// saludo y para que el bot lo explique).
+fn trigger_hint(cfg: &BotConfig) -> String {
+    match cfg.trigger {
+        TriggerMode::Contains => format!("mencionando mi nombre ('{}')", cfg.name),
+        TriggerMode::Prefix => format!("escribiendo '{}' al inicio de tu mensaje", cfg.trigger_prefix),
+        TriggerMode::Always => "escribiéndome cualquier mensaje".to_string(),
+    }
+}
+
+/// Lista de usuarios conectados (hasta 30) para el contexto del prompt.
+fn room_context(
+    pool: &UserPool,
+    cfg: &BotConfig,
+    room_name: &str,
+    topic: &str,
+    server_bot_name: &str,
+) -> String {
+    let names: Vec<String> = pool
+        .users()
+        .iter()
+        .filter(|u| u.logged_in)
+        .map(|u| u.name.read().clone())
+        .filter(|n| n != &cfg.name && n != server_bot_name)
+        .take(30)
+        .collect();
+    format!(
+        "Sala: '{}' | Topic: '{}' | Usuarios conectados ({}): {}",
+        room_name,
+        topic,
+        pool.len(),
+        if names.is_empty() {
+            "ninguno".to_string()
+        } else {
+            names.join(", ")
+        }
+    )
+}
+
+/// Comandos de la sala que el bot conoce (para responder dudas del usuario).
+/// La EJECUCIÓN de comandos por el bot está planificada (ver docs/ROADMAP-V2).
+fn commands_context() -> String {
+    "Comandos de la sala (para informar al usuario): /kick <nick>, \
+     /muzzle <nick>, /unmuzzle <nick>, /ban <nick> [razón], /topic <texto>, \
+     /status <texto>, /help"
+        .to_string()
+}
+
+/// Prompt de sistema con el contexto de la sala inyectado (point 8: el bot
+/// sabe quién está conectado y qué comandos existen).
+fn build_system_prompt(
+    cfg: &BotConfig,
+    pool: &UserPool,
+    room_name: &str,
+    topic: &str,
+    server_bot_name: &str,
+) -> String {
+    let base = cfg.llm.system_prompt.trim();
+    format!(
+        "{}\n\n=== Contexto actual de la sala ===\n{}\n{}",
+        base,
+        room_context(pool, cfg, room_name, topic, server_bot_name),
+        commands_context()
+    )
+}
+
 /// Sustituye los placeholders del saludo (`+n` → nick, `+rn` → sala).
 fn render_greet(template: &str, name: &str, room_name: &str) -> String {
     template
@@ -347,6 +469,9 @@ mod tests {
         cfg.enabled = true;
         cfg.name = "Nova".into();
         cfg.cooldown_secs = 0;
+        // El helper usa el saludo estático (no-LLM) para que los tests de
+        // `on_join` sean deterministas; el path LLM se cubre aparte.
+        cfg.greet_llm = false;
         cfg.llm = LlmConfig {
             provider: LlmProvider::Openai,
             ..LlmConfig::default()
@@ -453,17 +578,68 @@ mod tests {
         );
     }
 
-    #[test]
-    fn on_join_sends_pm_greet() {
+    #[tokio::test]
+    async fn on_join_sends_pm_greet() {
         let (ctx, mut rx) = ctx_with_user("alice");
         let db = Database::in_memory().unwrap();
         let bot = engine(db, "hola");
         bot.on_join(&ctx, "alice");
-        let msg = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async { rx.recv().await.unwrap() });
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout esperando saludo")
+            .unwrap();
         assert!(msg.starts_with("PM:"), "esperaba PM, got {:?}", msg);
         assert!(msg.contains("alice"));
+    }
+
+    #[tokio::test]
+    async fn on_join_llm_greeting_uses_llm() {
+        let (ctx, mut rx) = ctx_with_user("dana");
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "¡Bienvenida dana! Menciona 'Nova' para hablarme.");
+        // Activar el saludo LLM: usa la respuesta del mock (con la pista).
+        let mut cfg = bot.config_snapshot();
+        cfg.greet_llm = true;
+        *bot.config.write() = cfg;
+        bot.on_join(&ctx, "dana");
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout esperando saludo LLM")
+            .unwrap();
+        assert!(msg.starts_with("PM:"), "esperaba PM, got {:?}", msg);
+        assert!(msg.contains("Bienvenida dana"));
+    }
+
+    #[test]
+    fn trigger_hint_modes() {
+        let mut cfg = BotConfig::default();
+        cfg.name = "Nova".into();
+        cfg.trigger = TriggerMode::Contains;
+        assert!(trigger_hint(&cfg).contains("Nova"));
+        cfg.trigger = TriggerMode::Prefix;
+        cfg.trigger_prefix = "!".into();
+        assert!(trigger_hint(&cfg).contains("'!'"));
+        cfg.trigger = TriggerMode::Always;
+        assert!(trigger_hint(&cfg).contains("cualquier mensaje"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_room_context() {
+        let (ctx, _rx) = ctx_with_user("erin");
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "hola");
+        let cfg = bot.config_snapshot();
+        let prompt = build_system_prompt(
+            &cfg,
+            &ctx.user_pool,
+            "Mi Sala",
+            "topic de prueba",
+            "Astra",
+        );
+        assert!(prompt.contains("Mi Sala"));
+        assert!(prompt.contains("topic de prueba"));
+        assert!(prompt.contains("erin"), "debe listar a los usuarios conectados");
+        assert!(prompt.contains("/kick"), "debe listar los comandos");
     }
 
     #[test]

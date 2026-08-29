@@ -83,6 +83,7 @@ md-5 = "0.10"
 hmac = "0.12"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
+des = "0.8"
 
 # GeoIP / ASN (bases MMDB opcionales: MaxMind GeoLite2 o DB-IP Lite)
 maxminddb = "0.24"

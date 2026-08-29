@@ -86,10 +86,10 @@ pub async fn check_loop(ctx: Arc<AppContext>) {
     }
 }
 
-/// Mayor versión publicada en el registry (incluye prereleases tipo
-/// `-beta.NN`; ignora los tags por arquitectura como `-amd64` y `latest`).
-/// Pagina con el cursor `last` hasta agotar los tags (sin esto ghcr.io
-/// devuelve solo 100 y el resultado queda truncado).
+/// Mayor versión ESTABLE publicada en el registry (descarta prereleases tipo
+/// `-beta.NN` y `-rc.NN`; también los tags por arquitectura como `-amd64` y
+/// `latest`). Pagina con el cursor `last` hasta agotar los tags (sin esto
+/// ghcr.io devuelve solo 100 y el resultado queda truncado).
 async fn fetch_latest(client: &reqwest::Client) -> anyhow::Result<Option<Version>> {
     // Token anónimo de pull: para imágenes públicas ghcr.io lo emite sin
     // credenciales, pero exige presentarlo igual en la API v2.
@@ -147,13 +147,13 @@ async fn fetch_latest(client: &reqwest::Client) -> anyhow::Result<Option<Version
     Ok(tags.iter().filter_map(|t| parse_version_tag(t)).max())
 }
 
-/// Parsea un tag del registry como versión. Descarta los que no son semver
-/// (`latest`) y las variantes por arquitectura (`0.0.1-beta.33-amd64`):
-/// semver las parsea con prerelease `beta.33-amd64` y las ordenaría por
-/// encima del tag real `beta.33`; el guion dentro del prerelease las delata.
+/// Parsea un tag del registry como versión. Solo acepta RELEASES estables
+/// (`1.2.3`): descarta prereleases (`-beta.NN`, `-rc.NN`) y las variantes por
+/// arquitectura (`0.0.1-beta.33-amd64`), además de `latest`. Un pre-release
+/// no debe marcar "hay una actualización" para una sala en producción.
 fn parse_version_tag(tag: &str) -> Option<Version> {
     let v = Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
-    if v.pre.as_str().contains('-') {
+    if !v.pre.is_empty() {
         return None;
     }
     Some(v)
@@ -164,29 +164,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_version_tag_accepts_releases_and_betas() {
-        assert_eq!(
-            parse_version_tag("0.0.1-beta.33"),
-            Some(Version::parse("0.0.1-beta.33").unwrap())
-        );
+    fn parse_version_tag_accepts_releases() {
         assert_eq!(
             parse_version_tag("v1.2.3"),
             Some(Version::parse("1.2.3").unwrap())
         );
+        assert_eq!(
+            parse_version_tag("0.1.31"),
+            Some(Version::parse("0.1.31").unwrap())
+        );
     }
 
     #[test]
-    fn parse_version_tag_rejects_arch_variants_and_latest() {
+    fn parse_version_tag_rejects_prereleases_and_arch_variants() {
+        // Las prereleases NO deben contar como actualización.
+        assert_eq!(parse_version_tag("0.0.1-beta.33"), None);
+        assert_eq!(parse_version_tag("0.0.1-rc.1"), None);
         assert_eq!(parse_version_tag("0.0.1-beta.33-amd64"), None);
         assert_eq!(parse_version_tag("latest"), None);
     }
 
     #[test]
-    fn beta_ordering_is_numeric() {
-        // Regresión: como strings "beta.9" > "beta.33"; como semver no.
-        let a = parse_version_tag("0.0.1-beta.9").unwrap();
-        let b = parse_version_tag("0.0.1-beta.33").unwrap();
-        assert!(b > a);
+    fn stable_outranks_prerelease() {
+        // Con la misma versión base, la estable debe elegirse sobre la beta
+        // (aunque semver ordenaría la beta encima si ambas estuvieran).
+        let stable = parse_version_tag("0.2.0").unwrap();
+        let beta = parse_version_tag("0.2.0-beta.2");
+        assert!(beta.is_none(), "la beta no debe parsear");
+        assert!(stable > Version::parse("0.1.31").unwrap());
     }
 
     /// Integración real contra ghcr.io (requiere red). Correr con:

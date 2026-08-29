@@ -612,6 +612,15 @@ pub fn set_bot_config(ctx: &Arc<AppContext>, json: &str) -> Result<String, Strin
                 ));
             }
         }
+        // La API key del LLM es obligatoria (todos los providers la requieren).
+        let key = v
+            .get("llm")
+            .and_then(|l| l.get("api_key"))
+            .and_then(|k| k.as_str())
+            .unwrap_or("");
+        if key.trim().is_empty() {
+            return Err("la api_key del LLM es obligatoria".into());
+        }
     }
 
     let (old_enabled, old_name, old_config) = ctx

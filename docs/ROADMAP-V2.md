@@ -1175,19 +1175,74 @@ admin (pestaña "🤖 Bot agente") y en el código en `crates/bot`.
   reply público/PM con LLM mockeado, cooldown que descarta re-trigger rápido,
   builders JOIN/PART del bot. `build/test/clippy` en verde.
 
+### Revisión (2026-08-28) — fixes tras pruebas
+
+- **Proveedor DeepSeek**: agregado como `LlmProvider::Deepseek` (formato
+  OpenAI-compatible) + defaults en el panel.
+- **Panel**: fix del `applyBotDefaults` (le faltaba `g` local → al cambiar el
+  proveedor no actualizaba endpoint/modelo). Ahora `force=true` en el `onchange`.
+  URL/modelo por defecto por proveedor (openai/deepseek/anthropic).
+- **Saludo**: ya no se manda "antes de entrar" — se dispara DESPUÉS del estado
+  inicial, JOIN a la sala y greet/MOTD (TCP y web). Generado por el LLM si
+  `greet_llm` (nuevo toggle, default ON), con la pista de cómo invocar al bot
+  según el trigger (`trigger_hint`); fallback al template `greet_message` + pista.
+- **Respuestas cortadas**: `max_tokens` default sube a 400; si el provider
+  devuelve `finish_reason=length` / `stop_reason=max_tokens`, se marca la
+  respuesta con "…" en vez de quedar cortada en silencio.
+- **API key obligatoria**: se valida en `llm.rs`, en el endpoint
+  `POST /admin/bot` y en el panel (campo `required` + toast).
+- **Contexto de sala (punto 8, fase 1)**: el prompt de sistema de las
+  respuestas se enriquece con `build_system_prompt` → sala, topic, usuarios
+  conectados (`room_context`, hasta 30) y comandos disponibles
+  (`commands_context`). La ejecución de comandos queda planificada (ver abajo).
+- **cb0t PM enriquecido → bot**: `cb0t_pm_msg` (custom data 200) dirigido al
+  bot ya se rutea a `on_private`. El texto viaja cifrado con el "soft crypto"
+  de cb0t (`PMCrypto.cs`): `[8B DES key][DES-CBC/PKCS7]` con IV =
+  `SHA1(receptor)[0..8]`. Implementado en `proto-ares/src/pm_crypto.rs`
+  (`soft_decrypt`, con `soft_encrypt` para roundtrip/tests) y usado en
+  `handle_custom_data` (descifra con el nombre del bot).
+- **Update check**: solo compara RELEASES estables (`1.2.3`); descarta
+  prereleases (`-beta`, `-rc`) y variantes por arquitectura. Un pre-release ya
+  no marca "hay una actualización" (`update_check.rs::parse_version_tag`).
+
 ### Pendiente
 
-- **cb0t PM enriquecido**: `cb0t_pm_msg` (custom data 200) dirigido al bot aún
-  no se rutea (el texto va cifrado en el payload; requeriría descifrarlo). Los
-  PMs estándar (opcode 25) sí funcionan.
 - **Avatar propio del bot**: v1 usa sin avatar (o reutiliza el del server);
   falta subir avatar específico del bot desde el panel.
 - **Streaming del LLM** (token streaming a la sala) — v1 es respuesta completa.
 - **Costo/rate-limit por usuario global** más fino (hoy: cooldown + max in
   flight); falta presupuesto diario/mensual opcional.
-- **Personalidad contextual**: el system prompt es estático; falta un prompt
-  generado con topic/usuarios de la sala (`+rn`, `+uc`…) al armar el historial.
 - **Eventos extra configurables** (p. ej. responder a `/nudge`/buzz, onPart
   despedidas, aniversarios de usuario) — hoy solo join/mención/PM.
 - **`/admin/bot`**: falta mostrar en `state_json` el estado del bot
   (enabled/nombre) para el header/inicio del panel.
+- **Ejecución de comandos por el bot** (punto 8, fase 2): el contexto de
+  usuarios conectados y la lista de comandos YA se inyecta en el prompt
+  (`build_system_prompt`/`room_context`/`commands_context` en `engine.rs`);
+  la EJECUCIÓN está planificada (ver plan abajo).
+
+### Plan: ejecución de comandos por el bot (punto 8 — fase 2)
+
+Objetivo: que el bot, además de *conocer* los comandos, pueda *ejecutarlos*
+cuando un usuario se lo pide ("Nova, banea a X", "Nova, cambia el topic a …").
+
+1. **Protocolo LLM → engine**: el bot responde con una directiva estructurada
+   en su reply, p. ej. `[CMD] /topic Nuevo tema [/CMD]`. El engine parsea la
+   respuesta en busca de `[CMD]...[/CMD]`.
+2. **Ejecutor**: ejecutar el comando con un `AresUser` sintético del bot
+   (id 0, nivel Owner) vía `astra_commands::dispatch_builtin`, capturando la
+   salida (PMs del bot) para no perderlas en un socket inexistente.
+3. **Confirmación**: tras ejecutar, segunda llamada al LLM con el resultado
+   para que redacte una respuesta natural al usuario (2 llamadas por comando).
+4. **Allowlist + seguridad (decisiones pendientes)**:
+   - ¿Qué comandos puede ejecutar? Propuesta segura: `/topic`, `/status`,
+     `/kick`, `/muzzle`, `/unmuzzle`, `/ban`, `/unban`, `/greets on|off`.
+   - ¿Política de autorización? Riesgo de prompt-injection (un usuario pide
+     "Nova, banea a Carol"). Opciones: solo ejecutar peticiones de Owner/Admin;
+     confirmar antes de acciones destructivas (ban/kick); rate-limit.
+   - La config expondría `bot.execute_commands: bool` (default OFF) + allowlist.
+5. **Coste/UX**: 2 llamadas LLM por comando; fallback a "no puedo hacer eso"
+   si el comando no está en la allowlist o el resultado falla.
+
+Estos puntos 2-5 requieren decisión del admin antes de implementar (el bot
+ejecutando ban/kick por criterio de un LLM es un vector de riesgo real).
