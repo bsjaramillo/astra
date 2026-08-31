@@ -509,13 +509,24 @@ fn build_system_prompt(
             scope
         );
     }
+    let mut recency_hint = String::new();
+    if !recent.is_empty() {
+        // Guía de interpretación: el LLM a veces se ancla en mensajes viejos.
+        recency_hint = format!(
+            "\n\n=== Instrucción ===\n\
+             El mensaje MÁS RECIENTE del usuario es su pregunta actual: respondé a eso.\n\
+             El historial de la sala está en orden cronológico: los mensajes más recientes están AL FINAL.\n\
+             Úsalo solo como contexto; no respondas sobre mensajes antiguos cuando la pregunta se refiera a lo reciente."
+        );
+    }
     format!(
-        "{}\n\n=== Contexto actual de la sala ===\n{}\n{}\n\n=== Historial reciente de la sala ===\n{}{}",
+        "{}\n\n=== Contexto actual de la sala ===\n{}\n{}\n\n=== Historial reciente de la sala ===\n{}{}{}",
         base,
         room_context(pool, cfg, room_name, topic, server_bot_name),
         commands_context(),
         recent_history_str(recent),
         exec,
+        recency_hint,
     )
 }
 
@@ -898,6 +909,19 @@ mod tests {
             build_system_prompt(&cfg, &ctx.user_pool, "Mi Sala", "t", "Astra", &hist);
         assert!(prompt.contains("Historial reciente de la sala"));
         assert!(prompt.contains("alice: hola a todos"));
+        // Guía de interpretación: responder a lo reciente, no a lo viejo.
+        assert!(prompt.contains("Instrucción"));
+        assert!(prompt.contains("MÁS RECIENTE"));
+    }
+
+    #[test]
+    fn build_system_prompt_without_history_has_no_recency_hint() {
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "hola");
+        let cfg = bot.config_snapshot();
+        let (ctx, _rx) = ctx_with_user("erin");
+        let prompt = build_system_prompt(&cfg, &ctx.user_pool, "Mi Sala", "t", "Astra", &[]);
+        assert!(!prompt.contains("Instrucción"));
     }
 
     #[test]
