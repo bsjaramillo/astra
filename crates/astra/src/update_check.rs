@@ -11,10 +11,10 @@
 //! `last` hasta agotar los tags.
 //!
 //! Cuando aparece una versión mayor a la corriendo, se guarda en
-//! `AppContext::available_update` (la muestra `/admin`) y se avisa por PM a
-//! los admins/owners conectados — una sola vez por versión descubierta; los
-//! que se loguean después reciben el aviso al elevar su nivel (ver
-//! `apply_level` en el crate de comandos).
+//! `AppContext::available_update` (la muestra el panel en Inicio) y se avisa
+//! por PM a los admins/owners conectados CADA HORA (recordatorio recurrente,
+//! no una sola vez). Los que se loguean después reciben el aviso al elevar su
+//! nivel (ver `apply_level` en el crate de comandos) y en el siguiente tick.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,9 +26,9 @@ use tracing::{debug, info};
 
 /// Imagen cuyo listado de tags define la "última versión".
 const IMAGE: &str = "bsjaramillo/astra";
-/// Intervalo entre chequeos. El registry es anónimo y barato; 6 h alcanza
-/// para enterarse el mismo día sin hacer ruido.
-const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// Intervalo entre chequeos. El registry es anónimo y barato; 1 h permite
+/// avisar por PM a admins/owners cada hora mientras haya una actualización.
+const INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Página del listado de tags. Mayor que la cantidad actual (126) y por
 /// encima del default de 100 que truncaba el resultado.
 const TAGS_PAGE: u32 = 1000;
@@ -71,10 +71,8 @@ pub async fn check_loop(ctx: Arc<AppContext>) {
             continue;
         }
         let latest_str = latest.to_string();
-        // Avisar una sola vez por versión descubierta.
-        if ctx.available_update().as_deref() == Some(latest_str.as_str()) {
-            continue;
-        }
+        // Aviso por PM a admins/owners CADA HORA mientras haya una versión
+        // más nueva (recordatorio recurrente; el panel también lo muestra).
         info!("nueva versión de Astra disponible: v{latest_str} (corriendo v{current})");
         *ctx.available_update.write() = Some(latest_str.clone());
         for user in ctx.user_pool.users() {

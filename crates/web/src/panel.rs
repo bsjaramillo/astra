@@ -280,6 +280,7 @@ const I18N = {
     tile_total:"Ingresos totales", tile_bans:"Baneos activos", tile_uptime:"Tiempo activo",
     inicio_topic_h:"💬 Tema y estado", inicio_topic_l:"Tema de la sala (topic)",
     inicio_status_l:"Estado (mensaje corto)", inicio_status_ph:"ej. sala en mantenimiento",
+    upd_avail:"Hay una nueva versión de Astra: v{0} (corriendo v{1}). Actualiza desde astra-creator.",
     toast_topic:"Tema actualizado", toast_status:"Estado actualizado",
 
     users_h:"Usuarios en línea", users_sub:"{0} conectado(s). Toca una acción para moderar.",
@@ -452,6 +453,7 @@ const I18N = {
     tile_total:"Total joins", tile_bans:"Active bans", tile_uptime:"Uptime",
     inicio_topic_h:"💬 Topic & status", inicio_topic_l:"Room topic",
     inicio_status_l:"Status (short message)", inicio_status_ph:"e.g. room under maintenance",
+    upd_avail:"A new Astra version is available: v{0} (running v{1}). Update from astra-creator.",
     toast_topic:"Topic updated", toast_status:"Status updated",
 
     users_h:"Users online", users_sub:"{0} connected. Tap an action to moderate.",
@@ -806,7 +808,9 @@ function renderInicio(){
     [t("tile_total"), s.total], [t("tile_bans"), s.bans],
     [t("tile_uptime"), fmtUptime(s.uptime||0)],
   ];
+  const upd = s.update ? `<div class="warnbox">🚀 ${t("upd_avail", s.update, s.version)}</div>` : "";
   return `<div class="cardhead"><h2>${t("inicio_h")}</h2><p class="sub">${t("inicio_sub")}</p></div>
+    ${upd}
     <div class="tiles">${tiles.map(x=>`<div class="tile"><span class="tl">${x[0]}</span><span class="tv">${x[1]}</span></div>`).join("")}</div>
     <div class="card"><h3>${t("inicio_topic_h")}</h3>
       <label class="fld"><span>${t("inicio_topic_l")}</span><div class="inline"><input id="topicIn" value="${esc(s.topic)}"><button class="btn primary" id="topicSet">${t("common_save")}</button></div></label>
