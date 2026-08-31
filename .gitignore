@@ -23,3 +23,6 @@ data_*/
 
 # Test fixtures
 fixtures/
+
+# Herramienta de prueba anti-DDoS (no debe trackearse)
+tools/ddos_test.py
