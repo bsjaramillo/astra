@@ -584,49 +584,58 @@ pub fn get_avatar_bytes(ctx: &AppContext, kind: &str) -> Option<Vec<u8>> {
 }
 
 // ============================================================================
-// Bot agente (`GET/POST /admin/bot`)
+// Bots agente (`GET/POST /admin/bots`, múltiples)
 // ============================================================================
 
-/// GET /admin/bot → config del bot como JSON (o `{}` si no hay bot).
-pub fn get_bot_config(ctx: &AppContext) -> String {
-    ctx.bot
-        .read()
-        .as_ref()
-        .map(|b| b.config_json())
-        .unwrap_or_else(|| "{}".to_string())
+/// Serializa un bot vivo como `{id, name, enabled, config}` para el panel.
+fn bot_json(b: &dyn server_core::bot::Bot) -> serde_json::Value {
+    let cfg = serde_json::from_str::<serde_json::Value>(&b.config_json())
+        .unwrap_or_else(|_| serde_json::json!({}));
+    serde_json::json!({
+        "id": b.bot_id(),
+        "name": b.bot_name(),
+        "enabled": b.is_enabled(),
+        "config": cfg,
+    })
 }
 
-/// POST /admin/bot → guarda la config (JSON del cliente) y devuelve la nueva
-/// config serializada. Aplica en vivo y, si cambió el estado activo o el
+/// Busca un bot vivo por id.
+fn find_bot(ctx: &AppContext, id: i64) -> Option<Arc<dyn server_core::bot::Bot>> {
+    ctx.bots.read().iter().find(|b| b.bot_id() == id).cloned()
+}
+
+/// GET /admin/bots → lista de bots como JSON array `[{id,name,enabled,config}]`.
+pub fn list_bots(ctx: &AppContext) -> String {
+    let arr: Vec<serde_json::Value> =
+        ctx.bots.read().iter().map(|b| bot_json(b.as_ref())).collect();
+    serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// POST /admin/bots → crea un bot nuevo (body = config JSON) y devuelve su
+/// registro. Aplica en vivo y, si queda activo, anuncia su JOIN a la sala.
+pub fn create_bot(ctx: &Arc<AppContext>, json: &str) -> Result<String, String> {
+    let reg = ctx
+        .bot_registry
+        .read()
+        .clone()
+        .ok_or("gestor de bots no disponible")?;
+    let id = reg.create(ctx, json)?;
+    let bot = find_bot(ctx, id).ok_or("el bot creado no está disponible")?;
+    let cfg: astra_bot::BotConfig =
+        serde_json::from_str(&bot.config_json()).unwrap_or_default();
+    if cfg.enabled && !cfg.name.is_empty() {
+        broadcast_bot_join(ctx, &cfg.name);
+        broadcast_trigger_change(ctx, &cfg.name, &cfg);
+    }
+    Ok(serde_json::to_string(&bot_json(bot.as_ref())).unwrap_or_default())
+}
+
+/// POST /admin/bots/update → actualiza un bot por id (body `{"id":…,"config":…}`)
+/// y devuelve su registro. Aplica en vivo y, si cambió el estado activo o el
 /// nombre, actualiza la presencia del bot en la userlist de toda la sala
 /// (JOIN/PART para nativos y web).
-pub fn set_bot_config(ctx: &Arc<AppContext>, json: &str) -> Result<String, String> {
-    // El bot agente debe ser una identidad DISTINTA del "bot" del servidor
-    // (settings.bot_name): comparten el mecanismo de userlist fantasma.
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
-        if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
-            if !name.trim().is_empty() && name.eq_ignore_ascii_case(&ctx.settings.bot_name) {
-                return Err(format!(
-                    "el nombre del bot no puede ser igual al del servidor ('{}')",
-                    ctx.settings.bot_name
-                ));
-            }
-        }
-        // La API key del LLM es obligatoria (todos los providers la requieren).
-        let key = v
-            .get("llm")
-            .and_then(|l| l.get("api_key"))
-            .and_then(|k| k.as_str())
-            .unwrap_or("");
-        if key.trim().is_empty() {
-            return Err("la api_key del LLM es obligatoria".into());
-        }
-    }
-
-    let (old_enabled, old_name, old_config) = ctx
-        .bot
-        .read()
-        .as_ref()
+pub fn update_bot(ctx: &Arc<AppContext>, id: i64, json: &str) -> Result<String, String> {
+    let (old_enabled, old_name, old_config) = find_bot(ctx, id)
         .map(|b| {
             (
                 b.is_enabled(),
@@ -635,24 +644,18 @@ pub fn set_bot_config(ctx: &Arc<AppContext>, json: &str) -> Result<String, Strin
             )
         })
         .unwrap_or((false, String::new(), None));
-
-    match ctx.bot.read().as_ref() {
-        Some(bot) => bot.set_config_json(json)?,
-        None => return Err("bot no disponible".into()),
-    }
-
-    let (new_enabled, new_name, new_config) = ctx
-        .bot
+    let reg = ctx
+        .bot_registry
         .read()
-        .as_ref()
-        .map(|b| {
-            (
-                b.is_enabled(),
-                b.bot_name(),
-                serde_json::from_str::<astra_bot::BotConfig>(&b.config_json()).ok(),
-            )
-        })
-        .unwrap_or((false, String::new(), None));
+        .clone()
+        .ok_or("gestor de bots no disponible")?;
+    reg.update(ctx, id, json)?;
+    let bot = find_bot(ctx, id).ok_or("bot no disponible")?;
+    let (new_enabled, new_name, new_config) = (
+        bot.is_enabled(),
+        bot.bot_name(),
+        serde_json::from_str::<astra_bot::BotConfig>(&bot.config_json()).ok(),
+    );
 
     update_bot_presence(ctx, old_enabled, &old_name, new_enabled, &new_name);
     if old_config.as_ref().map(|c| (&c.trigger, &c.trigger_prefix))
@@ -662,12 +665,25 @@ pub fn set_bot_config(ctx: &Arc<AppContext>, json: &str) -> Result<String, Strin
             broadcast_trigger_change(ctx, &new_name, config);
         }
     }
-    Ok(ctx
-        .bot
+    Ok(serde_json::to_string(&bot_json(bot.as_ref())).unwrap_or_default())
+}
+
+/// POST /admin/bots/delete → elimina un bot por id (body `{"id":…}`). Si estaba
+/// activo, anuncia su PART a la sala.
+pub fn delete_bot(ctx: &Arc<AppContext>, id: i64) -> Result<(), String> {
+    let old = find_bot(ctx, id).map(|b| (b.is_enabled(), b.bot_name()));
+    let reg = ctx
+        .bot_registry
         .read()
-        .as_ref()
-        .map(|b| b.config_json())
-        .unwrap_or_default())
+        .clone()
+        .ok_or("gestor de bots no disponible")?;
+    reg.delete(ctx, id)?;
+    if let Some((true, name)) = old {
+        if !name.is_empty() {
+            broadcast_bot_part(ctx, &name);
+        }
+    }
+    Ok(())
 }
 
 fn broadcast_trigger_change(ctx: &AppContext, bot_name: &str, config: &astra_bot::BotConfig) {

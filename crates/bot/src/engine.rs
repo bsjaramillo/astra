@@ -18,12 +18,14 @@ use server_core::text_effects::strip_colors;
 use server_core::user_pool::{AresUser, UserPool};
 
 use crate::config::{BotConfig, TriggerMode};
-use crate::llm::{HttpLlm, LlmClient};
+use crate::llm::{LlmClient, RigLlm};
 use crate::memory::ConversationMemory;
 
 /// Motor del bot.
 pub struct BotEngine {
     db: Arc<Database>,
+    /// Id del bot en la tabla `bots`.
+    id: i64,
     config: Arc<RwLock<BotConfig>>,
     memory: Arc<ConversationMemory>,
     llm: Arc<dyn LlmClient>,
@@ -38,20 +40,26 @@ pub struct BotEngine {
 }
 
 impl BotEngine {
-    /// Crea el motor cargando la config desde la DB.
-    pub fn new(db: Arc<Database>, scripting: astra_scripting::ScriptHandle) -> Arc<Self> {
-        Self::with_llm(db, scripting, Arc::new(HttpLlm))
+    /// Crea el motor para el bot con `id`, cargando su config desde la DB.
+    pub fn new(
+        db: Arc<Database>,
+        scripting: astra_scripting::ScriptHandle,
+        id: i64,
+    ) -> Arc<Self> {
+        Self::with_llm(db, scripting, id, Arc::new(RigLlm))
     }
 
     /// Como [`new`](Self::new) pero con un cliente LLM propio (tests).
     pub fn with_llm(
         db: Arc<Database>,
         scripting: astra_scripting::ScriptHandle,
+        id: i64,
         llm: Arc<dyn LlmClient>,
     ) -> Arc<Self> {
-        let config = Arc::new(RwLock::new(BotConfig::load(&db)));
+        let config = Arc::new(RwLock::new(BotConfig::load_by_id(&db, id)));
         Arc::new(Self {
             db,
+            id,
             config,
             memory: Arc::new(ConversationMemory::new()),
             llm,
@@ -79,7 +87,7 @@ impl BotEngine {
 
     /// Reemplaza y persiste la config (aplica en vivo).
     pub fn set_config(&self, cfg: BotConfig) -> Result<(), String> {
-        cfg.save(&self.db)?;
+        cfg.save_to(&self.db, self.id)?;
         *self.config.write() = cfg;
         Ok(())
     }
@@ -345,6 +353,10 @@ fn release(
 }
 
 impl Bot for BotEngine {
+    fn bot_id(&self) -> i64 {
+        self.id
+    }
+
     fn on_join(&self, ctx: &Arc<AppContext>, name: &str) {
         let cfg = self.config.read().clone();
         if !cfg.enabled || !cfg.greet_on_join {
@@ -706,6 +718,7 @@ mod tests {
         let e = BotEngine::with_llm(
             db,
             astra_scripting::ScriptHandle::dummy(),
+            1,
             Arc::new(MockLlm {
                 reply: reply.into(),
             }),
@@ -986,6 +999,56 @@ mod tests {
                 .is_err(),
             "no debía haber una segunda respuesta inmediata"
         );
+    }
+
+    #[tokio::test]
+    async fn two_bots_in_same_room_respond_independently() {
+        // Escenario multi-bot: dos bots vivos en la misma sala, cada uno con su
+        // propio nombre/trigger. Un mensaje solo dispara al bot mencionado.
+        let (ctx, mut rx) = ctx_with_user("bob");
+        let db = Database::in_memory().unwrap();
+
+        let bot_a = engine(db.clone(), "respuesta de Nova");
+        let mut cfg_a = bot_a.config_snapshot();
+        cfg_a.name = "Nova".into();
+        cfg_a.reply_in_room = true;
+        cfg_a.reply_by_pm = true;
+        cfg_a.cooldown_secs = 0;
+        *bot_a.config.write() = cfg_a;
+
+        let bot_b = engine(db, "respuesta de Zeta");
+        let mut cfg_b = bot_b.config_snapshot();
+        cfg_b.name = "Zeta".into();
+        cfg_b.reply_in_room = true;
+        cfg_b.reply_by_pm = true;
+        cfg_b.cooldown_secs = 0;
+        *bot_b.config.write() = cfg_b;
+
+        ctx.bots.write().push(bot_a);
+        ctx.bots.write().push(bot_b);
+        assert_eq!(ctx.bots.read().len(), 2);
+
+        // Mencionar solo a Nova → responde Nova, no Zeta.
+        for bot in ctx.bots.read().iter() {
+            bot.on_public(&ctx, "bob", "hola Nova");
+        }
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout esperando respuesta de Nova")
+            .unwrap();
+        assert!(msg.contains("respuesta de Nova"), "got {:?}", msg);
+        assert!(!msg.contains("respuesta de Zeta"), "got {:?}", msg);
+
+        // Mencionar solo a Zeta → responde Zeta, no Nova.
+        for bot in ctx.bots.read().iter() {
+            bot.on_public(&ctx, "bob", "hola Zeta");
+        }
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout esperando respuesta de Zeta")
+            .unwrap();
+        assert!(msg.contains("respuesta de Zeta"), "got {:?}", msg);
+        assert!(!msg.contains("respuesta de Nova"), "got {:?}", msg);
     }
 
     #[test]

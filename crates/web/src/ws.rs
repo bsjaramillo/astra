@@ -433,20 +433,49 @@ async fn handle_admin_route(
                 None => send_http_bytes(stream, 404, b"").await?,
             }
         }
-        ("GET", "/admin/bot") => {
-            let json = crate::admin::get_bot_config(ctx);
-            let body = format!("{{\"config\":{}}}", json);
-            send_http_json(stream, 200, &body).await?;
+        ("GET", "/admin/bots") => {
+            let json = crate::admin::list_bots(ctx);
+            send_http_json(stream, 200, &json).await?;
         }
-        (m, "/admin/bot") if m.eq_ignore_ascii_case("POST") => {
-            match crate::admin::set_bot_config(ctx, &req.body) {
-                Ok(json) => {
-                    let body = format!("{{\"config\":{}}}", json);
-                    send_http_json(stream, 200, &body).await?;
-                }
+        (m, "/admin/bots") if m.eq_ignore_ascii_case("POST") => {
+            match crate::admin::create_bot(ctx, &req.body) {
+                Ok(json) => send_http_json(stream, 200, &json).await?,
                 Err(e) => {
                     let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
                     send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
+        (m, "/admin/bots/update") if m.eq_ignore_ascii_case("POST") => {
+            let id = json_i64(&req.body, "id").unwrap_or(0);
+            if id == 0 {
+                send_http_json(stream, 400, "{\"error\":\"id inválido\"}").await?;
+            } else {
+                let config = serde_json::from_str::<serde_json::Value>(&req.body)
+                    .ok()
+                    .and_then(|v| v.get("config").cloned())
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                match crate::admin::update_bot(ctx, id, &config) {
+                    Ok(json) => send_http_json(stream, 200, &json).await?,
+                    Err(e) => {
+                        let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                        send_http_json(stream, 400, &body).await?;
+                    }
+                }
+            }
+        }
+        (m, "/admin/bots/delete") if m.eq_ignore_ascii_case("POST") => {
+            let id = json_i64(&req.body, "id").unwrap_or(0);
+            if id == 0 {
+                send_http_json(stream, 400, "{\"error\":\"id inválido\"}").await?;
+            } else {
+                match crate::admin::delete_bot(ctx, id) {
+                    Ok(()) => send_http_json(stream, 200, "{\"ok\":true}").await?,
+                    Err(e) => {
+                        let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                        send_http_json(stream, 400, &body).await?;
+                    }
                 }
             }
         }
@@ -462,6 +491,12 @@ async fn handle_admin_route(
 fn json_field(body: &str, field: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     v.get(field)?.as_str().map(|s| s.to_string())
+}
+
+/// Extrae un campo entero de nivel superior de un JSON.
+fn json_i64(body: &str, field: &str) -> Option<i64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get(field)?.as_i64()
 }
 
 fn json_escape(s: &str) -> String {

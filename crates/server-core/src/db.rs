@@ -284,6 +284,12 @@ impl Database {
                 PRIMARY KEY (name, effect)
             );
 
+            CREATE TABLE IF NOT EXISTS bots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                config TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -760,6 +766,17 @@ pub struct AccountRecord {
     pub guid: [u8; 16],
     /// Hash de la contraseña
     pub password: Vec<u8>,
+}
+
+/// Registro de un bot agente persistido.
+#[derive(Debug, Clone)]
+pub struct BotRecord {
+    /// Identificador único del bot.
+    pub id: i64,
+    /// Config del bot como JSON crudo ([`BotConfig`] serializado).
+    pub config: String,
+    /// Timestamp de creación (epoch secs).
+    pub created_at: i64,
 }
 
 // ============================================================================
@@ -1450,6 +1467,75 @@ impl Database {
             params![k, v],
         )?;
         Ok(())
+    }
+
+    // ========================================================================
+    // Bots agente (múltiples, tabla `bots`)
+    // ========================================================================
+
+    /// Lista todos los bots agente persistidos (config como JSON crudo).
+    pub fn list_bots(&self) -> DbResult<Vec<BotRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id, config, created_at FROM bots ORDER BY id")?;
+        let iter = stmt.query_map([], |row| {
+            Ok(BotRecord {
+                id: row.get(0)?,
+                config: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in iter {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Busca un bot por id.
+    pub fn get_bot(&self, id: i64) -> DbResult<Option<BotRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id, config, created_at FROM bots WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(BotRecord {
+                id: row.get(0)?,
+                config: row.get(1)?,
+                created_at: row.get(2)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Inserta un bot nuevo (config como JSON crudo). Devuelve el id asignado.
+    pub fn insert_bot(&self, config: &str) -> DbResult<i64> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO bots (config, created_at) VALUES (?1, ?2)",
+            params![config, chrono::Utc::now().timestamp()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Actualiza la config de un bot existente. `Ok(false)` si no existe.
+    pub fn update_bot(&self, id: i64, config: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("UPDATE bots SET config = ?1 WHERE id = ?2", params![config, id])?;
+        Ok(n > 0)
+    }
+
+    /// Elimina un bot por id. `Ok(false)` si no existía.
+    pub fn delete_bot(&self, id: i64) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM bots WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    }
+
+    /// ¿Existe al menos un bot persistido? (para la migración desde `kv`).
+    pub fn has_bots(&self) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM bots", [], |r| r.get(0))?;
+        Ok(n > 0)
     }
 
     // ========================================================================

@@ -523,9 +523,14 @@ pub struct AppContext {
     /// Texto del PM greet (paridad `Greets.SetPM` de sb0t). Cuando no está
     /// vacío, `/pmgreetmsg` usa este texto fijo en vez del greet rotativo.
     pub pm_greet_text: parking_lot::RwLock<String>,
-    /// Bot agente inteligente (implementación de [`super::bot::Bot`]),
-    /// si está construido. `None` cuando el bot no está cargado.
-    pub bot: RwLock<Option<Arc<dyn super::bot::Bot>>>,
+    /// Bots agente inteligentes (implementaciones de [`super::bot::Bot`]),
+    /// activos en la sala. Vacío cuando no hay bots cargados. Cada bot tiene
+    /// su propia identidad (nombre) y config.
+    pub bots: RwLock<Vec<Arc<dyn super::bot::Bot>>>,
+    /// Gestor CRUD de bots (crear/actualizar/eliminar), inyectado por el
+    /// binario (implementación de [`super::bot::BotRegistry`]). `None` si el
+    /// crate del bot no está cargado.
+    pub bot_registry: RwLock<Option<Arc<dyn super::bot::BotRegistry>>>,
 }
 
 /// Registro histórico de un usuario que estuvo conectado (para
@@ -650,7 +655,8 @@ impl AppContext {
             user_records: parking_lot::RwLock::new(std::collections::VecDeque::new()),
             forced_pms: parking_lot::RwLock::new(std::collections::HashMap::new()),
             pm_greet_text: parking_lot::RwLock::new(String::new()),
-            bot: RwLock::new(None),
+            bots: RwLock::new(Vec::new()),
+            bot_registry: RwLock::new(None),
         }
     }
 

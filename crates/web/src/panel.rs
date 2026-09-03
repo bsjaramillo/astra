@@ -412,13 +412,13 @@ const I18N = {
     bot_cooldown:"Cooldown (seg)", bot_max_inflight:"Máx. llamadas simultáneas",
     bot_llm_h:"🤖 Proveedor LLM", bot_provider:"Proveedor", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
-    bot_api_key:"API key (obligatoria)", bot_api_key_req:"La API key del LLM es obligatoria.", bot_model:"Modelo", bot_temp:"Temperatura", bot_max_tokens:"Máx. tokens",
+    bot_api_key:"API key", bot_api_key_req:"Para activar el bot, la API key del LLM es obligatoria.", bot_model:"Modelo", bot_temp:"Temperatura", bot_max_tokens:"Máx. tokens",
     bot_prompt:"Prompt de sistema (personalidad)", bot_prompt_ph:"Eres Nova, un asistente amable y cercano...",
     bot_fallback:"Respuesta si el LLM falla",
     bot_exec_h:"Ejecución de comandos", bot_exec_note:"El bot puede ejecutar comandos que el usuario le pida. Se ejecutan con el NIVEL del usuario que lo pide (un Regular no puede banear a un Admin). Apagado por defecto.",
     bot_exec_on:"Permitir ejecutar comandos", bot_allowed_cmds:"Comandos permitidos (vacío = todos por nivel, separados por coma)",
     bot_help:"¿Cómo configurar la API key?",
-    bot_help_intro:"La API key es obligatoria (todos los proveedores la requieren). El endpoint debe ser el COMPLETO de la llamada y el modelo debe existir en el proveedor. Casi todos usan saldo prepago.",
+    bot_help_intro:"La API key es obligatoria para ACTIVAR el bot. El backend usa Rig con las URLs oficiales de cada proveedor; el campo endpoint se conserva por compatibilidad pero se ignora.",
     bot_help_provider:"Proveedor", bot_help_endpoint:"Endpoint", bot_help_model:"Modelo default",
     bot_help_key:"Generar API key", bot_help_balance:"Saldo / recarga",
     bot_help_balance_openai:"Prepago: recarga en platform.openai.com → Billing.",
@@ -430,6 +430,8 @@ const I18N = {
     bot_help_compat_balance:"Varía: Groq tiene tier gratis. Ollama/LM Studio local: sin key ni saldo.",
     bot_help_note:"Si el bot responde el mensaje de fallback, mirá el log «bot: error LLM para 'X': …». 401 = key inválida · 402 = sin saldo · 422 = modelo/endpoint mal · 429/503/insufficient_system_resource = transitorio (se reintenta) · timeout → subir timeout_secs.",
     bot_saved:"Bot guardado.",
+    bot_select:"Bot a editar", bot_none:"Sin bots — creá uno abajo", bot_new:"Nuevo bot", bot_del:"Eliminar bot",
+    bot_del_confirm:"¿Eliminar este bot?", bot_deleted:"Bot eliminado.", bot_identity:"Identidad",
   },
   en:{
     chrome_refresh:"Refresh", chrome_logout:"Log out", chrome_menu:"Menu",
@@ -585,13 +587,13 @@ const I18N = {
     bot_cooldown:"Cooldown (sec)", bot_max_inflight:"Max concurrent calls",
     bot_llm_h:"🤖 LLM provider", bot_provider:"Provider", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
-    bot_api_key:"API key (required)", bot_api_key_req:"The LLM API key is required.", bot_model:"Model", bot_temp:"Temperature", bot_max_tokens:"Max tokens",
+    bot_api_key:"API key", bot_api_key_req:"To enable the bot, the LLM API key is required.", bot_model:"Model", bot_temp:"Temperature", bot_max_tokens:"Max tokens",
     bot_prompt:"System prompt (personality)", bot_prompt_ph:"You are Nova, a friendly assistant...",
     bot_fallback:"Reply if the LLM fails",
     bot_exec_h:"Command execution", bot_exec_note:"The bot can run commands users ask for. They run with the REQUESTING user's level (a Regular can't ban an Admin). Off by default.",
     bot_exec_on:"Allow executing commands", bot_allowed_cmds:"Allowed commands (blank = all by level, comma separated)",
     bot_help:"How to configure the API key?",
-    bot_help_intro:"The API key is required (all providers). The endpoint must be the full chat URL and the model must exist in the provider. Most providers use prepaid balance.",
+    bot_help_intro:"The API key is required to ENABLE the bot. The backend uses Rig with each provider's official URLs; the endpoint field is kept for compatibility but ignored.",
     bot_help_provider:"Provider", bot_help_endpoint:"Endpoint", bot_help_model:"Default model",
     bot_help_key:"Generate API key", bot_help_balance:"Balance / top-up",
     bot_help_balance_openai:"Prepaid: top up at platform.openai.com → Billing.",
@@ -603,6 +605,8 @@ const I18N = {
     bot_help_compat_balance:"Varies: Groq has a free tier. Local Ollama/LM Studio: no key or balance.",
     bot_help_note:"If the bot replies with the fallback, check the log «bot: error LLM para 'X': …». 401 = invalid key · 402 = no balance · 422 = wrong model/endpoint · 429/503/insufficient_system_resource = transient (retried) · timeout → raise timeout_secs.",
     bot_saved:"Bot saved.",
+    bot_select:"Bot to edit", bot_none:"No bots — create one below", bot_new:"New bot", bot_del:"Delete bot",
+    bot_del_confirm:"Delete this bot?", bot_deleted:"Bot deleted.", bot_identity:"Identity",
   }
 };
 function t(k, ...args){
@@ -1167,12 +1171,20 @@ async function savePlantillas(){
   else toast(t("err_prefix")+t("err_save"),"err");
 }
 
-/* ---------------- Bot agente ---------------- */
-let BOTCFG = null;
+/* ---------------- Bot agente (múltiples) ---------------- */
+let BOTCFG = null, BOTLIST = [], BOTID = 0;
 function renderBot(){
   return `<div class="cardhead"><h2>${t("bot_h")}</h2><p class="sub">${t("bot_sub")}</p></div>
     <div class="note">${t("bot_note")}</div>
-    <div class="card"><h3>${t("nav_bot")}</h3>
+    <div class="card"><h3>${t("bot_select")}</h3>
+      <label class="fld"><span>${t("bot_select")}</span>
+        <select id="botSelect"></select></label>
+      <div class="rowend">
+        <button class="btn" id="botNew">${t("bot_new")}</button>
+        <button class="btn danger" id="botDel">${t("bot_del")}</button>
+      </div>
+    </div>
+    <div class="card"><h3>${t("bot_identity")}</h3>
       <label class="fld"><span class="switch"><input type="checkbox" id="botEnabled"><span class="slider"></span></span>${t("bot_enabled")}</label>
       <label class="fld"><span>${t("bot_name_l")}</span><input id="botName" placeholder="${esc(t("bot_name_ph"))}"></label>
     </div>
@@ -1247,10 +1259,18 @@ function renderBot(){
     </div>
     <div class="rowend"><button class="btn primary" id="botSave">${t("common_save")}</button></div>`;
 }
+async function loadBots(){
+  const r=await api("/admin/bots"); if(!r.ok) return;
+  BOTLIST=await r.json().catch(()=>[]);
+  const sel=document.getElementById("botSelect"); if(!sel) return;
+  sel.innerHTML=(BOTLIST.length?BOTLIST.map(b=>`<option value="${b.id}">${esc(b.name||("id "+b.id))}${b.enabled?" ✓":""}</option>`).join(""):`<option value="0">${t("bot_none")}</option>`);
+  if(BOTLIST.length && !BOTLIST.some(b=>b.id===BOTID)) BOTID=BOTLIST[0].id;
+  sel.value=String(BOTID||0);
+  await loadBot();
+}
 async function loadBot(){
-  const r=await api("/admin/bot"); if(!r.ok) return;
-  const j=await r.json().catch(()=>({config:{}}));
-  const c=j.config||{};
+  const b=BOTLIST.find(x=>x.id===BOTID);
+  const c=(b&&b.config)||{};
   BOTCFG=c;
   const set=(id,v)=>{ const el=document.getElementById(id); if(el && v!=null) el.value=v; };
   const chk=(id,v)=>{ const el=document.getElementById(id); if(el) el.checked=!!v; };
@@ -1293,7 +1313,8 @@ function applyBotDefaults(force=false){
 }
 async function saveBot(){
   const g=(id)=>document.getElementById(id);
-  if(!g("botApiKey").value.trim()){ toast(t("bot_api_key_req"),"err"); return; }
+  if(!BOTID){ toast(t("bot_none"),"err"); return; }
+  if(g("botEnabled").checked && !g("botApiKey").value.trim()){ toast(t("bot_api_key_req"),"err"); return; }
   const base=BOTCFG||{};
   const c={
     enabled:g("botEnabled").checked,
@@ -1325,9 +1346,35 @@ async function saveBot(){
     },
     fallback_response:g("botFallback").value,
   };
-  const r=await api("/admin/bot",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(c)});
-  if(r.ok){ toast(t("bot_saved"),"ok"); BOTCFG=c; }
-  else toast(t("err_prefix")+t("err_save"),"err");
+  const r=await api("/admin/bots/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:BOTID,config:c})});
+  if(r.ok){ const j=await r.json().catch(()=>null); if(j&&j.id) BOTID=j.id; toast(t("bot_saved"),"ok"); await loadBots(); }
+  else{ const j=await r.json().catch(()=>({})); toast(t("err_prefix")+(j.error||t("err_save")),"err"); }
+}
+async function newBot(){
+  let name="Nova"; let n=2;
+  const taken=new Set(BOTLIST.map(b=>(b.name||"").toLowerCase()));
+  while(taken.has(name.toLowerCase())){ name="Nova"+n; n++; }
+  const c={
+    enabled:false, name,
+    greet_on_join:true, greet_as_pm:true, greet_llm:true,
+    greet_message:"¡Hola +n! Bienvenido a +rn. 🙂",
+    reply_in_room:true, reply_by_pm:true,
+    trigger:"contains", trigger_prefix:"!",
+    conversation_memory:true, memory_turns:12, recent_history_lines:15,
+    cooldown_secs:3, max_in_flight:4, execute_commands:false, allowed_commands:[],
+    llm:{provider:"openai", api_key:"", model:"gpt-4o-mini", temperature:0.7, max_tokens:400, system_prompt:"", timeout_secs:30},
+    fallback_response:"Hmm, ahora mismo no puedo responder. Inténtalo en un momento.",
+  };
+  const r=await api("/admin/bots",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(c)});
+  if(r.ok){ const j=await r.json().catch(()=>null); if(j&&j.id) BOTID=j.id; toast(t("bot_saved"),"ok"); await loadBots(); }
+  else{ const j=await r.json().catch(()=>({})); toast(t("err_prefix")+(j.error||t("err_save")),"err"); }
+}
+async function delBot(){
+  if(!BOTID){ toast(t("bot_none"),"err"); return; }
+  if(!confirm(t("bot_del_confirm"))) return;
+  const r=await api("/admin/bots/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:BOTID})});
+  if(r.ok){ toast(t("bot_deleted"),"ok"); BOTID=0; await loadBots(); }
+  else{ const j=await r.json().catch(()=>({})); toast(t("err_prefix")+(j.error||t("err_save")),"err"); }
 }
 
 function renderConfig(){
@@ -1405,7 +1452,7 @@ function wire(){
   if(g("cmdRun")){const rc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=rc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")rc();};}
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
   if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }
-  if(g("botSave")){ loadBot(); g("botSave").onclick=saveBot; g("botProvider").onchange=()=>applyBotDefaults(true); }
+  if(g("botSave")){ loadBots(); g("botSave").onclick=saveBot; g("botSelect").onchange=()=>{ BOTID=parseInt(g("botSelect").value)||0; loadBot(); }; g("botNew").onclick=newBot; g("botDel").onclick=delBot; g("botProvider").onchange=()=>applyBotDefaults(true); }
   if(g("tplEd")){ loadPlantillas(); g("tplSave").onclick=savePlantillas; }
   if(g("cfgSrvSave")){ fillServerCfg(); g("cfgSrvSave").onclick=saveServerCfg; }
   if(g("cfgDirSave")){ g("cfgDirSave").onclick=saveDirectoryCfg; }

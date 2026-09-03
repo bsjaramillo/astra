@@ -302,14 +302,24 @@ async fn main() -> anyhow::Result<()> {
         scripts_dir.display()
     );
 
-    // Bot agente inteligente (identidad propia, configurable desde el panel).
-    // Recibe el handle de scripting para los side-effects de los comandos que
-    // el bot ejecute (los comandos se ejecutan con el nivel del solicitante).
-    let bot = astra_bot::BotEngine::new(db.clone(), scripting.clone());
-    if bot.is_enabled() {
-        info!("bot agente activo: '{}'", bot.bot_name());
+    // Bots agente inteligentes (identidades propias, configurables desde el
+    // panel). El gestor carga los persistidos, migra la config única legacy si
+    // es la primera vez y queda inyectado para el CRUD del panel admin.
+    // Los bots reciben el handle de scripting para los side-effects de los
+    // comandos que ejecuten (se ejecutan con el nivel del solicitante).
+    let bot_manager = astra_bot::BotManager::new(db.clone(), scripting.clone());
+    bot_manager.load_all(&ctx);
+    *ctx.bot_registry.write() = Some(bot_manager);
+    let active: Vec<String> = ctx
+        .bots
+        .read()
+        .iter()
+        .filter(|b| b.is_enabled())
+        .map(|b| b.bot_name())
+        .collect();
+    if !active.is_empty() {
+        info!("bots agente activos: {}", active.join(", "));
     }
-    *ctx.bot.write() = Some(bot);
     // Gate de vroom (onVroomJoinCheck): server-core no puede depender del
     // scripting, así que se inyecta como closure (mismo patrón que
     // ScriptingHooks).

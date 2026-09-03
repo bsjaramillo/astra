@@ -1,8 +1,9 @@
 //! Configuración del bot agente inteligente.
 //!
-//! Persistida como JSON en la tabla `kv` de la DB SQLite (clave
-//! [`BOT_CONFIG_KV_KEY`]). Cargada al arrancar y editable en vivo desde el
-//! panel admin (`/admin/bot`).
+//! Persistida como JSON en la tabla `bots` de la DB SQLite (un registro por
+//! bot, identificado por `id`). Cargada al arrancar y editable en vivo desde
+//! el panel admin. [`BOT_CONFIG_KV_KEY`] es la clave legacy (config única de
+//! la tabla `kv`) que se migra al nuevo esquema la primera vez.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,13 +29,12 @@ pub enum TriggerMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LlmProvider {
-    /// API OpenAI-compatible (`POST {endpoint}` con `Authorization: Bearer`).
-    /// Cubre OpenAI, Ollama, Groq, LM Studio, vLLM, Mistral, etc.
+    /// API oficial de OpenAI.
     #[default]
     Openai,
-    /// API de DeepSeek, compatible con el formato de OpenAI.
+    /// API oficial de DeepSeek.
     Deepseek,
-    /// API de Anthropic (`POST {endpoint}` con `x-api-key`).
+    /// API oficial de Anthropic (Claude).
     Anthropic,
 }
 
@@ -45,9 +45,10 @@ pub struct LlmConfig {
     /// Proveedor.
     pub provider: LlmProvider,
     /// Endpoint COMPLETO de la llamada de chat.
-    /// - openai: `https://api.openai.com/v1/chat/completions` (o el de
-    ///   Ollama/Groq/DeepSeek/etc.)
-    /// - anthropic: `https://api.anthropic.com/v1/messages`
+    ///
+    /// LEGACY: el backend usa ahora Rig (`rig-core`), que apunta a las URLs
+    /// oficiales de cada proveedor. Este campo se conserva para no romper
+    /// configs ya persistidas y el panel admin, pero ya NO se usa.
     pub endpoint: String,
     /// API key. OBLIGATORIA (todos los providers la requieren).
     pub api_key: String,
@@ -158,18 +159,20 @@ impl Default for BotConfig {
 }
 
 impl BotConfig {
-    /// Carga la config desde la DB (o defaults si no existe).
-    pub fn load(db: &Database) -> Self {
-        match db.get_kv(BOT_CONFIG_KV_KEY) {
-            Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+    /// Carga la config del bot con `id` desde la DB (o defaults si no existe).
+    pub fn load_by_id(db: &Database, id: i64) -> Self {
+        match db.get_bot(id) {
+            Ok(Some(rec)) => serde_json::from_str(&rec.config).unwrap_or_default(),
             _ => Self::default(),
         }
     }
 
-    /// Persiste la config en la DB.
-    pub fn save(&self, db: &Database) -> Result<(), String> {
+    /// Persiste la config del bot con `id` en la DB.
+    pub fn save_to(&self, db: &Database, id: i64) -> Result<(), String> {
         let raw = serde_json::to_string(self).map_err(|e| format!("serialize: {}", e))?;
-        db.set_kv(BOT_CONFIG_KV_KEY, &raw).map_err(|e| format!("db: {}", e))
+        db.update_bot(id, &raw)
+            .map(|_| ())
+            .map_err(|e| format!("db: {}", e))
     }
 
     /// Nombre en minúsculas (para comparaciones de trigger).
@@ -224,14 +227,17 @@ mod tests {
     }
 
     #[test]
-    fn kv_roundtrip() {
+    fn db_roundtrip_by_id() {
         let db = Database::in_memory().unwrap();
         let mut c = BotConfig::default();
         c.enabled = true;
         c.name = "Zeta".into();
-        c.save(&db).unwrap();
-        let loaded = BotConfig::load(&db);
+        let id = db.insert_bot("{}").unwrap();
+        c.save_to(&db, id).unwrap();
+        let loaded = BotConfig::load_by_id(&db, id);
         assert!(loaded.enabled);
         assert_eq!(loaded.name, "Zeta");
+        // Un id inexistente cae a defaults, no a panic.
+        assert!(!BotConfig::load_by_id(&db, 999).enabled);
     }
 }

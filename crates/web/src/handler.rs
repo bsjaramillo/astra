@@ -219,10 +219,10 @@ pub async fn handle_connection(
     send_greet_ws(&ctx, &user, &ws_text_tx);
     // MOTD (message of the day), tras el greet.
     send_motd_ws(&ctx, &user, &ws_text_tx);
-    // Bot agente: saludo configurable. Va DESPUÉS del estado inicial, del
+    // Bots agente: saludo configurable. Va DESPUÉS del estado inicial, del
     // JOIN a la sala y del greet/MOTD para que el usuario ya esté "dentro".
-    if let Some(bot) = ctx.bot.read().as_ref() {
-        let jname = user.name.read().clone();
+    let jname = user.name.read().clone();
+    for bot in ctx.bots.read().iter() {
         bot.on_join(&ctx, &jname);
     }
     // Feeds de admin: ipsend (IP del que entra) y logsend (log de join),
@@ -774,8 +774,9 @@ async fn send_initial_state_ws(
         base64::engine::general_purpose::STANDARD.encode(bytes)
     });
     let _ = tx.send(emit(&bot_name, "", &bot_avatar_b64, 0, ILevel::Owner as u8, false, false));
-    // Bot agente (identidad propia): solo aparece en la userlist si está activo.
-    if let Some(bot) = ctx.bot.read().as_ref() {
+    // Bots agente (identidades propias): solo aparecen en la userlist si
+    // están activos.
+    for bot in ctx.bots.read().iter() {
         if bot.is_enabled() && !bot.bot_name().is_empty() {
             let _ = tx.send(emit(&bot.bot_name(), "", "", 0, ILevel::Owner as u8, false, false));
         }
@@ -1057,8 +1058,8 @@ fn handle_ws_public(
         from: name.clone(),
         text: text.to_string(),
     });
-    // Bot agente: responder menciones en público.
-    if let Some(bot) = ctx.bot.read().as_ref() {
+    // Bots agente: responder menciones en público.
+    for bot in ctx.bots.read().iter() {
         bot.on_public(ctx, &name, text);
     }
     // Custom name activo → línea `NoSuch` con el prefijo (paridad TCP).
@@ -1157,9 +1158,9 @@ fn handle_ws_pm(
         }
         return;
     }
-    if let Some(bot) = ctx.bot.read().as_ref() {
+    let from = user.name.read().clone();
+    for bot in ctx.bots.read().iter() {
         if bot.is_enabled() && target_name.eq_ignore_ascii_case(&bot.bot_name()) {
-            let from = user.name.read().clone();
             bot.on_private(ctx, &from, &text);
             return;
         }

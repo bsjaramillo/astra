@@ -17,7 +17,7 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.2.3"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 license = "AGPL-3.0-or-later"
 authors = ["Astra Project"]
 repository = "https://github.com/bsjaramillo/astra"
@@ -51,6 +51,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+
+# LLM / agentes (Rig)
+rig-core = "0.42"
 
 # Compression
 flate2 = "1.0"

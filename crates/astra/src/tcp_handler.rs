@@ -219,11 +219,12 @@ pub async fn handle_tcp_client(
     // Anuncio "was last seen as..." si el flag `lastseen` está activo.
     ctx.announce_last_seen(&user);
 
-    // Bot agente: saludo configurable. Va DESPUÉS de todo el estado inicial
+    // Bots agente: saludo configurable. Va DESPUÉS de todo el estado inicial
     // (topic, userlist, JOIN a la sala, greet/MOTD) para que el usuario ya
     // esté "dentro" cuando llega el saludo.
-    if let Some(bot) = ctx.bot.read().as_ref() {
-        bot.on_join(&ctx, &user.name.read().clone());
+    let join_name = user.name.read().clone();
+    for bot in ctx.bots.read().iter() {
+        bot.on_join(&ctx, &join_name);
     }
 
     // Feeds de admin: ipsend (IP del que entra) y logsend (log de join).
@@ -752,8 +753,9 @@ async fn send_initial_state(
     if let Some(avatar) = ctx.server_avatar.read().clone() {
         let _ = user.send(outbound::build_avatar_c(&ctx.settings.bot_name, &avatar, crypto));
     }
-    // Bot agente (identidad propia): solo aparece en la userlist si está activo.
-    if let Some(bot) = ctx.bot.read().as_ref() {
+    // Bots agente (identidades propias): solo aparecen en la userlist si
+    // están activos.
+    for bot in ctx.bots.read().iter() {
         if bot.is_enabled() && !bot.bot_name().is_empty() {
             let _ = user.send(outbound::build_userlist_bot_c(&bot.bot_name(), crypto));
         }
@@ -1552,8 +1554,8 @@ async fn handle_public(
         from: name.clone(),
         text: text.clone(),
     });
-    // Bot agente: responder menciones en público.
-    if let Some(bot) = ctx.bot.read().as_ref() {
+    // Bots agente: responder menciones en público.
+    for bot in ctx.bots.read().iter() {
         bot.on_public(ctx, &name, &text);
     }
     debug!("public de '{}': {}", name, text);
@@ -1657,11 +1659,11 @@ async fn handle_pvt(
         return;
     }
 
-    // PM dirigido al bot agente: lo procesa el bot en vez de "user not found"
+    // PM dirigido a un bot agente: lo procesa el bot en vez de "user not found"
     // (paridad sb0t: los PMs al bot van al bot, no a un usuario real).
-    if let Some(bot) = ctx.bot.read().as_ref() {
+    let from = user.name.read().clone();
+    for bot in ctx.bots.read().iter() {
         if bot.is_enabled() && target_name.eq_ignore_ascii_case(&bot.bot_name()) {
-            let from = user.name.read().clone();
             bot.on_private(ctx, &from, &text);
             return;
         }
@@ -1796,15 +1798,24 @@ fn handle_custom_data(
 
     match ident.as_str() {
         "cb0t_pm_msg" => {
-            // PM enriquecido de cb0t dirigido al BOT agente: el texto viaja
+            // PM enriquecido de cb0t dirigido a un BOT agente: el texto viaja
             // cifrado con el "soft crypto" de cb0t (PMCrypto), derivando el
-            // IV del nombre del RECEPTOR. Si el receptor es el bot, se
+            // IV del nombre del RECEPTOR. Si el receptor es un bot, se
             // descifra con su nombre y se lo pasa a `on_private`.
-            if let Some(bot) = ctx.bot.read().as_ref() {
-                if bot.is_enabled() && target_name.eq_ignore_ascii_case(&bot.bot_name()) {
-                    let bot_name = bot.bot_name();
-                    if let Some(text) = proto_ares::pm_crypto::soft_decrypt(&bot_name, payload) {
-                        bot.on_private(ctx, &from, &text);
+            {
+                let bots = ctx.bots.read();
+                if bots.iter().any(|b| {
+                    b.is_enabled() && target_name.eq_ignore_ascii_case(&b.bot_name())
+                }) {
+                    for bot in bots.iter() {
+                        if bot.is_enabled() {
+                            let bot_name = bot.bot_name();
+                            if let Some(text) = proto_ares::pm_crypto::soft_decrypt(&bot_name, payload)
+                            {
+                                bot.on_private(ctx, &from, &text);
+                                return;
+                            }
+                        }
                     }
                     return;
                 }
