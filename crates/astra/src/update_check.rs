@@ -15,6 +15,8 @@
 //! por PM a los admins/owners conectados CADA HORA (recordatorio recurrente,
 //! no una sola vez). Los que se loguean después reciben el aviso al elevar su
 //! nivel (ver `apply_level` en el crate de comandos) y en el siguiente tick.
+//! Si el registry no responde, el fallo queda en `AppContext::update_check_error`
+//! para que `/serverversion` y el panel lo muestren (nunca un falso "al día").
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,8 +36,12 @@ const INTERVAL: Duration = Duration::from_secs(60 * 60);
 const TAGS_PAGE: u32 = 1000;
 
 /// Loop del chequeo. Se spawnea desde `main` si `update_check` está activo.
-/// El primer chequeo corre al arrancar; los errores de red se loguean a
-/// nivel debug y se reintenta recién en el próximo tick.
+/// El primer chequeo corre al arrancar y después cada hora; además escucha
+/// `AppContext::trigger_update_check` (lo llama `/serverversion`) para
+/// comprobar en el momento. Los errores de red se guardan en
+/// `AppContext::update_check_error` — así el comando y el panel distinguen
+/// "no hay nada nuevo" de "no se pudo comprobar" en vez de mentir con un
+/// "estás al día" silencioso.
 pub async fn check_loop(ctx: Arc<AppContext>) {
     let client = match reqwest::Client::builder()
         .user_agent(format!("astra/{}", server_core::VERSION))
@@ -57,29 +63,51 @@ pub async fn check_loop(ctx: Arc<AppContext>) {
     };
 
     let mut interval = tokio::time::interval(INTERVAL);
+    // El primer tick de `interval` dispara de inmediato, así que el primer
+    // chequeo corre al arrancar sin esperar una hora.
     loop {
-        interval.tick().await;
-        let latest = match fetch_latest(&client).await {
-            Ok(Some(v)) => v,
-            Ok(None) => continue,
-            Err(e) => {
-                debug!("update check falló (se reintenta en el próximo tick): {e}");
-                continue;
-            }
-        };
-        if latest <= current {
-            continue;
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = ctx.update_check_notify.notified() => {}
         }
-        let latest_str = latest.to_string();
-        // Aviso por PM a admins/owners CADA HORA mientras haya una versión
-        // más nueva (recordatorio recurrente; el panel también lo muestra).
-        info!("nueva versión de Astra disponible: v{latest_str} (corriendo v{current})");
-        *ctx.available_update.write() = Some(latest_str.clone());
-        for user in ctx.user_pool.users() {
-            if !user.logged_in || *user.level.read() < ILevel::Admin {
-                continue;
+        check_once(&ctx, &client, &current).await;
+    }
+}
+
+/// Corre una verificación y vuelca el resultado al `AppContext`:
+/// `available_update` + limpieza de error si encontró una más nueva o si la
+/// corriendo es la última; `update_check_error` + `update_check_last` para
+/// que `/serverversion` y el panel no reporten un falso "al día".
+async fn check_once(ctx: &AppContext, client: &reqwest::Client, current: &Version) {
+    match fetch_latest(client).await {
+        Ok(Some(latest)) => {
+            *ctx.update_check_error.write() = None;
+            *ctx.update_check_last.write() = Some(std::time::SystemTime::now());
+            if latest <= *current {
+                return;
             }
-            ctx.send_update_notice(&user, &latest_str);
+            let latest_str = latest.to_string();
+            // Aviso por PM a admins/owners CADA HORA mientras haya una versión
+            // más nueva (recordatorio recurrente; el panel también lo muestra).
+            info!("nueva versión de Astra disponible: v{latest_str} (corriendo v{current})");
+            *ctx.available_update.write() = Some(latest_str.clone());
+            for user in ctx.user_pool.users() {
+                if !user.logged_in || *user.level.read() < ILevel::Admin {
+                    continue;
+                }
+                ctx.send_update_notice(&user, &latest_str);
+            }
+        }
+        Ok(None) => {
+            // El registry respondió pero no hay tags estables parseables: es
+            // un chequeo "exitoso" (sin versión que comparar).
+            *ctx.update_check_error.write() = None;
+            *ctx.update_check_last.write() = Some(std::time::SystemTime::now());
+        }
+        Err(e) => {
+            debug!("update check falló (se reintenta en el próximo tick): {e}");
+            *ctx.update_check_error.write() = Some(e.to_string());
+            *ctx.update_check_last.write() = Some(std::time::SystemTime::now());
         }
     }
 }

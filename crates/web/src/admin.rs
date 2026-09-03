@@ -282,7 +282,7 @@ pub fn state_json(ctx: &AppContext) -> String {
     let secs = ctx.uptime_secs();
     write!(
         s,
-        "\"server\":{{\"room\":\"{}\",\"bot\":\"{}\",\"uptime\":{},\"users\":{},\"peak\":{},\"total\":{},\"bans\":{},\"topic\":\"{}\",\"status\":\"{}\",\"version\":\"{}\",\"update\":{},\"directory\":{}}}",
+        "\"server\":{{\"room\":\"{}\",\"bot\":\"{}\",\"uptime\":{},\"users\":{},\"peak\":{},\"total\":{},\"bans\":{},\"topic\":\"{}\",\"status\":\"{}\",\"version\":\"{}\",\"update\":{},\"updateError\":{},\"updateCheckedAt\":{},\"directory\":{}}}",
         esc(&ctx.settings.room_name),
         esc(&ctx.settings.bot_name),
         secs,
@@ -295,6 +295,22 @@ pub fn state_json(ctx: &AppContext) -> String {
         esc(server_core::VERSION),
         match ctx.available_update() {
             Some(v) => format!("\"{}\"", esc(&v)),
+            None => "null".to_string(),
+        },
+        // Si el último chequeo contra el registry falló, el panel lo muestra
+        // en vez de asumir que "no hay nada nuevo" (el comando /serverversion
+        // también lo distingue).
+        match ctx.update_check_error() {
+            Some(e) => format!("\"{}\"", esc(&e)),
+            None => "null".to_string(),
+        },
+        match ctx.update_check_last() {
+            Some(t) => format!(
+                "{}",
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            ),
             None => "null".to_string(),
         },
         // URL de la ficha en el directorio, si la sala está publicada. Es la
@@ -955,5 +971,31 @@ mod tests {
         assert!(v.get("users").is_some());
         assert!(v.get("flags").is_some());
         assert!(v.get("bans").is_some());
+    }
+
+    #[test]
+    fn state_json_exposes_update_check_state() {
+        let ctx = ctx_with_owner("secret");
+        let s = state_json(&ctx);
+        let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
+        let server = &v["server"];
+        // Sin chequeo previo: update null y sin error.
+        assert_eq!(server["update"], serde_json::Value::Null);
+        assert_eq!(server["updateError"], serde_json::Value::Null);
+        assert_eq!(server["updateCheckedAt"], serde_json::Value::Null);
+
+        // Con una versión nueva detectada se expone `update`.
+        *ctx.available_update.write() = Some("9.9.9".to_string());
+        let v: serde_json::Value =
+            serde_json::from_str(&state_json(&ctx)).expect("valid json");
+        assert_eq!(v["server"]["update"], "9.9.9");
+
+        // Con un fallo del chequeo se expone `updateError` (nunca un falso
+        // "al día").
+        *ctx.available_update.write() = None;
+        *ctx.update_check_error.write() = Some("connection refused".to_string());
+        let v: serde_json::Value =
+            serde_json::from_str(&state_json(&ctx)).expect("valid json");
+        assert_eq!(v["server"]["updateError"], "connection refused");
     }
 }

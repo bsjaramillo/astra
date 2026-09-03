@@ -2160,9 +2160,24 @@ fn handle_version(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
 /// Lee el resultado cacheado del chequeo periódico (`update_check`), que
 /// consulta el registry de imágenes al arrancar y cada hora. No hace I/O de
 /// red: el dispatcher de comandos es síncrono y un comando no debe quedarse
-/// esperando a un servicio externo.
+/// esperando a un servicio externo. Sí dispara (`trigger_update_check`) un
+/// chequeo inmediato en background para que el resultado se refresque en
+/// segundos en vez de esperar hasta el próximo tick.
+///
+/// Distingue cuatro estados en vez de mentir con un falso "al día": hay
+/// actualización, estás al día, no se pudo comprobar (error del registry),
+/// o el chequeo está deshabilitado en la config.
 fn handle_serverversion(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     send_system_line(ctx, user, &format!("Astra v{}", env!("CARGO_PKG_VERSION")));
+
+    if !ctx.settings.update_check {
+        send_system_line(
+            ctx,
+            user,
+            "Update checking is disabled in this room's config (update_check = false).",
+        );
+        return;
+    }
 
     if let Some(latest) = ctx.available_update() {
         // Mismo texto que el aviso automático, para que un admin no vea dos
@@ -2171,15 +2186,24 @@ fn handle_serverversion(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
             .templates
             .render("update.available", &[("+v", &latest), ("+c", server_core::VERSION)]);
         send_system_line(ctx, user, &text);
-    } else if ctx.settings.update_check {
-        send_system_line(ctx, user, "No updates available: this is the latest version.");
-    } else {
+    } else if let Some(err) = ctx.update_check_error() {
         send_system_line(
             ctx,
             user,
-            "Update checking is disabled in this room's config (update_check = false).",
+            &format!(
+                "Couldn't check for updates (registry error: {err}). Will retry automatically \
+                 every hour; make sure this server can reach ghcr.io."
+            ),
         );
+    } else if ctx.update_check_last().is_some() {
+        send_system_line(ctx, user, "No updates available: this is the latest version.");
+    } else {
+        send_system_line(ctx, user, "Checking for updates… (first check in progress).");
     }
+
+    // Refresco en background sin bloquear el dispatcher: el loop async corre
+    // el chequeo ya mismo y actualiza `available_update`/`update_check_error`.
+    ctx.trigger_update_check();
 }
 
 fn handle_register(ctx: &AppContext, user: &Arc<AresUser>, args: &str) -> Vec<astra_scripting::ScriptEvent> {
@@ -6191,7 +6215,9 @@ mod tests {
         let (alice, mut alice_rx) = make_test_user(1, "Alice");
         ctx.user_pool.add(alice.clone());
 
-        // Sin update pendiente: versión + "estás en la última".
+        // Sin update pendiente: versión + "estás en la última". Se simula un
+        // chequeo previo exitoso (si no, diría "comprobando…").
+        *ctx.update_check_last.write() = Some(std::time::SystemTime::now());
         let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "serverversion", "");
         assert!(handled, "el comando debe estar registrado");
         let v = next_nosuch_text(&mut alice_rx);
@@ -6207,6 +6233,37 @@ mod tests {
         let _ = next_nosuch_text(&mut alice_rx); // línea de versión
         let notice = next_nosuch_text(&mut alice_rx);
         assert!(notice.contains("9.9.9"), "debe nombrar la versión nueva: {}", notice);
+
+        // Un fallo del chequeo NO debe reportarse como "al día": dice que no
+        // pudo comprobar y nombra el error del registry.
+        *ctx.available_update.write() = None;
+        *ctx.update_check_error.write() = Some("connection refused".to_string());
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "serverversion", "");
+        let _ = next_nosuch_text(&mut alice_rx); // línea de versión
+        let err = next_nosuch_text(&mut alice_rx);
+        assert!(
+            err.contains("Couldn't check") && err.contains("connection refused"),
+            "debe reportar el fallo del chequeo, no un falso al día: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn builtin_serverversion_reports_disabled_check() {
+        let ctx = make_test_ctx_with(Settings {
+            update_check: false,
+            ..Settings::default()
+        });
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+        ctx.user_pool.add(alice.clone());
+
+        let (handled, _) = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "serverversion", "");
+        assert!(handled);
+        let _ = next_nosuch_text(&mut alice_rx); // línea de versión
+        assert!(
+            next_nosuch_text(&mut alice_rx).contains("update_check = false"),
+            "con el chequeo deshabilitado debe decirlo explícitamente"
+        );
     }
 
     #[test]

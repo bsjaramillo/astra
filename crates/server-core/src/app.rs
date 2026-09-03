@@ -428,6 +428,17 @@ pub struct AppContext {
     /// periódico (`None` = al día). La consumen los avisos a admins/owners
     /// y el estado del panel `/admin`.
     pub available_update: parking_lot::RwLock<Option<String>>,
+    /// Último error del chequeo de versiones (`None` = el último chequeo
+    /// terminó bien). Permite a `/serverversion` y al panel distinguir
+    /// "estás al día" de "no se pudo comprobar" (hoy un fallo silencioso
+    /// de red se mostraba como "no hay actualizaciones", que es mentira).
+    pub update_check_error: parking_lot::RwLock<Option<String>>,
+    /// Cuándo corrió el último chequeo (éxito o fallo), para que el comando
+    /// y el panel puedan decir "comprobado hace X".
+    pub update_check_last: parking_lot::RwLock<Option<std::time::SystemTime>>,
+    /// Notificación para pedir un chequeo inmediato: la dispara
+    /// `/serverversion` para no esperar al tick horario del loop.
+    pub update_check_notify: Arc<tokio::sync::Notify>,
 
     /// URL de la ficha de esta sala en el directorio, una vez publicada.
     /// La muestra el panel `/admin` como confirmación visible.
@@ -623,6 +634,9 @@ impl AppContext {
             room_flags,
             vroom_check: parking_lot::RwLock::new(None),
             available_update: parking_lot::RwLock::new(None),
+            update_check_error: parking_lot::RwLock::new(None),
+            update_check_last: parking_lot::RwLock::new(None),
+            update_check_notify: Arc::new(tokio::sync::Notify::new()),
             directory_listing: parking_lot::RwLock::new(None),
             directory_token: parking_lot::RwLock::new(None),
             custom_data,
@@ -1331,6 +1345,23 @@ impl AppContext {
 
     pub fn available_update(&self) -> Option<String> {
         self.available_update.read().clone()
+    }
+
+    /// Último error del chequeo de versiones, si el último intento falló.
+    pub fn update_check_error(&self) -> Option<String> {
+        self.update_check_error.read().clone()
+    }
+
+    /// Cuándo corrió el último chequeo de versiones (éxito o fallo).
+    pub fn update_check_last(&self) -> Option<std::time::SystemTime> {
+        *self.update_check_last.read()
+    }
+
+    /// Pide al loop de chequeo correr una verificación ahora mismo (sin
+    /// esperar al tick horario). Lo usa `/serverversion` para que el estado
+    /// se refresque sin bloquear el dispatcher (el loop es async).
+    pub fn trigger_update_check(&self) {
+        self.update_check_notify.notify_one();
     }
 
     /// Avisa a un usuario que hay una versión nueva del server: PM real del
