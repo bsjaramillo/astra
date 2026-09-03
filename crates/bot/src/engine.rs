@@ -213,43 +213,78 @@ impl BotEngine {
             if cfg.conversation_memory {
                 memory.push(&from, "user", &text, cfg.memory_turns);
             }
-            let history = if cfg.conversation_memory {
-                memory.history(&from, cfg.memory_turns).unwrap_or_default()
+
+            // Comando DIRECTO en el mensaje del usuario: se ejecuta sin pasar
+            // por el LLM, así no depende de que el modelo envuelva la orden en
+            // `[CMD]`. Ej.: "Nova /topic x" (público) o "/topic x" (PM).
+            // Requiere `execute_commands` activo.
+            let direct_cmd = if cfg.execute_commands {
+                extract_user_command(&text)
             } else {
-                Vec::new()
+                None
             };
 
-            // Prompt enriquecido con el contexto de la sala (usuarios, topic,
-            // comandos) y el historial público reciente.
-            let mut llm_cfg = cfg.llm.clone();
-            llm_cfg.system_prompt =
-                build_system_prompt(&cfg, &pool, &room_name, &topic, &server_bot_name, &recent);
+            let (reply, is_direct) = if let Some(cmd) = direct_cmd {
+                (
+                    execute_as_user(
+                        &ctx,
+                        &pool,
+                        &from,
+                        &cmd,
+                        &cfg.allowed_commands,
+                        &scripting,
+                    )
+                    .join(" | "),
+                    true,
+                )
+            } else {
+                let history = if cfg.conversation_memory {
+                    memory.history(&from, cfg.memory_turns).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
 
-            let reply = match llm.chat(&llm_cfg, &history).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!("bot: error LLM para '{}': {}", from, e);
-                    cfg.fallback_response.clone()
-                }
+                // Prompt enriquecido con el contexto de la sala (usuarios,
+                // topic, comandos) y el historial público reciente.
+                let mut llm_cfg = cfg.llm.clone();
+                llm_cfg.system_prompt =
+                    build_system_prompt(&cfg, &pool, &room_name, &topic, &server_bot_name, &recent);
+
+                let r = match llm.chat(&llm_cfg, &history).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("bot: error LLM para '{}': {}", from, e);
+                        cfg.fallback_response.clone()
+                    }
+                };
+                (r, false)
             };
             let reply = normalize_reply(&reply);
 
-            // Si la ejecución de comandos está habilitada, el LLM puede pedir
-            // ejecutar uno con `[CMD] ... [/CMD]`. Se ejecuta CON EL NIVEL DEL
-            // SOLICITANTE (no con el del bot), así aplican las validaciones de
-            // permisos del comando (ejecutor vs objetivo).
-            let (clean, mut cmds) = extract_commands(&reply);
-            let mut final_text = clean;
-            if cmds.is_empty() {
-                // Fallback: si el LLM no usó la directiva pero respondió con
-                // un comando directo ("/topic x"), tratarlo como tal.
-                let t = final_text.trim_start().to_string();
-                if t.starts_with('/') || t.starts_with('#') {
-                    cmds.push(t);
-                    final_text = String::new();
+            // Si el comando vino directo del usuario, ya se ejecutó: su salida
+            // es la respuesta final (sin volver a interpretar directivas).
+            let (mut final_text, cmds) = if is_direct {
+                (reply.clone(), Vec::new())
+            } else {
+                // Si la ejecución de comandos está habilitada, el LLM puede
+                // pedir ejecutar uno con `[CMD] ... [/CMD]`. Se ejecuta CON EL
+                // NIVEL DEL SOLICITANTE (no con el del bot), así aplican las
+                // validaciones de permisos del comando (ejecutor vs objetivo).
+                let (clean, cmds) = extract_commands(&reply);
+                let mut final_text = clean;
+                let mut cmds = cmds;
+                if cmds.is_empty() {
+                    // Fallback: si el LLM no usó la directiva pero respondió
+                    // con un comando directo ("/topic x"), tratarlo como tal.
+                    let t = final_text.trim_start().to_string();
+                    if t.starts_with('/') || t.starts_with('#') {
+                        cmds.push(t);
+                        final_text = String::new();
+                    }
                 }
-            }
-            if cfg.execute_commands {
+                (final_text, cmds)
+            };
+            if cfg.execute_commands && !is_direct {
                 let mut extras: Vec<String> = Vec::new();
                 for cmd in cmds {
                     extras.extend(execute_as_user(
@@ -267,7 +302,7 @@ impl BotEngine {
                     }
                     final_text.push_str(&extras.join(" | "));
                 }
-            } else {
+            } else if !cfg.execute_commands && !is_direct {
                 // Ejecución deshabilitada: no se procesa ninguna directiva.
                 final_text = reply.clone();
             }
@@ -515,21 +550,22 @@ fn build_system_prompt(
         };
         exec = format!(
             "\n\nPuedes EJECUTAR comandos de la sala si el usuario te lo pide ({}). \
-             El comando se ejecutará con los PERMISOS del usuario que lo pide, no con los tuyos. \
-             Para ejecutar uno, responde únicamente el comando entre [CMD] y [/CMD], \
-             por ejemplo: [CMD]/topic Nuevo tema[/CMD].",
+             El comando se ejecutará con los PERMISOS del usuario que lo pide, no con los tuyos.\n\
+             Si el usuario pide una acción de la sala (cambiar el topic o el status, banear, \
+             kickear, desmutear, listar, etc.) o escribe un comando, respondé con el comando \
+             entre [CMD] y [/CMD], opcionalmente precedido de una breve frase. \
+             Ejemplo: \"Listo, lo hago. [CMD]/topic Nuevo tema[/CMD]\". \
+             Si no está seguro de qué comando usar, respondé normalmente como asistente.",
             scope
         );
     }
-    let mut recency_hint = String::new();
+    let mut recency_hint = "";
     if !recent.is_empty() {
         // Guía de interpretación: el LLM a veces se ancla en mensajes viejos.
-        recency_hint = format!(
-            "\n\n=== Instrucción ===\n\
+        recency_hint = "\n\n=== Instrucción ===\n\
              El mensaje MÁS RECIENTE del usuario es su pregunta actual: respondé a eso.\n\
              El historial de la sala está en orden cronológico: los mensajes más recientes están AL FINAL.\n\
-             Úsalo solo como contexto; no respondas sobre mensajes antiguos cuando la pregunta se refiera a lo reciente."
-        );
+             Úsalo solo como contexto; no respondas sobre mensajes antiguos cuando la pregunta se refiera a lo reciente.";
     }
     format!(
         "{}\n\n=== Contexto actual de la sala ===\n{}\n{}\n\n=== Historial reciente de la sala ===\n{}{}{}",
@@ -558,6 +594,29 @@ pub(crate) fn broadcast_public(pool: &UserPool, from: &str, text: &str) {
             let _ = u.send_public(from, text);
         }
     }
+}
+
+/// Extrae un comando directo (`/x` o `#x`) del mensaje del usuario, si hay uno
+/// al inicio de un token. Permite ejecutar órdenes explícitas ("Nova /topic x",
+/// "/topic x" por PM) sin depender de que el LLM las envuelva en `[CMD]`.
+///
+/// Requiere que el `/` o `#` esté al inicio del mensaje o precedido de un
+/// espacio, para no tomar URLs ("https://...") ni texto suelto como comando.
+fn extract_user_command(text: &str) -> Option<String> {
+    let t = strip_colors(text);
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if (c == b'/' || c == b'#') && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
+            let rest = t[i..].trim();
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Busca `needle` en `haystack` desde `from`, case-insensitive (ASCII).
@@ -1104,6 +1163,123 @@ mod tests {
         let (clean, cmds) = extract_commands("hola [CMD]/topic");
         assert_eq!(clean, "hola [CMD]/topic");
         assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn extract_user_command_finds_token_start_commands() {
+        // Comando al inicio del mensaje (PM) o tras el nombre del bot.
+        assert_eq!(extract_user_command("/topic nuevo"), Some("/topic nuevo".into()));
+        assert_eq!(
+            extract_user_command("Nova /topic nuevo"),
+            Some("/topic nuevo".into())
+        );
+        assert_eq!(extract_user_command("#status hola"), Some("#status hola".into()));
+        assert_eq!(
+            extract_user_command("  /ban bob razon"),
+            Some("/ban bob razon".into())
+        );
+        // URLs y texto suelto con "/" NO cuentan como comando.
+        assert_eq!(extract_user_command("Nova mira https://example.com/x"), None);
+        assert_eq!(extract_user_command("hola/mundo"), None);
+        assert_eq!(extract_user_command("Nova qué es 5/2"), None);
+        assert_eq!(extract_user_command("sin comandos"), None);
+        // Códigos de color antes del comando no rompen la detección.
+        assert_eq!(
+            extract_user_command("Nova \x0303/topic x"),
+            Some("/topic x".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_command_in_user_message_executes_without_llm() {
+        // El usuario escribe "Nova /topic x": se ejecuta directo, sin que el
+        // LLM tenga que envolver la orden en [CMD] (el mock LLM no hace nada).
+        let (ctx, mut rx) = ctx_with_user("owner");
+        if let Some(u) = ctx.user_pool.get_by_name("owner") {
+            *u.level.write() = server_core::ILevel::Owner;
+        }
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "respuesta de chat que no es un comando");
+        let mut cfg = bot.config_snapshot();
+        cfg.execute_commands = true;
+        cfg.reply_in_room = true;
+        *bot.config.write() = cfg;
+
+        bot.on_public(&ctx, "owner", "Nova /topic hola directo");
+
+        let mut found = false;
+        for _ in 0..5 {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout esperando respuesta")
+                .unwrap();
+            if msg.starts_with("PUBLIC:") && msg.contains("Topic updated.") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "el comando directo no se ejecutó");
+        assert_eq!(ctx.current_room_topic(), "hola directo");
+    }
+
+    #[tokio::test]
+    async fn direct_command_respects_requester_level() {
+        // Un Regular que intenta /topic directo → rechazado por nivel.
+        let (ctx, mut rx) = ctx_with_user("regular");
+        if let Some(u) = ctx.user_pool.get_by_name("regular") {
+            *u.level.write() = server_core::ILevel::Regular;
+        }
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "ignorado");
+        let mut cfg = bot.config_snapshot();
+        cfg.execute_commands = true;
+        cfg.reply_in_room = true;
+        *bot.config.write() = cfg;
+
+        bot.on_public(&ctx, "regular", "Nova /topic no me deja");
+
+        let mut found = false;
+        for _ in 0..5 {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout")
+                .unwrap();
+            if msg.contains("Access denied") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "un Regular no debe poder /topic vía el bot");
+        assert_ne!(ctx.current_room_topic(), "no me deja");
+    }
+
+    #[tokio::test]
+    async fn direct_command_skipped_when_execution_disabled() {
+        // execute_commands apagado: el comando directo NO se ejecuta; el bot
+        // responde por el LLM (el mock) como texto normal.
+        let (ctx, mut rx) = ctx_with_user("owner");
+        if let Some(u) = ctx.user_pool.get_by_name("owner") {
+            *u.level.write() = server_core::ILevel::Owner;
+        }
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "respuesta de chat que no es un comando");
+        let mut cfg = bot.config_snapshot();
+        cfg.execute_commands = false;
+        cfg.reply_in_room = true;
+        *bot.config.write() = cfg;
+
+        bot.on_public(&ctx, "owner", "Nova /topic no ejecutado");
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .unwrap();
+        assert!(
+            msg.contains("respuesta de chat que no es un comando"),
+            "got {:?}",
+            msg
+        );
+        assert_ne!(ctx.current_room_topic(), "no ejecutado");
     }
 
     fn ctx_with_user_level(name: &str, level: server_core::ILevel) -> Arc<AppContext> {
