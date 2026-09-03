@@ -44,13 +44,8 @@ pub enum LlmProvider {
 pub struct LlmConfig {
     /// Proveedor.
     pub provider: LlmProvider,
-    /// Endpoint COMPLETO de la llamada de chat.
-    ///
-    /// LEGACY: el backend usa ahora Rig (`rig-core`), que apunta a las URLs
-    /// oficiales de cada proveedor. Este campo se conserva para no romper
-    /// configs ya persistidas y el panel admin, pero ya NO se usa.
-    pub endpoint: String,
-    /// API key. OBLIGATORIA (todos los providers la requieren).
+    /// API key. OBLIGATORIA para activar el bot (todos los providers la
+    /// requieren).
     pub api_key: String,
     /// Modelo (ej. `gpt-4o-mini`, `claude-haiku-4-5`, `deepseek-v4-flash`).
     pub model: String,
@@ -68,7 +63,6 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             provider: LlmProvider::Openai,
-            endpoint: "https://api.openai.com/v1/chat/completions".into(),
             api_key: String::new(),
             model: "gpt-4o-mini".into(),
             temperature: 0.7,

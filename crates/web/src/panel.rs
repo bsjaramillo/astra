@@ -410,25 +410,20 @@ const I18N = {
     bot_prefix_l:"Prefijo", bot_memory:"Recordar conversación", bot_memory_turns:"Turns de memoria",
     bot_history_lines:"Msgs. recientes de sala (0=off)",
     bot_cooldown:"Cooldown (seg)", bot_max_inflight:"Máx. llamadas simultáneas",
-    bot_llm_h:"🤖 Proveedor LLM", bot_provider:"Proveedor", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
-    bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
+    bot_llm_h:"🤖 Proveedor LLM", bot_provider:"Proveedor", bot_provider_openai:"OpenAI", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_api_key:"API key", bot_api_key_req:"Para activar el bot, la API key del LLM es obligatoria.", bot_model:"Modelo", bot_temp:"Temperatura", bot_max_tokens:"Máx. tokens",
     bot_prompt:"Prompt de sistema (personalidad)", bot_prompt_ph:"Eres Nova, un asistente amable y cercano...",
     bot_fallback:"Respuesta si el LLM falla",
     bot_exec_h:"Ejecución de comandos", bot_exec_note:"El bot puede ejecutar comandos que el usuario le pida. Se ejecutan con el NIVEL del usuario que lo pide (un Regular no puede banear a un Admin). Apagado por defecto.",
     bot_exec_on:"Permitir ejecutar comandos", bot_allowed_cmds:"Comandos permitidos (vacío = todos por nivel, separados por coma)",
     bot_help:"¿Cómo configurar la API key?",
-    bot_help_intro:"La API key es obligatoria para ACTIVAR el bot. El backend usa Rig con las URLs oficiales de cada proveedor; el campo endpoint se conserva por compatibilidad pero se ignora.",
-    bot_help_provider:"Proveedor", bot_help_endpoint:"Endpoint", bot_help_model:"Modelo default",
+    bot_help_intro:"La API key es obligatoria para ACTIVAR el bot. El backend usa Rig con las URLs oficiales de cada proveedor: solo hay que elegir proveedor y modelo.",
+    bot_help_provider:"Proveedor", bot_help_model:"Modelo default",
     bot_help_key:"Generar API key", bot_help_balance:"Saldo / recarga",
     bot_help_balance_openai:"Prepago: recarga en platform.openai.com → Billing.",
     bot_help_balance_deepseek:"Prepago obligatorio: recarga / top-up en platform.deepseek.com.",
     bot_help_balance_anthropic:"Créditos prepago: recarga en platform.anthropic.com → Billing.",
-    bot_help_compat:"OpenAI-compatible (Groq, Ollama, LM Studio, vLLM, Mistral…)",
-    bot_help_compat_endpoint:"El del servicio (ej. Groq: https://api.groq.com/openai/v1/chat/completions)",
-    bot_help_compat_key:"La key del servicio (ej. console.groq.com).",
-    bot_help_compat_balance:"Varía: Groq tiene tier gratis. Ollama/LM Studio local: sin key ni saldo.",
-    bot_help_note:"Si el bot responde el mensaje de fallback, mirá el log «bot: error LLM para 'X': …». 401 = key inválida · 402 = sin saldo · 422 = modelo/endpoint mal · 429/503/insufficient_system_resource = transitorio (se reintenta) · timeout → subir timeout_secs.",
+    bot_help_note:"Si el bot responde el mensaje de fallback, mirá el log «bot: error LLM para 'X': …». 401 = key inválida · 402 = sin saldo · 422 = modelo mal · 429/503/insufficient_system_resource = transitorio (se reintenta) · timeout → subir timeout_secs.",
     bot_saved:"Bot guardado.",
     bot_select:"Bot a editar", bot_none:"Sin bots — creá uno abajo", bot_new:"Nuevo bot", bot_del:"Eliminar bot",
     bot_del_confirm:"¿Eliminar este bot?", bot_deleted:"Bot eliminado.", bot_identity:"Identidad",
@@ -585,25 +580,20 @@ const I18N = {
     bot_prefix_l:"Prefix", bot_memory:"Remember conversation", bot_memory_turns:"Memory turns",
     bot_history_lines:"Recent room msgs (0=off)",
     bot_cooldown:"Cooldown (sec)", bot_max_inflight:"Max concurrent calls",
-    bot_llm_h:"🤖 LLM provider", bot_provider:"Provider", bot_provider_openai:"OpenAI / compatible", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
-    bot_endpoint:"Endpoint", bot_endpoint_ph:"https://api.openai.com/v1/chat/completions",
+    bot_llm_h:"🤖 LLM provider", bot_provider:"Provider", bot_provider_openai:"OpenAI", bot_provider_deepseek:"DeepSeek", bot_provider_anthropic:"Anthropic",
     bot_api_key:"API key", bot_api_key_req:"To enable the bot, the LLM API key is required.", bot_model:"Model", bot_temp:"Temperature", bot_max_tokens:"Max tokens",
     bot_prompt:"System prompt (personality)", bot_prompt_ph:"You are Nova, a friendly assistant...",
     bot_fallback:"Reply if the LLM fails",
     bot_exec_h:"Command execution", bot_exec_note:"The bot can run commands users ask for. They run with the REQUESTING user's level (a Regular can't ban an Admin). Off by default.",
     bot_exec_on:"Allow executing commands", bot_allowed_cmds:"Allowed commands (blank = all by level, comma separated)",
     bot_help:"How to configure the API key?",
-    bot_help_intro:"The API key is required to ENABLE the bot. The backend uses Rig with each provider's official URLs; the endpoint field is kept for compatibility but ignored.",
-    bot_help_provider:"Provider", bot_help_endpoint:"Endpoint", bot_help_model:"Default model",
+    bot_help_intro:"The API key is required to ENABLE the bot. The backend uses Rig with each provider's official URLs: just pick provider and model.",
+    bot_help_provider:"Provider", bot_help_model:"Default model",
     bot_help_key:"Generate API key", bot_help_balance:"Balance / top-up",
     bot_help_balance_openai:"Prepaid: top up at platform.openai.com → Billing.",
     bot_help_balance_deepseek:"Prepaid (required): top up at platform.deepseek.com.",
     bot_help_balance_anthropic:"Prepaid credits: top up at platform.anthropic.com → Billing.",
-    bot_help_compat:"OpenAI-compatible (Groq, Ollama, LM Studio, vLLM, Mistral…)",
-    bot_help_compat_endpoint:"Service endpoint (e.g. Groq: https://api.groq.com/openai/v1/chat/completions)",
-    bot_help_compat_key:"Service key (e.g. console.groq.com).",
-    bot_help_compat_balance:"Varies: Groq has a free tier. Local Ollama/LM Studio: no key or balance.",
-    bot_help_note:"If the bot replies with the fallback, check the log «bot: error LLM para 'X': …». 401 = invalid key · 402 = no balance · 422 = wrong model/endpoint · 429/503/insufficient_system_resource = transient (retried) · timeout → raise timeout_secs.",
+    bot_help_note:"If the bot replies with the fallback, check the log «bot: error LLM para 'X': …». 401 = invalid key · 402 = no balance · 422 = wrong model · 429/503/insufficient_system_resource = transient (retried) · timeout → raise timeout_secs.",
     bot_saved:"Bot saved.",
     bot_select:"Bot to edit", bot_none:"No bots — create one below", bot_new:"New bot", bot_del:"Delete bot",
     bot_del_confirm:"Delete this bot?", bot_deleted:"Bot deleted.", bot_identity:"Identity",
@@ -1224,7 +1214,6 @@ function renderBot(){
           <option value="deepseek">${t("bot_provider_deepseek")}</option>
           <option value="anthropic">${t("bot_provider_anthropic")}</option>
         </select></label>
-      <label class="fld"><span>${t("bot_endpoint")}</span><input id="botEndpoint" placeholder="${esc(t("bot_endpoint_ph"))}"></label>
       <label class="fld"><span>${t("bot_api_key")}</span><input id="botApiKey" type="password" required autocomplete="off"></label>
       <div class="rowend">
         <label class="fld"><span>${t("bot_model")}</span><input id="botModel" placeholder="gpt-4o-mini"></label>
@@ -1237,21 +1226,19 @@ function renderBot(){
         <p class="help-txt">${t("bot_help_intro")}</p>
         <div class="tblwrap"><table class="helptbl">
           <thead><tr>
-            <th>${t("bot_help_provider")}</th><th>${t("bot_help_endpoint")}</th>
+            <th>${t("bot_help_provider")}</th>
             <th>${t("bot_help_model")}</th><th>${t("bot_help_key")}</th><th>${t("bot_help_balance")}</th>
           </tr></thead>
           <tbody>
-            <tr><td>OpenAI</td><td><code>https://api.openai.com/v1/chat/completions</code></td><td><code>gpt-4o-mini</code></td>
+            <tr><td>OpenAI</td><td><code>gpt-4o-mini</code></td>
               <td><a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com</a></td>
               <td>${t("bot_help_balance_openai")}</td></tr>
-            <tr><td>DeepSeek</td><td><code>https://api.deepseek.com/chat/completions</code></td><td><code>deepseek-v4-flash</code></td>
+            <tr><td>DeepSeek</td><td><code>deepseek-v4-flash</code></td>
               <td><a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">platform.deepseek.com</a></td>
               <td>${t("bot_help_balance_deepseek")}</td></tr>
-            <tr><td>Anthropic</td><td><code>https://api.anthropic.com/v1/messages</code></td><td><code>claude-haiku-4-5</code></td>
+            <tr><td>Anthropic</td><td><code>claude-haiku-4-5</code></td>
               <td><a href="https://platform.anthropic.com/settings/keys" target="_blank" rel="noopener">platform.anthropic.com</a></td>
               <td>${t("bot_help_balance_anthropic")}</td></tr>
-            <tr><td>${t("bot_help_compat")}</td><td>${t("bot_help_compat_endpoint")}</td><td>—</td>
-              <td>${t("bot_help_compat_key")}</td><td>${t("bot_help_compat_balance")}</td></tr>
           </tbody>
         </table></div>
         <div class="note">${t("bot_help_note")}</div>
@@ -1283,30 +1270,23 @@ async function loadBot(){
   set("botCooldown",c.cooldown_secs); set("botMaxInflight",c.max_in_flight);
   chk("botExecCmds",c.execute_commands); set("botAllowedCmds",(c.allowed_commands||[]).join(","));
   const llm=c.llm||{};
-  set("botProvider",llm.provider); set("botEndpoint",llm.endpoint); set("botApiKey",llm.api_key);
+  set("botProvider",llm.provider); set("botApiKey",llm.api_key);
   set("botModel",llm.model); set("botTemp",llm.temperature); set("botMaxTokens",llm.max_tokens);
   set("botPrompt",llm.system_prompt); set("botFallback",c.fallback_response);
   applyBotDefaults();
 }
-// URLs/modelos por defecto por proveedor. Al cambiar el proveedor, si el
-// endpoint/modelo están vacíos (o son defaults de otro proveedor) se rellenan.
+// Modelos por defecto por proveedor. Al cambiar el proveedor, si el modelo
+// está vacío (o es default de otro proveedor) se rellena.
 const BOT_API = {
-  openai:{endpoint:"https://api.openai.com/v1/chat/completions", model:"gpt-4o-mini"},
-  deepseek:{endpoint:"https://api.deepseek.com/chat/completions", model:"deepseek-v4-flash"},
-  anthropic:{endpoint:"https://api.anthropic.com/v1/messages", model:"claude-haiku-4-5"},
+  openai:{model:"gpt-4o-mini"},
+  deepseek:{model:"deepseek-v4-flash"},
+  anthropic:{model:"claude-haiku-4-5"},
 };
 function applyBotDefaults(force=false){
   const g=(id)=>document.getElementById(id);
   const p=g("botProvider").value;
   const def=BOT_API[p]; if(!def) return;
-  if(force){
-    g("botEndpoint").value=def.endpoint;
-    g("botModel").value=def.model;
-    return;
-  }
-  const ep=g("botEndpoint").value.trim();
-  const endpointIsDefault=Object.entries(BOT_API).some(([name, value])=>name!==p && ep===value.endpoint);
-  if(!ep || endpointIsDefault) g("botEndpoint").value=def.endpoint;
+  if(force){ g("botModel").value=def.model; return; }
   const m=g("botModel").value.trim();
   const modelIsDefault=Object.entries(BOT_API).some(([name, value])=>name!==p && m===value.model);
   if(!m || modelIsDefault) g("botModel").value=def.model;
@@ -1336,7 +1316,6 @@ async function saveBot(){
     allowed_commands:g("botAllowedCmds").value.split(",").map(s=>s.trim()).filter(Boolean),
     llm:{
       provider:g("botProvider").value,
-      endpoint:g("botEndpoint").value.trim()||base.llm?.endpoint||"",
       api_key:g("botApiKey").value,
       model:g("botModel").value.trim()||base.llm?.model||"",
       temperature:parseFloat(g("botTemp").value)||0.7,
