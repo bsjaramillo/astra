@@ -19,7 +19,7 @@ use server_core::user_pool::{AresUser, UserPool};
 
 use crate::config::{BotConfig, TriggerMode};
 use crate::llm::{LlmClient, RigLlm};
-use crate::memory::ConversationMemory;
+use crate::memory::{ChatMessage, ConversationMemory};
 
 /// Motor del bot.
 pub struct BotEngine {
@@ -108,6 +108,7 @@ impl BotEngine {
         let fallback = cfg.greet_message.clone();
         let greet_as_pm = cfg.greet_as_pm;
         let hint = trigger_hint(&cfg);
+        let ctx = Arc::clone(ctx);
 
         tokio::spawn(async move {
             let cfg = config.read().clone();
@@ -150,6 +151,7 @@ impl BotEngine {
                 for chunk in split_chunks(&text, MAX_MSG_LEN) {
                     broadcast_public(&pool, &bot_name, &chunk);
                 }
+                ctx.record_message(&bot_name, &text, false);
             }
         });
     }
@@ -210,7 +212,10 @@ impl BotEngine {
                 return;
             }
 
-            if cfg.conversation_memory {
+            // La memoria por usuario es el hilo PRIVADO (PM). En público el bot
+            // se apoya en el flujo de la sala (ver `room_dialogue`), para no
+            // anclarse al hilo viejo del usuario cuando otros hablaron después.
+            if cfg.conversation_memory && is_pm {
                 memory.push(&from, "user", &text, cfg.memory_turns);
             }
 
@@ -238,10 +243,18 @@ impl BotEngine {
                     true,
                 )
             } else {
-                let history = if cfg.conversation_memory {
-                    memory.history(&from, cfg.memory_turns).unwrap_or_default()
+                // PM: hilo privado del usuario. Público: la conversación
+                // reciente de la sala como turnos reales, así el bot sigue el
+                // flujo colectivo (incluidas sus propias respuestas) en vez de
+                // responder sobre su hilo antiguo.
+                let history = if is_pm {
+                    if cfg.conversation_memory {
+                        memory.history(&from, cfg.memory_turns).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    }
                 } else {
-                    Vec::new()
+                    room_dialogue(&cfg, &recent, &from, &text)
                 };
 
                 // Prompt enriquecido con el contexto de la sala (usuarios,
@@ -324,8 +337,12 @@ impl BotEngine {
                     for chunk in split_chunks(&final_text, MAX_MSG_LEN) {
                         broadcast_public(&pool, &cfg.name, &chunk);
                     }
+                    // Registrar la respuesta en el historial de la sala: si no,
+                    // el flujo que ve el bot queda "a medias" (falta su propia
+                    // mitad) y no puede seguir la conversación colectiva.
+                    ctx.record_message(&cfg.name, &final_text, false);
                 }
-                if cfg.conversation_memory {
+                if cfg.conversation_memory && is_pm {
                     memory.push(&from, "assistant", &final_text, cfg.memory_turns);
                 }
             }
@@ -578,6 +595,54 @@ fn build_system_prompt(
     )
 }
 
+/// Construye los turnos enviados al LLM a partir del historial público
+/// reciente de la sala (más viejo → más nuevo), con el mensaje actual como
+/// último turno del usuario. Los mensajes del propio bot van con rol
+/// `assistant`; los de los demás, con rol `user` y prefijo `nick:`, para que
+/// el modelo vea el flujo colectivo y no se ancle al hilo privado del usuario.
+fn room_dialogue(
+    cfg: &BotConfig,
+    recent: &[HistoryEntry],
+    from: &str,
+    text: &str,
+) -> Vec<ChatMessage> {
+    let mut entries: &[HistoryEntry] = recent;
+    // El path TCP registra el mensaje ANTES de llamar al bot, así que puede
+    // venir como última entrada; el path web no. Se evita duplicarlo.
+    if let Some(last) = entries.last() {
+        if !last.is_emote && last.name == from && last.text == text {
+            entries = &entries[..entries.len() - 1];
+        }
+    }
+    let mut msgs: Vec<ChatMessage> = entries
+        .iter()
+        .map(|e| {
+            if e.name == cfg.name {
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: e.text.clone(),
+                }
+            } else {
+                let content = if e.is_emote {
+                    format!("* {} {} *", e.name, e.text)
+                } else {
+                    format!("{}: {}", e.name, e.text)
+                };
+                ChatMessage {
+                    role: "user".into(),
+                    content,
+                }
+            }
+        })
+        .collect();
+    // El mensaje que dispara la respuesta va SIEMPRE como último turno.
+    msgs.push(ChatMessage {
+        role: "user".into(),
+        content: format!("{}: {}", from, text),
+    });
+    msgs
+}
+
 /// Sustituye los placeholders del saludo (`+n` → nick, `+rn` → sala).
 fn render_greet(template: &str, name: &str, room_name: &str) -> String {
     template
@@ -771,6 +836,40 @@ mod tests {
         ) -> Result<String, String> {
             Ok(self.reply.clone())
         }
+    }
+
+    /// LLM mock que guarda los mensajes que recibe, para inspeccionar el
+    /// contexto que el motor le pasa.
+    struct CaptureLlm {
+        seen: Arc<Mutex<Vec<ChatMessage>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for CaptureLlm {
+        async fn chat(
+            &self,
+            _cfg: &LlmConfig,
+            messages: &[ChatMessage],
+        ) -> Result<String, String> {
+            *self.seen.lock() = messages.to_vec();
+            Ok("respuesta".into())
+        }
+    }
+
+    /// Igual que [`engine`], pero con un LLM que captura el historial enviado.
+    fn engine_capture(db: Arc<Database>, seen: Arc<Mutex<Vec<ChatMessage>>>) -> Arc<BotEngine> {
+        let e = BotEngine::with_llm(
+            db,
+            astra_scripting::ScriptHandle::dummy(),
+            1,
+            Arc::new(CaptureLlm { seen }),
+        );
+        let mut cfg = BotConfig::default();
+        cfg.enabled = true;
+        cfg.name = "Nova".into();
+        cfg.cooldown_secs = 0;
+        *e.config.write() = cfg;
+        e
     }
 
     fn engine(db: Arc<Database>, reply: &str) -> Arc<BotEngine> {
@@ -1447,5 +1546,174 @@ mod tests {
         bot.on_public(&ctx, "Owner", "Nova cambia el status");
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(ctx.room_status(), "hola");
+    }
+
+    #[test]
+    fn room_dialogue_builds_collective_flow() {
+        let mut cfg = BotConfig::default();
+        cfg.name = "Nova".into();
+        let recent = vec![
+            HistoryEntry {
+                name: "alice".into(),
+                text: "hola Nova".into(),
+                is_emote: false,
+                time_secs: 0,
+            },
+            HistoryEntry {
+                name: "Nova".into(),
+                text: "hola alice".into(),
+                is_emote: false,
+                time_secs: 0,
+            },
+            HistoryEntry {
+                name: "bob".into(),
+                text: "¿qué opinas del clima?".into(),
+                is_emote: false,
+                time_secs: 0,
+            },
+        ];
+        let msgs = room_dialogue(&cfg, &recent, "alice", "y de lo que dijo bob?");
+        assert_eq!(msgs.len(), 4);
+        assert_eq!((msgs[0].role.as_str(), msgs[0].content.as_str()), ("user", "alice: hola Nova"));
+        // La respuesta del bot va como assistant, no como texto de sala.
+        assert_eq!((msgs[1].role.as_str(), msgs[1].content.as_str()), ("assistant", "hola alice"));
+        assert_eq!((msgs[2].role.as_str(), msgs[2].content.as_str()), ("user", "bob: ¿qué opinas del clima?"));
+        // La pregunta actual es SIEMPRE el último turno.
+        assert_eq!(
+            (msgs[3].role.as_str(), msgs[3].content.as_str()),
+            ("user", "alice: y de lo que dijo bob?")
+        );
+    }
+
+    #[test]
+    fn room_dialogue_dedups_current_message() {
+        // El path TCP registra el mensaje antes de invocar al bot: no debe
+        // aparecer dos veces (en el historial y como turno actual).
+        let mut cfg = BotConfig::default();
+        cfg.name = "Nova".into();
+        let recent = vec![
+            HistoryEntry {
+                name: "bob".into(),
+                text: "hola".into(),
+                is_emote: false,
+                time_secs: 0,
+            },
+            HistoryEntry {
+                name: "alice".into(),
+                text: "actual".into(),
+                is_emote: false,
+                time_secs: 0,
+            },
+        ];
+        let msgs = room_dialogue(&cfg, &recent, "alice", "actual");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].content, "bob: hola");
+        assert_eq!(msgs[1].content, "alice: actual");
+    }
+
+    #[tokio::test]
+    async fn public_reply_uses_collective_room_flow() {
+        // El usuario pregunta algo nuevo tras la charla de otros: el motor debe
+        // mandar al LLM el flujo de la sala (otras voces + respuestas del bot),
+        // no solo el hilo viejo del usuario.
+        let (ctx, mut rx) = ctx_with_user("alice");
+        ctx.record_message("alice", "hola Nova", false);
+        ctx.record_message("Nova", "hola alice", false);
+        ctx.record_message("bob", "¿qué opinas del clima?", false);
+
+        let db = Database::in_memory().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let bot = engine_capture(db, seen.clone());
+        bot.on_public(&ctx, "alice", "Nova, y qué opinás de lo que dijo bob?");
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout esperando respuesta")
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let msgs = seen.lock().clone();
+        assert!(
+            msgs.iter().any(|m| m.role == "user" && m.content == "bob: ¿qué opinas del clima?"),
+            "falta el mensaje de bob: {:?}",
+            msgs
+        );
+        assert!(
+            msgs.iter().any(|m| m.role == "assistant" && m.content == "hola alice"),
+            "falta la respuesta del bot como assistant: {:?}",
+            msgs
+        );
+        assert_eq!(
+            msgs.last().map(|m| m.content.as_str()),
+            Some("alice: Nova, y qué opinás de lo que dijo bob?"),
+            "la pregunta actual debe ser el último turno"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_reply_is_recorded_in_room_history() {
+        // La respuesta pública del bot debe quedar en el historial de la sala,
+        // para que el flujo de conversación quede completo.
+        let (ctx, mut rx) = ctx_with_user("bob");
+        let db = Database::in_memory().unwrap();
+        let bot = engine(db, "respuesta del bot");
+        bot.on_public(&ctx, "bob", "hola Nova");
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout esperando respuesta")
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let hist = ctx.recent_messages(10);
+        assert!(
+            hist.iter()
+                .any(|e| e.name == "Nova" && e.text.contains("respuesta del bot")),
+            "la respuesta del bot no quedó en el historial: {:?}",
+            hist
+        );
+    }
+
+    #[tokio::test]
+    async fn private_reply_uses_per_user_memory() {
+        // En PM el bot sí conserva el hilo privado del usuario (no el flujo
+        // público de la sala).
+        let (ctx, mut rx) = ctx_with_user("carol");
+        ctx.record_message("bob", "mensaje público", false);
+
+        let db = Database::in_memory().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let bot = engine_capture(db, seen.clone());
+        let mut cfg = bot.config_snapshot();
+        cfg.reply_by_pm = true;
+        *bot.config.write() = cfg;
+
+        bot.on_private(&ctx, "carol", "primer PM");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout primer PM")
+            .unwrap();
+        // El cooldown por usuario tiene un piso de 1s (cooldown_secs.max(1)).
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        bot.on_private(&ctx, "carol", "segundo PM");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout segundo PM")
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let msgs = seen.lock().clone();
+        assert!(
+            msgs.iter().any(|m| m.content == "primer PM"),
+            "el hilo privado debe incluir el PM anterior: {:?}",
+            msgs
+        );
+        assert!(
+            !msgs.iter().any(|m| m.content.contains("mensaje público")),
+            "el PM no debe arrastrar el flujo público: {:?}",
+            msgs
+        );
+        assert_eq!(msgs.last().map(|m| m.content.as_str()), Some("segundo PM"));
     }
 }
