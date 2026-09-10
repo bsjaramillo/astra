@@ -683,20 +683,9 @@ async fn process_handshake(
                     });
 
                     // Restaurar estados persistidos (paridad sb0t: Muzzles /
-                    // Kiddied / Lowered / Echo en disco, sobreviven reinicio).
-                    let name = user_arc.name.read().clone();
-                    if let Ok(Some(_)) = ctx.db.get_user_state(&name, "muzzle") {
-                        user_arc.muzzled.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    if let Ok(Some(_)) = ctx.db.get_user_state(&name, "lowered") {
-                        user_arc.lowered.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    if let Ok(Some(_)) = ctx.db.get_user_state(&name, "kiddy") {
-                        user_arc.kiddied.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    if let Ok(Some(text)) = ctx.db.get_user_state(&name, "echo") {
-                        *user_arc.echo_text.write() = Some(text);
-                    }
+                    // Kiddied / Lowered / Echo / PMBlock en disco, sobreviven
+                    // reconexión y reinicio). Compartido con el login web.
+                    ctx.restore_persisted_state(&user_arc);
 
                     if needs_captcha_now {
                         let user_id = user_arc.id.to_string();
@@ -749,9 +738,13 @@ async fn send_initial_state(
     // Bot fantasma
     let _ = user.send(outbound::build_userlist_bot_c(&ctx.settings.bot_name, crypto));
     // Avatar de sala (bot), si hay uno configurado (paridad `Avatars.Server`,
-    // mandado en cada login en `TCPProcessor.cs`).
+    // mandado en cada login en `TCPProcessor.cs`). Nunca debe superar el tope
+    // del canal Ares: un avatar grande desborda el buffer del cliente nativo y
+    // le desincroniza el stream (deja de ver userlist/mensajes).
     if let Some(avatar) = ctx.server_avatar.read().clone() {
-        let _ = user.send(outbound::build_avatar_c(&ctx.settings.bot_name, &avatar, crypto));
+        if avatar.len() < server_core::avatars::MAX_ARES_AVATAR {
+            let _ = user.send(outbound::build_avatar_c(&ctx.settings.bot_name, &avatar, crypto));
+        }
     }
     // Bots agente (identidades propias): solo aparecen en la userlist si
     // están activos.
@@ -777,7 +770,9 @@ async fn send_initial_state(
             // nunca ve avatares/pmsg de nadie que se conectó antes que él).
             let other_name = other.name.read().clone();
             if let Some(avatar) = other.avatar.lock().clone() {
-                let _ = user.send(outbound::build_avatar_c(&other_name, &avatar, crypto));
+                if avatar.len() < server_core::avatars::MAX_ARES_AVATAR {
+                    let _ = user.send(outbound::build_avatar_c(&other_name, &avatar, crypto));
+                }
             }
             let pmsg = other.personal_message.lock().clone();
             if !pmsg.is_empty() {

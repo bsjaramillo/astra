@@ -21,6 +21,10 @@ data_*/
 *.sqlite3
 *.log
 
+# Config local con secretos (owner_password, [github] token, supabase_key,
+# [directory] token): NUNCA se versiona. Usar astra.toml.example como plantilla.
+astra.toml
+
 # Test fixtures
 fixtures/
 

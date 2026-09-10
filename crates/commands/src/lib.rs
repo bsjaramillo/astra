@@ -2275,9 +2275,19 @@ fn handle_whisper(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
 }
 
 /// `/pmblock`: togglea el bloqueo de PMs entrantes del propio usuario.
+///
+/// El flag se persiste en `user_state` (clave = nick, efecto = "pmblock")
+/// para que sobreviva a una reconexión: el `AresUser` es por sesión y se
+/// recrea al volver a entrar a la sala (paridad con muzzle/kiddy/echo).
 fn handle_pmblock(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     let now = !user.pm_blocked.load(std::sync::atomic::Ordering::Relaxed);
     user.pm_blocked.store(now, std::sync::atomic::Ordering::Relaxed);
+    let name = user.name.read().clone();
+    if now {
+        let _ = ctx.db.set_user_state(&name, "pmblock", "1");
+    } else {
+        let _ = ctx.db.remove_user_state(&name, "pmblock");
+    }
     send_system_line(
         ctx,
         user,
@@ -7998,6 +8008,29 @@ mod tests {
         assert!(bob.is_muzzled());
         assert!(bob.muzzle_until.load(std::sync::atomic::Ordering::Relaxed) > 0);
         let _ = next_nosuch_text(&mut alice_rx); // bob notice; alice ack next
+    }
+
+    #[test]
+    fn builtin_pmblock_persists_state() {
+        let ctx = make_test_ctx();
+        let (alice, mut alice_rx) = make_test_user(1, "Alice");
+
+        assert!(ctx.db.get_user_state("Alice", "pmblock").unwrap().is_none());
+
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "pmblock", "");
+        assert!(alice.pm_blocked.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(
+            ctx.db.get_user_state("Alice", "pmblock").unwrap().as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            next_nosuch_text(&mut alice_rx),
+            "PM blocking ON. Regular users can no longer PM you."
+        );
+
+        let _ = dispatch_builtin(&ctx, &dummy_scripting(), &alice, "pmblock", "");
+        assert!(!alice.pm_blocked.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(ctx.db.get_user_state("Alice", "pmblock").unwrap().is_none());
     }
 
     #[test]

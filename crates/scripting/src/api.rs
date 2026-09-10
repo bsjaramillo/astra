@@ -2109,7 +2109,11 @@ fn user_do_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<Js
             // del cliente (el que él mandó; los scripts no lo pisan) y lo
             // difunde a la sala.
             let org = u.org_avatar.lock().clone();
-            *u.avatar.lock() = org.clone();
+            // Al canal Ares solo si entra bajo el tope (si no, rompería el
+            // stream de los clientes nativos).
+            *u.avatar.lock() = org
+                .clone()
+                .filter(|b| b.len() < server_core::avatars::MAX_ARES_AVATAR);
             broadcast_avatar_change(&app, &u, org.as_deref());
             true
         }
@@ -2243,8 +2247,10 @@ fn broadcast_avatar_change(
             let _ = tx.send(ws_msg.clone());
         } else {
             let pkt = match avatar {
-                Some(bytes) => server_core::outbound::build_avatar_c(&name, bytes, other.ares_crypto),
-                None => server_core::outbound::build_avatar_cleared_c(&name, other.ares_crypto),
+                Some(bytes) if bytes.len() < server_core::avatars::MAX_ARES_AVATAR => {
+                    server_core::outbound::build_avatar_c(&name, bytes, other.ares_crypto)
+                }
+                _ => server_core::outbound::build_avatar_cleared_c(&name, other.ares_crypto),
             };
             let _ = other.send(pkt);
         }

@@ -122,6 +122,146 @@ pub fn is_enabled(ctx: &AppContext) -> bool {
     !ctx.settings.owner_password.is_empty()
 }
 
+// ============================================================================
+// Reporte de bugs/mejoras a GitHub
+// ============================================================================
+
+/// Repo upstream fijo al que el panel reporta bugs/mejoras.
+pub const UPSTREAM_REPO: &str = "bsjaramillo/astra";
+/// API base de GitHub.
+const GITHUB_API: &str = "https://api.github.com";
+/// Máximo de issues directos por ventana (anti-abuso; el panel ya es
+/// owner-only, pero un token filtrado no debería poder spamear el repo).
+const ISSUE_MAX_PER_WINDOW: u32 = 5;
+/// Ventana del contador de issues directos.
+const ISSUE_WINDOW: Duration = Duration::from_secs(3600);
+/// Tope de longitud del título del reporte.
+pub const ISSUE_TITLE_MAX: usize = 256;
+/// Tope de longitud del cuerpo del reporte.
+pub const ISSUE_BODY_MAX: usize = 8000;
+
+/// Issues directos creados por ventana: `(contador, fin de la ventana)`.
+fn issue_attempts() -> &'static Mutex<(u32, Instant)> {
+    static A: OnceLock<Mutex<(u32, Instant)>> = OnceLock::new();
+    A.get_or_init(|| Mutex::new((0, Instant::now())))
+}
+
+/// ¿Se puede ofrecer el envío directo desde el panel? (feature habilitada y
+/// token cargado). El token NUNCA se devuelve, solo este booleano.
+pub fn github_configured(ctx: &AppContext) -> bool {
+    ctx.settings.github.enabled && !ctx.settings.github.token.trim().is_empty()
+}
+
+/// Issue creado en GitHub.
+#[derive(Debug)]
+pub struct IssueCreated {
+    /// URL web del issue.
+    pub url: String,
+    /// Número del issue dentro del repo.
+    pub number: u64,
+}
+
+/// Crea un issue en el repo upstream con el token de `[github]`.
+///
+/// Solo lo llama el router del panel (tras validar la sesión de owner). El
+/// token vive en `astra.toml`; nunca se loguea ni se embebe en el binario.
+/// Devuelve un mensaje accionable si GitHub rechaza la request.
+pub async fn create_issue(
+    ctx: &AppContext,
+    title: &str,
+    body: &str,
+) -> Result<IssueCreated, String> {
+    let cfg = &ctx.settings.github;
+    if !cfg.enabled {
+        return Err("github reporting is disabled in astra.toml".to_string());
+    }
+    let token = cfg.token.trim();
+    if token.is_empty() {
+        return Err("no github token configured in astra.toml ([github] token)".to_string());
+    }
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("title required".to_string());
+    }
+    if title.chars().count() > ISSUE_TITLE_MAX {
+        return Err(format!("title too long (max {} chars)", ISSUE_TITLE_MAX));
+    }
+    let body = body.trim();
+    if body.chars().count() > ISSUE_BODY_MAX {
+        return Err(format!("description too long (max {} chars)", ISSUE_BODY_MAX));
+    }
+
+    // Rate-limit simple por proceso.
+    {
+        let now = Instant::now();
+        let mut attempts = issue_attempts().lock();
+        if attempts.1 <= now {
+            *attempts = (0, now + ISSUE_WINDOW);
+        }
+        if attempts.0 >= ISSUE_MAX_PER_WINDOW {
+            return Err("too many reports sent, try again later".to_string());
+        }
+        attempts.0 += 1;
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("astra/{}", server_core::VERSION))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("could not create http client: {}", e))?;
+
+    let url = format!("{}/repos/{}/issues", GITHUB_API, UPSTREAM_REPO);
+    let resp = client
+        .post(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "title": title, "body": body }))
+        .send()
+        .await
+        .map_err(|e| format!("github request failed: {}", e))?;
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(map_github_error(status.as_u16(), &text));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| "github returned an unexpected response".to_string())?;
+    let html_url = parsed
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let number = parsed.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+    if html_url.is_empty() {
+        return Err("github did not return the issue url".to_string());
+    }
+    Ok(IssueCreated {
+        url: html_url,
+        number,
+    })
+}
+
+/// Traduce un status de error de GitHub a un mensaje accionable.
+fn map_github_error(status: u16, body: &str) -> String {
+    match status {
+        401 => "github rejected the token (401): check [github] token in astra.toml".to_string(),
+        403 => {
+            "github denied the request (403): the token lacks Issues:write or hit a rate limit"
+                .to_string()
+        }
+        404 => "github repo not found (404): check the token's repo access".to_string(),
+        410 => "issues are disabled for this repository".to_string(),
+        422 => "github rejected the report (422): invalid title or body".to_string(),
+        _ => {
+            let snippet: String = body.chars().take(200).collect();
+            format!("github error {}: {}", status, snippet)
+        }
+    }
+}
+
 /// Ejecuta un comando slash como Owner sintético y captura las líneas de
 /// respuesta (PMs del bot). `line` puede venir con o sin `/` inicial.
 pub fn run_command(ctx: &Arc<AppContext>, line: &str) -> Vec<String> {
@@ -473,6 +613,14 @@ pub fn state_json(ctx: &AppContext) -> String {
     }
     s.push(']');
 
+    // Reporte a GitHub: el panel necesita saber si puede ofrecer el envío
+    // directo. El token NUNCA sale aquí.
+    s.push_str(&format!(
+        ",\"github\":{{\"configured\":{},\"repo\":\"{}\"}}",
+        github_configured(ctx),
+        UPSTREAM_REPO
+    ));
+
     s.push('}');
     s
 }
@@ -521,9 +669,8 @@ pub fn remove_trusted_proxy(ctx: &AppContext, ip: &str) -> bool {
 /// Kinds válidos de avatar administrable (sala/default).
 const AVATAR_KINDS: &[&str] = &["server", "default"];
 /// Tamaño máximo aceptado para un avatar subido (64 KiB). sb0t reescala a
-/// 48x48/JPEG-q69 en el cliente GUI; aquí no reescalamos (evita sumar una
-/// dependencia de procesamiento de imágenes), así que en su lugar ponemos
-/// un techo de tamaño para no dejar subir archivos gigantes.
+/// 48x48/JPEG-q69 (`Avatars.Scale` de sb0t). Aquí aceptamos la imagen original
+/// hasta este techo y la escalamos antes de guardarla/difundirla.
 const MAX_AVATAR_BYTES: usize = 65_536;
 
 /// ¿Los bytes empiezan con la firma de un formato de imagen que los clientes
@@ -554,15 +701,24 @@ pub fn set_avatar(ctx: &AppContext, kind: &str, bytes: Vec<u8>) -> Result<(), St
     if !is_supported_image(&bytes) {
         return Err("invalid image: expected PNG, JPEG or GIF".to_string());
     }
+    // El avatar viaja como bloque crudo por el canal Ares y los clientes
+    // nativos tienen un buffer de ~4 KB: hay que escalarlo SIEMPRE a 48×48
+    // JPEG (paridad `Avatars.Scale`), como hace sb0t. Sin esto, un PNG/JPEG
+    // grande (p.ej. el logo default de 11 KB) desborda el buffer del cliente
+    // y le desincroniza el stream: deja de ver la userlist y los mensajes.
+    let scaled = server_core::avatars::scale_room_avatar(&bytes);
+    if scaled.is_empty() {
+        return Err("invalid image: could not decode/scale".to_string());
+    }
     let dir = std::path::Path::new(&ctx.settings.data_dir).join("avatars");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {}", e))?;
-    std::fs::write(dir.join(kind), &bytes).map_err(|e| format!("write failed: {}", e))?;
+    std::fs::write(dir.join(kind), &scaled).map_err(|e| format!("write failed: {}", e))?;
 
     let lock = if kind == "server" { &ctx.server_avatar } else { &ctx.default_avatar };
-    *lock.write() = Some(bytes.clone());
+    *lock.write() = Some(scaled.clone());
 
     if kind == "server" {
-        broadcast_server_avatar(ctx, &bytes);
+        broadcast_server_avatar(ctx, &scaled);
     }
     Ok(())
 }
@@ -813,6 +969,14 @@ mod tests {
         Arc::new(AppContext::new(settings, Database::in_memory().unwrap()))
     }
 
+    fn ctx_with_github(token: &str, enabled: bool) -> Arc<AppContext> {
+        let mut settings = Settings::default();
+        settings.owner_password = "secret".to_string();
+        settings.github.token = token.to_string();
+        settings.github.enabled = enabled;
+        Arc::new(AppContext::new(settings, Database::in_memory().unwrap()))
+    }
+
     /// IP única por test: el contador de intentos fallidos es un estático
     /// global compartido por todos los tests del binario, así que cada uno usa
     /// su propia IP para no interferir con los demás.
@@ -997,5 +1161,75 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&state_json(&ctx)).expect("valid json");
         assert_eq!(v["server"]["updateError"], "connection refused");
+    }
+
+    /// El envío directo solo se ofrece con la feature habilitada Y token.
+    #[test]
+    fn github_configured_requires_enabled_and_token() {
+        assert!(!github_configured(&ctx_with_github("", true)));
+        assert!(!github_configured(&ctx_with_github("   ", true)));
+        assert!(!github_configured(&ctx_with_github("ghp_x", false)));
+        assert!(github_configured(&ctx_with_github("ghp_x", true)));
+    }
+
+    /// `create_issue` valida todo lo local ANTES de tocar la red. Sin token,
+    /// sin título, o con longitudes fuera de rango, no debe intentar el HTTP.
+    /// (Los casos que sí pasan validación no se prueban acá para no pegarle a
+    /// GitHub ni gastar el rate-limit global.)
+    #[tokio::test]
+    async fn create_issue_validates_before_network() {
+        let no_token = ctx_with_github("", true);
+        assert!(create_issue(&no_token, "t", "b")
+            .await
+            .unwrap_err()
+            .contains("no github token"));
+
+        let ctx = ctx_with_github("ghp_x", true);
+        assert!(create_issue(&ctx, "   ", "b")
+            .await
+            .unwrap_err()
+            .contains("title required"));
+
+        let long_title = "a".repeat(ISSUE_TITLE_MAX + 1);
+        assert!(create_issue(&ctx, &long_title, "b")
+            .await
+            .unwrap_err()
+            .contains("title too long"));
+
+        let long_body = "a".repeat(ISSUE_BODY_MAX + 1);
+        assert!(create_issue(&ctx, "t", &long_body)
+            .await
+            .unwrap_err()
+            .contains("too long"));
+
+        let disabled = ctx_with_github("ghp_x", false);
+        assert!(create_issue(&disabled, "t", "b")
+            .await
+            .unwrap_err()
+            .contains("disabled"));
+    }
+
+    #[test]
+    fn github_errors_are_actionable() {
+        assert!(map_github_error(401, "").contains("token"));
+        assert!(map_github_error(403, "").contains("Issues:write"));
+        assert!(map_github_error(404, "").contains("repo"));
+        assert!(map_github_error(422, "").contains("invalid"));
+        assert!(map_github_error(500, "boom").contains("500"));
+    }
+
+    /// El STATE expone si el envío directo está disponible y el repo, pero
+    /// NUNCA el token.
+    #[test]
+    fn state_json_exposes_github_without_token() {
+        let v: serde_json::Value =
+            serde_json::from_str(&state_json(&ctx_with_github("ghp_secret", true))).unwrap();
+        assert_eq!(v["github"]["configured"], true);
+        assert_eq!(v["github"]["repo"], UPSTREAM_REPO);
+        assert!(!state_json(&ctx_with_github("ghp_secret", true)).contains("ghp_secret"));
+
+        let v: serde_json::Value =
+            serde_json::from_str(&state_json(&ctx_with_owner("secret"))).unwrap();
+        assert_eq!(v["github"]["configured"], false);
     }
 }

@@ -32,3 +32,4 @@ sha1 = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 scopeguard = { workspace = true }
+reqwest = { workspace = true }

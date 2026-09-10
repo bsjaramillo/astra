@@ -101,6 +101,10 @@ pub struct Settings {
     #[serde(default = "default_update_check")]
     pub update_check: bool,
 
+    /// Reporte de bugs/mejoras al repo upstream desde el panel de admin.
+    #[serde(default)]
+    pub github: GithubConfig,
+
     /// Auto-owner para quien entra "desde el propio servidor" (paridad
     /// `Helpers.IsLocalHost` de sb0t, ajuste `local_host`).
     ///
@@ -302,6 +306,36 @@ impl Default for DirectoryConfig {
     }
 }
 
+/// Reporte de bugs/mejoras al repo upstream de Astra desde el panel de admin.
+///
+/// El panel siempre puede abrir una URL pre-rellenada de GitHub (que exige que
+/// quien la envíe tenga cuenta). Con `token` configurado, además puede crear
+/// el issue server-side y el admin no necesita cuenta de GitHub.
+///
+/// El token es un PAT (preferentemente *fine-grained*) con permiso
+/// `Issues: write` sobre el repo upstream. **Nunca** se embebe en el binario:
+/// vive en `astra.toml` y lo provee el dueño de la sala.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GithubConfig {
+    /// Habilitar el reporte directo desde el panel. Es un interruptor maestro:
+    /// apagado oculta el envío server-side aunque haya token. Sigue haciendo
+    /// falta un `token` no vacío para ofrecerlo.
+    pub enabled: bool,
+    /// Personal Access Token con `Issues: write` sobre el repo upstream.
+    /// Vacío = solo se ofrece la URL pre-rellenada (sin creación server-side).
+    pub token: String,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            token: String::new(),
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -327,6 +361,7 @@ impl Default for Settings {
             live_scripts_endpoint: default_live_scripts_endpoint(),
             seed_url: default_seed_url(),
             update_check: true,
+            github: GithubConfig::default(),
             local_host: false,
             server_ip: String::new(),
             script_in_room: false,
@@ -468,6 +503,23 @@ mod tests {
         // menos así de largo para no caer en el camino del SHA1.
         assert_eq!(a.guid.len(), 32);
         assert!(a.guid.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// `[github]` es opcional en el TOML: sin sección, defaults sanos
+    /// (habilitado, sin token) y el token se lee si está.
+    #[test]
+    fn github_config_defaults_and_parses() {
+        let s = Settings::default();
+        assert!(s.github.enabled);
+        assert!(s.github.token.is_empty());
+
+        let parsed: Settings = toml::from_str("[github]\ntoken = \"ghp_x\"\n").unwrap();
+        assert_eq!(parsed.github.token, "ghp_x");
+        assert!(parsed.github.enabled);
+
+        let disabled: Settings =
+            toml::from_str("[github]\nenabled = false\ntoken = \"ghp_x\"\n").unwrap();
+        assert!(!disabled.github.enabled);
     }
 
     #[test]

@@ -602,14 +602,20 @@ impl AppContext {
         // Si el admin no subió un avatar propio, se usa el logo de Astra como
         // default: la variante naranja ("Principal") para el bot/sala y la
         // variante espacial para los usuarios sin avatar.
-        let server_avatar = RwLock::new(Some(
-            std::fs::read(avatars_dir.join("server"))
-                .unwrap_or_else(|_| DEFAULT_ROOM_AVATAR.to_vec()),
-        ));
-        let default_avatar = RwLock::new(Some(
-            std::fs::read(avatars_dir.join("default"))
-                .unwrap_or_else(|_| DEFAULT_USER_AVATAR.to_vec()),
-        ));
+        let server_avatar = RwLock::new({
+            let scaled = crate::avatars::scale_room_avatar(
+                &std::fs::read(avatars_dir.join("server"))
+                    .unwrap_or_else(|_| DEFAULT_ROOM_AVATAR.to_vec()),
+            );
+            (!scaled.is_empty()).then_some(scaled)
+        });
+        let default_avatar = RwLock::new({
+            let scaled = crate::avatars::scale_room_avatar(
+                &std::fs::read(avatars_dir.join("default"))
+                    .unwrap_or_else(|_| DEFAULT_USER_AVATAR.to_vec()),
+            );
+            (!scaled.is_empty()).then_some(scaled)
+        });
         let geoip = Arc::new(GeoIp::load(std::path::Path::new(&settings.data_dir)));
         let (link_events, _) = broadcast::channel(1024);
         Self {
@@ -963,6 +969,32 @@ impl AppContext {
             Ok(Some(text)) => *user.custom_name.write() = Some(text),
             Ok(None) => {}
             Err(e) => tracing::warn!("no se pudo leer el custom name de '{}': {}", name, e),
+        }
+    }
+
+    /// Restaura los estados de usuario persistidos en disco que acaban de
+    /// entrar: `muzzle`, `lowered`, `kiddy`, `echo` y `pmblock` (paridad sb0t:
+    /// viven en `user_state` por nick y sobreviven a una reconexión o reinicio).
+    /// Lo llaman los logins TCP y web por igual, para que el estado no dependa
+    /// del tipo de cliente.
+    pub fn restore_persisted_state(&self, user: &crate::user_pool::AresUser) {
+        use std::sync::atomic::Ordering;
+
+        let name = user.name.read().clone();
+        if let Ok(Some(_)) = self.db.get_user_state(&name, "muzzle") {
+            user.muzzled.store(true, Ordering::Relaxed);
+        }
+        if let Ok(Some(_)) = self.db.get_user_state(&name, "lowered") {
+            user.lowered.store(true, Ordering::Relaxed);
+        }
+        if let Ok(Some(_)) = self.db.get_user_state(&name, "kiddy") {
+            user.kiddied.store(true, Ordering::Relaxed);
+        }
+        if let Ok(Some(text)) = self.db.get_user_state(&name, "echo") {
+            *user.echo_text.write() = Some(text);
+        }
+        if let Ok(Some(_)) = self.db.get_user_state(&name, "pmblock") {
+            user.pm_blocked.store(true, Ordering::Relaxed);
         }
     }
 
@@ -1418,6 +1450,24 @@ mod tests {
         assert!(!ctx.is_local_host(IpAddr::V4(Ipv4Addr::LOCALHOST)));
     }
 
+    /// El avatar de sala/default que se manda a los clientes Ares debe quedar
+    /// SIEMPRE bajo el tope del canal: los assets default son PNG de ~11 KB y
+    /// mandarlos crudos desincroniza a los clientes nativos (dejan de ver la
+    /// userlist y los mensajes).
+    #[test]
+    fn default_avatars_fit_ares_channel() {
+        let ctx = make_ctx();
+        for avatar in [ctx.server_avatar.read().clone(), ctx.default_avatar.read().clone()] {
+            let avatar = avatar.expect("debe haber avatar default");
+            assert!(
+                avatar.len() < crate::avatars::MAX_ARES_AVATAR,
+                "avatar default de {} bytes >= {}",
+                avatar.len(),
+                crate::avatars::MAX_ARES_AVATAR
+            );
+        }
+    }
+
     #[test]
     fn local_host_accepts_loopback_and_declared_ip_only() {
         let ctx = make_ctx_with(|s| {
@@ -1484,6 +1534,38 @@ mod tests {
         *u.name.write() = name.to_string();
         ctx.user_pool.add(std::sync::Arc::new(u));
         (ctx.user_pool.get(id).unwrap(), rx)
+    }
+
+    /// Restaura los estados persistidos de un usuario: TODOS los efectos
+    /// guardados en `user_state` (muzzle/lowered/kiddy/echo/pmblock) deben
+    /// reaplicarse al entrar, sin importar el tipo de cliente.
+    #[test]
+    fn restore_persisted_state_applies_all_flags() {
+        let ctx = make_ctx();
+        let alice = add_user(&ctx, 1, "Alice");
+        ctx.db.set_user_state("Alice", "muzzle", "1").unwrap();
+        ctx.db.set_user_state("Alice", "lowered", "1").unwrap();
+        ctx.db.set_user_state("Alice", "kiddy", "1").unwrap();
+        ctx.db.set_user_state("Alice", "echo", "hola").unwrap();
+        ctx.db.set_user_state("Alice", "pmblock", "1").unwrap();
+
+        ctx.restore_persisted_state(&alice);
+
+        assert!(alice.is_muzzled());
+        assert!(alice.lowered.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(alice.kiddied.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(alice.echo_text.read().as_deref(), Some("hola"));
+        assert!(alice.pm_blocked.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Sin estado guardado, `restore_persisted_state` no debe activar nada.
+    #[test]
+    fn restore_persisted_state_defaults_off() {
+        let ctx = make_ctx();
+        let bob = add_user(&ctx, 2, "Bob");
+        ctx.restore_persisted_state(&bob);
+        assert!(!bob.is_muzzled());
+        assert!(!bob.pm_blocked.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     /// El custom name debe REEMPLAZAR al nick en el chat público: la sala

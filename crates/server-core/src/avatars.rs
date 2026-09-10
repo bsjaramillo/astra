@@ -15,9 +15,11 @@ pub const MAX_ARES_AVATAR: usize = 4064;
 
 /// Escala y recomprime un avatar para el canal Ares nativo (paridad
 /// `AresClient.Scale` de sb0t): si alguna dimensión supera `AVATAR_MAX_PX`
-/// (384), lo reescala para caber en 384×384 y lo codifica como JPEG. Retorna
-/// el JPEG resultante, o el original si no se puede decodificar/escalar
-/// (para no romper la entrega del avatar).
+/// (384), lo reescala para caber en 384×384 y lo codifica como JPEG. Además
+/// garantiza que el resultado quede **siempre** bajo `MAX_ARES_AVATAR`
+/// (encogiendo de a poco si hace falta), porque un avatar más grande desborda
+/// el buffer de los clientes nativos. Retorna el original si no se puede
+/// decodificar.
 pub fn scale_avatar(bytes: &[u8]) -> Vec<u8> {
     const MAX_PX: u32 = 384;
     const JPEG_QUALITY: u8 = 70;
@@ -25,18 +27,7 @@ pub fn scale_avatar(bytes: &[u8]) -> Vec<u8> {
         return bytes.to_vec();
     };
     let (w, h) = (img.width(), img.height());
-    if w <= MAX_PX && h <= MAX_PX {
-        // Ya entra: solo re-comprimir a JPEG si no lo es (paridad sb0t, que
-        // siempre pasa por JPEG).
-        if !bytes.starts_with(&[0xFF, 0xD8]) {
-            let mut out = Vec::new();
-            if img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).is_ok() {
-                return out;
-            }
-        }
-        return bytes.to_vec();
-    }
-    let scale = (MAX_PX as f32 / w.max(h) as f32).max(0.05);
+    let scale = (MAX_PX as f32 / w.max(h) as f32).min(1.0);
     let mut nw = (w as f32 * scale).round().max(1.0) as u32;
     let mut nh = (h as f32 * scale).round().max(1.0) as u32;
     // Re-encodea encogiéndolo hasta entrar en el tope del canal Ares (si no
@@ -45,17 +36,44 @@ pub fn scale_avatar(bytes: &[u8]) -> Vec<u8> {
         let resized = img.resize(nw, nh, image::imageops::FilterType::Triangle);
         let mut out = Vec::new();
         let mut cursor = std::io::Cursor::new(&mut out);
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, JPEG_QUALITY);
-        if resized.write_with_encoder(encoder).is_ok() {
-            if out.len() < MAX_ARES_AVATAR || nw <= 48 || nh <= 48 {
-                return out;
-            }
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, JPEG_QUALITY);
+        if resized.write_with_encoder(encoder).is_ok()
+            && (out.len() < MAX_ARES_AVATAR || nw <= 48 || nh <= 48)
+        {
+            return out;
         }
         nw = (nw as f32 * 0.75).round().max(1.0) as u32;
         nh = (nh as f32 * 0.75).round().max(1.0) as u32;
         if nw < 16 || nh < 16 {
             return bytes.to_vec();
         }
+    }
+}
+
+/// Escala el avatar de **sala/bot** y el **default** al formato que usa sb0t
+/// (`Avatars.Scale`): 48×48 JPEG calidad 69.
+///
+/// Es obligatorio pasarlo por aquí antes de mandarlo a clientes Ares nativos:
+/// el protocolo Ares manda el avatar como bloque crudo y los clientes tienen
+/// un buffer de ~4096 bytes. Un PNG/JPEG grande (p.ej. los assets default de
+/// 11 KB) desborda ese buffer y **desincroniza el stream del cliente**: deja
+/// de ver la userlist y todos los mensajes, sin desconectarse. sb0t escala
+/// siempre (`Avatars.UpdateServerAvatar`/`UpdateDefaultAvatar`).
+pub fn scale_room_avatar(bytes: &[u8]) -> Vec<u8> {
+    let Ok(img) = image::load_from_memory(bytes) else {
+        // No se pudo decodificar: no arriesgamos a mandar algo que rompa el
+        // stream de los clientes nativos.
+        return Vec::new();
+    };
+    // sb0t estira la imagen al cuadrado 48×48 (DrawImage a un rect fijo).
+    let resized = img.resize_exact(48, 48, image::imageops::FilterType::CatmullRom);
+    let mut out = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut out);
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 69);
+    if resized.write_with_encoder(encoder).is_ok() && out.len() < MAX_ARES_AVATAR {
+        out
+    } else {
+        Vec::new()
     }
 }
 
@@ -131,5 +149,31 @@ mod tests {
     fn garbage_bytes_return_unchanged() {
         let junk = vec![0x00, 0x01, 0x02, 0xFF];
         assert_eq!(scale_avatar(&junk), junk);
+    }
+
+    /// El avatar de sala/default SIEMPRE debe quedar bajo el tope del canal
+    /// Ares: los assets default (256×256 PNG, ~11 KB) lo superan si se mandan
+    /// crudos y rompen el stream de los clientes nativos.
+    #[test]
+    fn room_avatar_scales_default_assets_under_ares_max() {
+        for asset in [
+            crate::app::DEFAULT_ROOM_AVATAR,
+            crate::app::DEFAULT_USER_AVATAR,
+        ] {
+            let scaled = scale_room_avatar(asset);
+            assert!(!scaled.is_empty(), "el asset default debe decodificar");
+            assert!(
+                scaled.len() < MAX_ARES_AVATAR,
+                "avatar de sala {} bytes >= {}",
+                scaled.len(),
+                MAX_ARES_AVATAR
+            );
+            assert!(scaled.starts_with(&[0xFF, 0xD8]), "debe ser JPEG");
+        }
+    }
+
+    #[test]
+    fn room_avatar_rejects_garbage() {
+        assert!(scale_room_avatar(&[0x00, 0x01, 0x02]).is_empty());
     }
 }

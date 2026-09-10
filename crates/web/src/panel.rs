@@ -428,6 +428,19 @@ const I18N = {
     bot_saved:"Bot guardado.",
     bot_select:"Bot a editar", bot_none:"Sin bots — creá uno abajo", bot_new:"Nuevo bot", bot_del:"Eliminar bot",
     bot_del_confirm:"¿Eliminar este bot?", bot_deleted:"Bot eliminado.", bot_identity:"Identidad",
+
+    nav_soporte:"Soporte",
+    sup_h:"Soporte", sup_sub:"Reportá un problema o sugerí una mejora para Astra.",
+    sup_note:"El reporte va al repositorio oficial de Astra. Solo se envía el título y la descripción que escribas (ningún dato del servidor ni de los usuarios).",
+    sup_kind_label:"Tipo", sup_kind_bug:"Problema (bug)", sup_kind_idea:"Mejora / idea",
+    sup_title_label:"Título", sup_title_ph:"Resumen corto del problema",
+    sup_desc_label:"Descripción", sup_desc_ph:"Qué pasó, qué esperabas que pasara y cómo reproducirlo.",
+    sup_open:"Abrir en GitHub", sup_send:"Enviar directamente",
+    sup_open_hint:"Se abrirá GitHub con el reporte pre-rellenado; necesitás una cuenta para enviarlo.",
+    sup_direct_hint:"El envío directo está disponible porque hay un token de GitHub configurado.",
+    sup_no_token:"Para enviar sin cuenta de GitHub, configurá <code>[github] token</code> en astra.toml.",
+    sup_title_required:"Escribí un título.",
+    sup_sending:"Enviando…", sup_ok:"Reporte enviado:", sup_err:"no se pudo enviar",
   },
   en:{
     chrome_refresh:"Refresh", chrome_logout:"Log out", chrome_menu:"Menu",
@@ -599,6 +612,19 @@ const I18N = {
     bot_saved:"Bot saved.",
     bot_select:"Bot to edit", bot_none:"No bots — create one below", bot_new:"New bot", bot_del:"Delete bot",
     bot_del_confirm:"Delete this bot?", bot_deleted:"Bot deleted.", bot_identity:"Identity",
+
+    nav_soporte:"Support",
+    sup_h:"Support", sup_sub:"Report a problem or suggest an improvement for Astra.",
+    sup_note:"The report goes to the official Astra repository. Only the title and description you write are sent (no server or user data).",
+    sup_kind_label:"Type", sup_kind_bug:"Problem (bug)", sup_kind_idea:"Improvement / idea",
+    sup_title_label:"Title", sup_title_ph:"Short summary of the problem",
+    sup_desc_label:"Description", sup_desc_ph:"What happened, what you expected, and how to reproduce it.",
+    sup_open:"Open in GitHub", sup_send:"Send directly",
+    sup_open_hint:"GitHub will open with the report pre-filled; you need an account to submit it.",
+    sup_direct_hint:"Direct sending is available because a GitHub token is configured.",
+    sup_no_token:"To send without a GitHub account, set <code>[github] token</code> in astra.toml.",
+    sup_title_required:"Please write a title.",
+    sup_sending:"Sending…", sup_ok:"Report sent:", sup_err:"could not send",
   }
 };
 function t(k, ...args){
@@ -677,11 +703,14 @@ const TABS = [
     {id:"plantillas", icon:"💬", k:"nav_plantillas"},
     {id:"config", icon:"📝", k:"nav_config"},
     {id:"consola", icon:"⌨️", k:"nav_consola"},
+    // Reporte a GitHub: OCULTO por ahora (el módulo sigue en el código).
+    // Para mostrarlo, descomentar la línea de abajo y reiniciar el server.
+    // {id:"soporte", icon:"🛟", k:"nav_soporte"},
   ]},
 ];
 // Pestañas que NO se auto-refrescan (tienen formularios que se borrarían al
 // re-renderizar mientras el admin escribe).
-const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","avatares","motd","plantillas","bot"]);
+const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","avatares","motd","plantillas","bot","soporte"]);
 
 /* ============================ helpers ============================ */
 async function api(path, opts={}) {
@@ -789,7 +818,7 @@ function render(){
     sala:renderSala, motd:renderMotd, avatares:renderAvatares, servidor:renderServidor,
     enlace:renderEnlace, seguridad:renderSeguridad, proxies:renderProxies,
     permisos:renderPermisos, plantillas:renderPlantillas, config:renderConfig, consola:renderConsola,
-    bot:renderBot
+    bot:renderBot, soporte:renderSoporte
   };
   document.getElementById("view").innerHTML = (map[TAB] || renderInicio)();
   wire();
@@ -1376,6 +1405,32 @@ async function saveSettings(){
   else { const j=await r.json().catch(()=>({error:"error"})); toast(t("err_prefix")+(j.error||t("err_save")),"err"); }
 }
 
+/* ---------------- Soporte (reportes a GitHub) ---------------- */
+function renderSoporte(){
+  const gh = STATE.github||{};
+  const direct = !!gh.configured;
+  const hint = direct ? t("sup_direct_hint") : t("sup_no_token");
+  return `<div class="cardhead"><h2>${t("sup_h")}</h2><p class="sub">${t("sup_sub")}</p></div>
+    <div class="note">${t("sup_note")}</div>
+    <div class="card">
+      <label class="fld"><span>${t("sup_kind_label")}</span>
+        <select id="supKind"><option value="bug">${t("sup_kind_bug")}</option><option value="idea">${t("sup_kind_idea")}</option></select></label>
+      <label class="fld"><span>${t("sup_title_label")}</span><input id="supTitle" maxlength="256" placeholder="${t("sup_title_ph")}"></label>
+      <label class="fld"><span>${t("sup_desc_label")}</span><textarea id="supDesc" rows="8" placeholder="${t("sup_desc_ph")}"></textarea></label>
+      <div class="rowend">
+        <button class="btn" id="supOpen">${t("sup_open")}</button>
+        ${direct?`<button class="btn primary" id="supSend">${t("sup_send")}</button>`:''}
+      </div>
+      <p class="sub" style="margin:12px 0 0">${hint}</p>
+      <p class="sub" style="margin:6px 0 0">${t("sup_open_hint")}</p>
+      <p class="sub" id="supMsg" style="margin:8px 0 0"></p>
+    </div>`;
+}
+function supBody(kind, desc){
+  const type = kind==="idea" ? "Idea / Improvement" : "Bug";
+  return "**Type:** "+type+"\n\n"+(desc||"");
+}
+
 let CONSOLE_LOG="";
 function renderConsola(){
   return `<div class="cardhead"><h2>${t("con_h")}</h2><p class="sub">${t("con_sub")}</p></div>
@@ -1465,6 +1520,34 @@ function wire(){
     loadAvatarPreview("server"); loadAvatarPreview("default");
     g("avUpdateServer").onclick=()=>uploadAvatar("server","avFileServer");
     g("avUpdateDefault").onclick=()=>uploadAvatar("default","avFileDefault");
+  }
+  if(g("supOpen")||g("supSend")){
+    const compose=()=>({
+      kind:g("supKind").value,
+      title:g("supTitle").value.trim(),
+      desc:g("supDesc").value.trim(),
+    });
+    if(g("supOpen")) g("supOpen").onclick=()=>{
+      const {kind,title,desc}=compose();
+      if(!title){ toast(t("sup_title_required"),"err"); return; }
+      const repo=(STATE.github&&STATE.github.repo)||"bsjaramillo/astra";
+      const url="https://github.com/"+repo+"/issues/new?title="+encodeURIComponent(title)+"&body="+encodeURIComponent(supBody(kind,desc));
+      window.open(url,"_blank","noopener");
+    };
+    if(g("supSend")) g("supSend").onclick=async()=>{
+      const {kind,title,desc}=compose();
+      if(!title){ toast(t("sup_title_required"),"err"); return; }
+      const msg=g("supMsg"); msg.textContent=t("sup_sending");
+      const r=await api("/admin/issue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title,body:supBody(kind,desc)})});
+      const j=await r.json().catch(()=>({error:"error"}));
+      if(r.ok&&j.url){
+        msg.innerHTML=t("sup_ok")+' <a href="'+esc(j.url)+'" target="_blank" rel="noopener">'+esc(j.url)+"</a>";
+        toast(t("sup_ok"),"ok");
+      } else {
+        msg.textContent="";
+        toast(t("err_prefix")+(j.error||t("sup_err")),"err");
+      }
+    };
   }
 }
 

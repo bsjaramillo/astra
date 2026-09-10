@@ -118,6 +118,21 @@ guid = ""
 # supabase_url = "https://xxxx.supabase.co"
 # supabase_key = "clave-anon"
 
+# --- Reporte de bugs/mejoras a GitHub --------------------------------------
+# El panel /admin (pestaña "Soporte") puede reportar bugs o ideas al repo
+# upstream. Siempre ofrece "Abrir en GitHub" con título y cuerpo pre-rellenados
+# (esa vía exige que quien lo envía tenga cuenta de GitHub).
+#
+# Con un token configurado, además ofrece "Enviar directamente": la sala crea
+# el issue server-side y el admin NO necesita cuenta de GitHub. El token lo
+# provee el dueño de la sala y nunca se embebe en el binario.
+#
+# Usá un Personal Access Token *fine-grained* con permiso "Issues: write" SOLO
+# sobre el repo de Astra. No uses un token de cuenta con permisos amplios.
+[github]
+enabled = true
+token = ""
+
 # --- Directorio público de salas -------------------------------------------
 
 # Anunciar esta sala en el directorio web, para que se pueda encontrar desde un

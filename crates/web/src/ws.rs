@@ -375,6 +375,24 @@ async fn handle_admin_route(
                 }
             }
         }
+        (m, "/admin/issue") if m.eq_ignore_ascii_case("POST") => {
+            let title = json_field(&req.body, "title").unwrap_or_default();
+            let body = json_field(&req.body, "body").unwrap_or_default();
+            match crate::admin::create_issue(ctx, &title, &body).await {
+                Ok(created) => {
+                    let out = format!(
+                        "{{\"ok\":true,\"url\":\"{}\",\"number\":{}}}",
+                        json_escape(&created.url),
+                        created.number
+                    );
+                    send_http_json(stream, 200, &out).await?;
+                }
+                Err(e) => {
+                    let out = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &out).await?;
+                }
+            }
+        }
         (m, "/admin/proxy/add") if m.eq_ignore_ascii_case("POST") => {
             let ip = json_field(&req.body, "ip").unwrap_or_default();
             let body = format!("{{\"ok\":{}}}", crate::admin::add_trusted_proxy(ctx, &ip));

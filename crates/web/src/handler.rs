@@ -667,10 +667,19 @@ async fn ws_handshake_login(
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&login.avatar_b64) {
             *user.full_avatar.lock() = Some(bytes.clone());
             // `avatar` (canal Ares) escalado a ≤384px JPEG (paridad Scale).
-            *user.avatar.lock() = Some(server_core::avatars::scale_avatar(&bytes));
+            // Si aun así supera el tope del canal Ares no se pone: mandarlo
+            // rompería el stream de los clientes nativos.
+            let scaled = server_core::avatars::scale_avatar(&bytes);
+            *user.avatar.lock() = (scaled.len() < server_core::avatars::MAX_ARES_AVATAR)
+                .then_some(scaled);
             *user.org_avatar.lock() = Some(bytes);
         }
     }
+
+    // Restaurar estados persistidos (muzzle/lowered/kiddy/echo/pmblock):
+    // comparten la DB con el login TCP, así que el estado no depende del
+    // tipo de cliente.
+    ctx.restore_persisted_state(&user);
 
     let user_arc = Arc::new(user);
     ctx.user_pool.add(user_arc.clone());
@@ -1301,7 +1310,10 @@ fn handle_ws_avatar(
         );
     }
     *user.full_avatar.lock() = Some(bytes.clone());
-    *user.avatar.lock() = Some(scaled.clone());
+    // Solo al canal Ares si entra bajo el tope (si no, rompería el stream de
+    // los clientes nativos); los web igual reciben el avatar completo.
+    *user.avatar.lock() = (scaled.len() < server_core::avatars::MAX_ARES_AVATAR)
+        .then(|| scaled.clone());
     *user.org_avatar.lock() = Some(bytes);
     user.avatar_received.store(true, std::sync::atomic::Ordering::Relaxed);
 
