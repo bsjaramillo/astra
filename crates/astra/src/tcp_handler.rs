@@ -470,6 +470,25 @@ impl RawPacket {
     }
 }
 
+/// Manda los paquetes de bienvenida al cliente que acaba de loguearse:
+/// el CryptoKey (si negoció cifrado), el LoginAck y MyFeatures.
+///
+/// Devuelve `Err` si el canal del cliente ya está cerrado (el writer salió
+/// porque el socket murió). El caller debe entonces **remover al usuario del
+/// pool**: si no, queda un fantasma en la userlist (ver `process_handshake`).
+fn send_welcome(
+    tx: &mpsc::UnboundedSender<Bytes>,
+    user: &server_core::user_pool::AresUser,
+    room_name: &str,
+) -> anyhow::Result<()> {
+    if let Some(crypto) = user.ares_crypto {
+        tx.send(build_crypto_key(&crypto, &user.guid))?;
+    }
+    tx.send(build_login_ack(user, room_name))?;
+    tx.send(build_my_features(user))?;
+    Ok(())
+}
+
 /// Procesa el handshake: lee el primer paquete, parsea el login,
 /// valida, y registra al usuario. Retorna `Some(Arc<AresUser>)` en éxito.
 async fn process_handshake(
@@ -669,13 +688,25 @@ async fn process_handshake(
 
                     // Cliente cifrado: primero el CryptoKey (ofuscado con el
                     // GUID); a partir de aquí todos los strings van cifrados.
-                    if let Some(crypto) = user_arc.ares_crypto {
-                        tx.send(build_crypto_key(&crypto, &user_arc.guid))?;
+                    //
+                    // Los paquetes de bienvenida se mandan juntos y, si alguno
+                    // falla (el cliente se cayó justo tras el login y el writer
+                    // ya cerró su canal), se REMUEVE al usuario del pool. Sin
+                    // esto quedaba un fantasma: seguía en la userlist que
+                    // reciben los que entran después, aunque nunca llegó a
+                    // anunciarse ni a estar conectado (bug "estaba en lista
+                    // pero no estaba conectado").
+                    if let Err(e) = send_welcome(&tx, &user_arc, &ctx.settings.room_name) {
+                        warn!(
+                            "handshake de '{}' (id={}) abortado al enviar la bienvenida: {} — removido del pool",
+                            user_arc.name.read(),
+                            id,
+                            e
+                        );
+                        ctx.user_pool.remove(id);
+                        ctx.stats.on_user_part();
+                        return Ok(None);
                     }
-
-                    // Paquetes de bienvenida (LoginAck + MyFeatures)
-                    tx.send(build_login_ack(&user_arc, &ctx.settings.room_name))?;
-                    tx.send(build_my_features(&user_arc))?;
 
                     // Disparar evento LoginGranted al scripting
                     scripting.dispatch(astra_scripting::ScriptEvent::LoginGranted {
@@ -2348,6 +2379,26 @@ mod tests {
         let mut w = PacketWriter::with_msg(TcpMsg::Public);
         w.write_string_nt(text).ok();
         Bytes::copy_from_slice(&w.into_bytes())
+    }
+
+    /// Si el canal del cliente ya está cerrado, la bienvenida falla y el
+    /// caller puede remover al usuario del pool (evita el fantasma).
+    #[test]
+    fn send_welcome_fails_when_channel_is_closed() {
+        let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
+        drop(rx);
+        let (user, _) = make_user(1, "Alice", ILevel::Regular);
+        assert!(send_welcome(&tx, &user, "Sala").is_err());
+    }
+
+    /// Con el canal abierto, manda LoginAck y MyFeatures en orden (sin crypto).
+    #[test]
+    fn send_welcome_enqueues_ack_and_features() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
+        let (user, _) = make_user(1, "Alice", ILevel::Regular);
+        send_welcome(&tx, &user, "Sala").unwrap();
+        assert_eq!(rx.try_recv().unwrap()[0], TcpMsg::ServerLoginAck as u8);
+        assert_eq!(rx.try_recv().unwrap()[0], TcpMsg::ServerMyFeatures as u8);
     }
 
     #[test]

@@ -870,6 +870,30 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Activa TCP keepalive en el socket aceptado, con tiempos cortos.
+///
+/// Un peer que desaparece sin FIN/RST (half-open) no genera error hasta que el
+/// kernel agota sus reintentos (minutos) o hasta un `idle_timeout` largo. Con
+/// keepalive, el kernel manda sondeos y marca el socket como roto en ~1 min,
+/// lo que hace fallar la lectura/escritura y dispara la limpieza del usuario.
+fn configure_tcp_keepalive(stream: &tokio::net::TcpStream) {
+    use socket2::{SockRef, TcpKeepalive};
+    use std::time::Duration;
+
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(10))
+        .with_retries(3);
+    match SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+        Ok(()) => debug!("TCP keepalive activado para {}", stream.peer_addr().map(|a| a.to_string()).unwrap_or_default()),
+        Err(e) => warn!(
+            "no se pudo activar TCP keepalive para {}: {}",
+            stream.peer_addr().map(|a| a.to_string()).unwrap_or_default(),
+            e
+        ),
+    }
+}
+
 async fn handle_muxed_connection(
     ctx: Arc<AppContext>,
     mut stream: tokio::net::TcpStream,
@@ -879,6 +903,17 @@ async fn handle_muxed_connection(
     link_enabled: bool,
 ) -> anyhow::Result<()> {
     let ip = peer.ip();
+
+    // TCP keepalive con tiempos cortos: detecta conexiones half-open (el peer
+    // desapareció sin mandar FIN/RST — corte de red, móvil, crash) en ~1
+    // minuto. Sin esto, el server no lo sabe hasta que una escritura falla
+    // (que con el FASTPING de 3 bytes puede tardar muchísimo, porque el buffer
+    // del kernel absorbe las escrituras) o hasta el `idle_timeout_secs` (30
+    // min): mientras tanto, el usuario queda como "fantasma" en la userlist.
+    // El kernel manda sondeos tras 30s de inactividad, cada 10s, y a los 3
+    // fallos marca el socket roto → reads/writes fallan → se limpia el usuario
+    // (y se difunde el PART). Aplica a Ares, web y link por igual.
+    configure_tcp_keepalive(&stream);
 
     // ── FIX DDoS #2: cap de conexiones CRUDAS por IP, ANTES de clasificar.
     // Así también cuentan las conexiones que todavía no mandaron ni un byte
@@ -975,4 +1010,25 @@ fn looks_like_http(buf: &[u8]) -> bool {
 
 fn looks_like_link(buf: &[u8]) -> bool {
     buf.len() >= 3 && buf[2] == astra_link::protocol::MSG_LINK_PROTO
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// El socket aceptado debe quedar con keepalive activado: es lo que
+    /// permite detectar conexiones half-open sin esperar al idle timeout.
+    #[tokio::test]
+    async fn tcp_keepalive_is_enabled_on_accepted_streams() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let stream = tokio::net::TcpStream::from_std(server).unwrap();
+
+        configure_tcp_keepalive(&stream);
+
+        assert!(socket2::SockRef::from(&stream).keepalive().unwrap());
+    }
 }

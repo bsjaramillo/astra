@@ -169,6 +169,7 @@ dependencies = [
  "serde_json",
  "server-core",
  "sha2",
+ "socket2",
  "thiserror 1.0.69",
  "tokio",
  "toml",

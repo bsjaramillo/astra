@@ -195,7 +195,11 @@ max_concurrent_per_ip = 5
 
 # Capa 3: timeouts.
 handshake_timeout_secs = 15            # tiempo máximo para enviar login
-idle_timeout_secs = 120                # tiempo máximo entre mensajes
+# Red de seguridad para conexiones realmente colgadas. El liveness real lo
+# cubren el FASTPING cada 2s + la detección de escritura fallida, así que NO
+# bajes esto pensando en "inactividad del usuario": un cliente que solo lee
+# (sin escribir) durante más de este tiempo sería desconectado sin aviso.
+idle_timeout_secs = 1800               # 30 min
 
 # Capa 4: validación de campos del login.
 min_name_length = 1

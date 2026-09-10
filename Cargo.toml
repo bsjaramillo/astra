@@ -38,6 +38,8 @@ tokio-tungstenite = "0.23"
 axum = "0.7"
 hickory-dns = "0.24"
 http = "1.1"
+# Opciones de socket de bajo nivel (TCP keepalive, etc.).
+socket2 = "0.6"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
