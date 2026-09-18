@@ -993,7 +993,7 @@ function renderServidor(){
       <label class="check"><input type="checkbox" id="cfgWebEnabled"> ${t("srv_webon")}</label>
       <label class="check"><input type="checkbox" id="cfgAllowReg"> ${t("srv_allowreg")}</label>
       <label class="check"><input type="checkbox" id="cfgRoomsearch"> ${t("srv_roomsearch")}</label>
-      <label class="fld"><span>${t("srv_seedurl")}</span><input id="cfgSeedUrl" placeholder="http://chatrooms.mywire.org/rooms.json"><small class="sub">${t("srv_seedurl_hint")}</small></label>
+      <label class="fld"><span>${t("srv_seedurl")}</span><input id="cfgSeedUrl" placeholder="https://astra.inbizio.xyz/api/v1/rooms"><small class="sub">${t("srv_seedurl_hint")}</small></label>
       <div class="rowend"><button class="btn primary" id="cfgSrvSave">${t("common_save_changes")}</button></div>
     </div>
     <div class="cardhead"><h2>${t("dir_h")}</h2><p class="sub">${t("dir_sub")}</p></div>

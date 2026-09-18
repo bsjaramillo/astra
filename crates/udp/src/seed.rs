@@ -1,23 +1,32 @@
 //! Carga la lista semilla de nodos/rooms desde un JSON.
 //!
-//! Formato esperado (subset del `rooms.json` de `chatrooms.mywire.org`):
+//! Acepta dos formatos:
+//!
+//! - **Feed de Astra** (`https://astra.inbizio.xyz/api/v1/rooms`), el default:
 //!
 //! ```json
 //! {
-//!   "Count": 20,
-//!   "Items": [
+//!   "count": 20,
+//!   "items": [
 //!     {
+//!       "host": "1.2.3.4",
 //!       "port": 5009,
-//!       "users": 5,
 //!       "name": "TestRoom",
 //!       "topic": "Test topic",
-//!       "servidor": "sb0t 5.43.5",
-//!       "externalIp": "1.2.3.4",
-//!       "lastUpdate": 1782601355644
+//!       "server": "sb0t 5.43.5",
+//!       "users": 5,
+//!       "language": 23,
+//!       "last_seen": 1782601355
 //!     }
 //!   ]
 //! }
 //! ```
+//!
+//! - **Legacy** `rooms.json` de `chatrooms.mywire.org` (`Count`/`Items`,
+//!   `externalIp`, `servidor` y `lastUpdate` en milisegundos).
+//!
+//! Las diferencias de nombre/forma se absorben con aliases de serde; los
+//! timestamps se normalizan a milisegundos.
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -28,15 +37,15 @@ use server_core::db::Database;
 
 use crate::manager::UdpNodeManager;
 
-/// Schema del JSON (subset).
+/// Schema del JSON (feed de Astra + legacy).
 #[derive(Debug, Deserialize)]
 struct SeedFile {
     /// Cantidad de items (no se usa, solo informativo)
     #[allow(dead_code)]
-    #[serde(rename = "Count")]
+    #[serde(rename = "count", alias = "Count")]
     count: Option<u32>,
     /// Lista de rooms/nodos
-    #[serde(rename = "Items")]
+    #[serde(rename = "items", alias = "Items")]
     items: Vec<SeedItem>,
 }
 
@@ -47,15 +56,34 @@ struct SeedItem {
     /// Nombre de la sala
     name: String,
     /// Topic
+    #[serde(default)]
     topic: String,
-    /// Versión del server (campo "servidor" en el JSON)
-    servidor: Option<String>,
-    /// IP externa
-    #[serde(rename = "externalIp")]
-    external_ip: String,
-    /// Última actualización
-    #[serde(rename = "lastUpdate")]
-    last_update: i64,
+    /// Versión del server (feed Astra: "server"; legacy: "servidor")
+    #[serde(rename = "server", alias = "servidor")]
+    server: Option<String>,
+    /// IP externa (feed Astra: "host"; legacy: "externalIp")
+    #[serde(rename = "host", alias = "externalIp")]
+    host: String,
+    /// Última actualización (feed Astra: segundos epoch; legacy: milisegundos)
+    #[serde(rename = "last_seen", alias = "lastUpdate")]
+    last_seen: i64,
+    /// Usuarios conectados
+    #[serde(default)]
+    users: u16,
+    /// Idioma
+    #[serde(default)]
+    language: u8,
+}
+
+/// Normaliza el timestamp a milisegundos epoch. El feed de Astra entrega
+/// `last_seen` en segundos; el `rooms.json` legacy, `lastUpdate` en
+/// milisegundos. Un valor menor a 10^12 solo puede ser segundos.
+fn to_millis(ts: i64) -> i64 {
+    if ts > 0 && ts < 1_000_000_000_000 {
+        ts * 1000
+    } else {
+        ts
+    }
 }
 
 /// Resultado del seed.
@@ -124,10 +152,10 @@ fn load_seed_inner(db: &Database, path: &Path, force: bool) -> anyhow::Result<Se
     };
 
     for item in seed.items {
-        let ip: IpAddr = match item.external_ip.parse() {
+        let ip: IpAddr = match item.host.parse() {
             Ok(ip) => ip,
             Err(e) => {
-                stats.errors.push(format!("IP inválida '{}': {}", item.external_ip, e));
+                stats.errors.push(format!("IP inválida '{}': {}", item.host, e));
                 continue;
             }
         };
@@ -143,10 +171,10 @@ fn load_seed_inner(db: &Database, path: &Path, force: bool) -> anyhow::Result<Se
             item.port,
             &item.name,
             &item.topic,
-            item.servidor.as_deref().unwrap_or(""),
-            0, // users no aplica para el seed
-            0, // language
-            item.last_update,
+            item.server.as_deref().unwrap_or(""),
+            item.users,
+            item.language,
+            to_millis(item.last_seen),
         ) {
             stats.errors.push(format!("error guardando room: {}", e));
         } else {
@@ -187,7 +215,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_seed_accepts_valid_json() {
+    fn validate_seed_accepts_astra_feed() {
+        let json = r#"{"count": 1, "items": [
+            {"host": "1.1.1.1", "port": 5009, "name": "R", "topic": "T", "server": "sb0t", "users": 5, "language": 23, "last_seen": 1782601355}
+        ]}"#;
+        assert_eq!(validate_seed(json).unwrap(), 1);
+    }
+
+    #[test]
+    fn validate_seed_accepts_legacy_rooms_json() {
         let json = r#"{"Count": 1, "Items": [
             {"port": 5009, "users": 5, "name": "R", "topic": "T", "servidor": "sb0t", "externalIp": "1.1.1.1", "lastUpdate": 1000}
         ]}"#;
@@ -198,7 +234,33 @@ mod tests {
     fn validate_seed_rejects_garbage_and_empty() {
         assert!(validate_seed("not json").is_err());
         assert!(validate_seed(r#"{"Count": 0, "Items": []}"#).is_err());
+        assert!(validate_seed(r#"{"count": 0, "items": []}"#).is_err());
         assert!(validate_seed(r#"{"foo": "bar"}"#).is_err());
+    }
+
+    #[test]
+    fn load_seed_parses_astra_feed_and_normalizes_seconds() {
+        let dir = std::env::temp_dir().join(format!("astra_seedfeed_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_seed_file(
+            &dir,
+            r#"{"count": 1, "items": [
+                {"host": "4.4.4.4", "port": 5009, "name": "Feed", "topic": "T", "server": "sb0t", "users": 7, "language": 23, "last_seen": 1782601355}
+            ]}"#,
+        );
+
+        let db = Database::in_memory().unwrap();
+        let stats = load_seed(&db, &path).unwrap();
+        assert_eq!(stats.nodes_added, 1);
+        assert_eq!(stats.rooms_added, 1);
+
+        let room = db.find_room("4.4.4.4", 5009).unwrap().unwrap();
+        assert_eq!(room.users, 7);
+        assert_eq!(room.language, 23);
+        assert_eq!(room.version, "sb0t");
+        assert_eq!(room.last_update, 1_782_601_355_000);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

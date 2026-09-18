@@ -86,12 +86,14 @@ pub struct Settings {
     /// `undefined`) se imprime en la sala.
     #[serde(default)]
     pub script_in_room: bool,
-    /// URL del `rooms.json` para el seed del room-search UDP. Si el
+    /// URL del feed de rooms para el seed del room-search UDP. Si el
     /// room-search está activo y no hay ni seed local ni nodos en la DB, el
     /// server descarga este JSON al arrancar para poder propagarse en la red
-    /// de Ares (y aparecer en el buscador de salas de los clientes). Pon una
-    /// cadena vacía para DESACTIVAR la descarga automática (puedes cargar el
-    /// seed a mano con `astra seed-refresh` o dejando `seed_rooms.json`).
+    /// de Ares (y aparecer en el buscador de salas de los clientes). El
+    /// default apunta al feed de Astra (`/api/v1/rooms`); también se acepta el
+    /// formato legacy de `chatrooms.mywire.org/rooms.json`. Pon una cadena
+    /// vacía para DESACTIVAR la descarga automática (puedes cargar el seed a
+    /// mano con `astra seed-refresh` o dejando `seed_rooms.json`).
     #[serde(default = "default_seed_url")]
     pub seed_url: String,
     /// Chequeo periódico de nuevas versiones de Astra contra el registry de
@@ -143,7 +145,7 @@ fn default_live_scripts_endpoint() -> String {
 }
 
 fn default_seed_url() -> String {
-    "http://chatrooms.mywire.org/rooms.json".to_string()
+    "https://astra.inbizio.xyz/api/v1/rooms".to_string()
 }
 
 /// Un leaf autorizado a conectarse al Link Hub.
