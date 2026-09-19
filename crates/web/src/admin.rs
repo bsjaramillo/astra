@@ -618,12 +618,13 @@ pub fn state_json(ctx: &AppContext) -> String {
     s.push_str(",\"vpn\":{");
     write!(
         s,
-        "\"enabled\":{},\"action\":\"{}\",\"feedUrl\":\"{}\",\"refreshHours\":{},\"count\":{}",
+        "\"enabled\":{},\"action\":\"{}\",\"feedUrl\":\"{}\",\"refreshHours\":{},\"count\":{},\"refreshing\":{}",
         vpn_cfg.enabled,
         vpn_cfg.action.as_str(),
         esc(&vpn_cfg.feed_url),
         vpn_cfg.refresh_hours,
         ctx.vpn_filter.len(),
+        ctx.vpn_filter.is_refreshing(),
     )
     .ok();
     s.push_str(",\"entries\":[");

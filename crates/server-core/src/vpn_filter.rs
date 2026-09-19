@@ -158,6 +158,13 @@ pub struct VpnFilterManager {
     v6: RwLock<Vec<(IpNet, String)>>,
     /// ASNs bloqueados.
     asns: RwLock<HashSet<u32>>,
+    /// Señal para pedir un refresco inmediato del feed. La dispara el panel al
+    /// activar el filtro o al pulsar "refrescar", para no esperar el intervalo
+    /// (24h) con la lista vacía.
+    refresh_notify: Arc<tokio::sync::Notify>,
+    /// Candado para que dos descargas del feed no corran a la vez (panel +
+    /// tick periódico).
+    refreshing: std::sync::atomic::AtomicBool,
 }
 
 impl VpnFilterManager {
@@ -190,7 +197,42 @@ impl VpnFilterManager {
             v4: RwLock::new(v4),
             v6: RwLock::new(v6),
             asns: RwLock::new(asns),
+            refresh_notify: Arc::new(tokio::sync::Notify::new()),
+            refreshing: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Notificación para pedir un refresco inmediato del feed.
+    pub fn refresh_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.refresh_notify.clone()
+    }
+
+    /// Pide un refresco inmediato del feed (despierta al loop).
+    pub fn request_refresh(&self) {
+        self.refresh_notify.notify_one();
+    }
+
+    /// Intenta tomar el candado de descarga. `false` si ya hay una en curso.
+    pub fn try_begin_refresh(&self) -> bool {
+        self.refreshing
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Libera el candado de descarga.
+    pub fn end_refresh(&self) {
+        self.refreshing
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// ¿Hay una descarga de feed en curso?
+    pub fn is_refreshing(&self) -> bool {
+        self.refreshing.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn insert_cidr(
@@ -237,9 +279,16 @@ impl VpnFilterManager {
     }
 
     /// Actualiza el interruptor maestro. Persiste.
+    ///
+    /// Al **activar**, pide un refresco inmediato del feed: sin esto, activar
+    /// el filtro desde el panel dejaría la lista vacía hasta el próximo tick
+    /// (hasta 24h), así que no detectaría nada hasta entonces.
     pub fn set_enabled(&self, enabled: bool) {
         self.config.write().enabled = enabled;
         self.persist_config();
+        if enabled {
+            self.request_refresh();
+        }
     }
 
     /// Actualiza la acción ante hits. Persiste.
@@ -248,7 +297,8 @@ impl VpnFilterManager {
         self.persist_config();
     }
 
-    /// Configura el feed y la cadencia de refresco. Persiste.
+    /// Configura el feed y la cadencia de refresco. Persiste y pide un
+    /// refresco inmediato (la URL cambió: hay que cargar la lista nueva).
     pub fn set_feed(&self, feed_url: String, refresh_hours: u64) {
         {
             let mut c = self.config.write();
@@ -256,6 +306,7 @@ impl VpnFilterManager {
             c.refresh_hours = refresh_hours.max(1);
         }
         self.persist_config();
+        self.request_refresh();
     }
 
     fn persist_config(&self) {

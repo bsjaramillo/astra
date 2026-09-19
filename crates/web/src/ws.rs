@@ -441,6 +441,10 @@ async fn handle_admin_route(
             let body = format!("{{\"ok\":true,\"loaded\":{}}}", n);
             send_http_json(stream, 200, &body).await?;
         }
+        (m, "/admin/vpn/refresh") if m.eq_ignore_ascii_case("POST") => {
+            ctx.vpn_filter.request_refresh();
+            send_http_json(stream, 200, "{\"ok\":true}").await?;
+        }
         // ── Bases GeoIP/ASN ────────────────────────────────────────────
         (m, "/admin/geoip/config") if m.eq_ignore_ascii_case("POST") => {
             let v: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();

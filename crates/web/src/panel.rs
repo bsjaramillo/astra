@@ -391,6 +391,9 @@ const I18N = {
     geoip_refresh:"Refrescar cada (horas)", geoip_refresh_now:"Actualizar ahora",
     geoip_asn_loaded:"ASN cargado", geoip_asn_missing:"ASN sin cargar",
     geoip_saved:"Configuración de GeoIP guardada", geoip_refresh_queued:"Actualización en curso…",
+    vpn_refreshing:"Descargando feed…", vpn_count:"{0} entradas", vpn_empty:"Sin entradas",
+    vpn_refresh_now:"Refrescar feed", vpn_refresh_queued:"Descarga del feed en curso…",
+    vpn_count_hint:"Al activar el filtro, el feed se descarga de inmediato. El conteo se actualiza al terminar.",
 
     perm_h:"Permisos de comandos", perm_sub:"Rango mínimo necesario para usar cada comando. Se aplica al instante.",
     perm_search:"🔎 Buscar comando…", th_command:"Comando", th_minrank:"Rango mínimo",
@@ -590,6 +593,9 @@ const I18N = {
     geoip_refresh:"Refresh every (hours)", geoip_refresh_now:"Update now",
     geoip_asn_loaded:"ASN loaded", geoip_asn_missing:"ASN not loaded",
     geoip_saved:"GeoIP settings saved", geoip_refresh_queued:"Update in progress…",
+    vpn_refreshing:"Downloading feed…", vpn_count:"{0} entries", vpn_empty:"No entries",
+    vpn_refresh_now:"Refresh feed", vpn_refresh_queued:"Feed download in progress…",
+    vpn_count_hint:"When you enable the filter, the feed downloads immediately. The count updates when it finishes.",
 
     perm_h:"Command permissions", perm_sub:"Minimum rank required to run each command. Applies instantly.",
     perm_search:"🔎 Search command…", th_command:"Command", th_minrank:"Minimum rank",
@@ -1185,6 +1191,11 @@ function renderVpn(){
     <td><code>${esc(e.value)}</code></td><td>${esc(e.source)}</td>
     <td style="text-align:right"><button class="btn sm danger" data-vpndel="${esc(e.kind)}|${esc(e.value)}">×</button></td></tr>`).join("");
   const asnBadge = g.hasAsn ? `<span class="badge voice">${t("geoip_asn_loaded")}</span>` : `<span class="badge">${t("geoip_asn_missing")}</span>`;
+  const vpnCount = v.count||0;
+  const feedBadge = v.refreshing
+    ? `<span class="badge">${t("vpn_refreshing")}</span>`
+    : (vpnCount>0 ? `<span class="badge voice">${t("vpn_count", vpnCount)}</span>`
+                  : `<span class="badge">${t("vpn_empty")}</span>`);
   return `<div class="cardhead"><h2>${t("vpn_h")}</h2><p class="sub">${t("vpn_sub")}</p></div>
     <div class="note">${t("vpn_note")}</div>
     <div class="card"><h3>${t("geoip_h")} ${asnBadge}</h3>
@@ -1196,14 +1207,16 @@ function renderVpn(){
       <div class="rowend"><button class="btn" id="geoipRefreshNow">${t("geoip_refresh_now")}</button>
       <button class="btn primary" id="geoipSave">${t("common_save_changes")}</button></div>
     </div>
-    <div class="card"><h3>${t("vpn_cfg_h")}</h3>
+    <div class="card"><h3>${t("vpn_cfg_h")} ${feedBadge}</h3>
+      <p class="sub">${t("vpn_count_hint")}</p>
       <label class="check"><input type="checkbox" id="vpnEnabled"${v.enabled?" checked":""}> ${t("vpn_enabled")}</label>
       <div class="grid2">
         <label class="fld"><span>${t("vpn_action")}</span><select id="vpnAction">${actOpts}</select></label>
         <label class="fld"><span>${t("vpn_refresh")}</span><input id="vpnHours" type="number" min="1" value="${v.refreshHours||24}"></label>
       </div>
       <label class="fld"><span>${t("vpn_feed")}</span><input id="vpnFeedUrl" value="${esc(v.feedUrl)}" placeholder="https://…"></label>
-      <div class="rowend"><button class="btn primary" id="vpnSave">${t("common_save_changes")}</button></div>
+      <div class="rowend"><button class="btn" id="vpnRefreshNow">${t("vpn_refresh_now")}</button>
+      <button class="btn primary" id="vpnSave">${t("common_save_changes")}</button></div>
     </div>
     <div class="card"><h3>${t("vpn_entries_h")}</h3>
       <div class="inline"><select id="vpnKind" class="sel sm"><option value="cidr">CIDR</option><option value="asn">ASN</option></select>
@@ -1232,6 +1245,11 @@ async function saveGeoipCfg(){
 async function geoipRefreshNow(){
   const r=await api("/admin/geoip/refresh",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
   if(r.ok) toast(t("geoip_refresh_queued"),"ok"); else toast(t("err_prefix")+t("err_save"),"err");
+}
+
+async function vpnRefreshNow(){
+  const r=await api("/admin/vpn/refresh",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  if(r.ok) toast(t("vpn_refresh_queued"),"ok"); else toast(t("err_prefix")+t("err_save"),"err");
 }
 
 async function saveVpnCfg(){
@@ -1634,6 +1652,7 @@ function wire(){
   if(g("geoipSave")) g("geoipSave").onclick=saveGeoipCfg;
   if(g("geoipRefreshNow")) g("geoipRefreshNow").onclick=geoipRefreshNow;
   if(g("vpnSave")) g("vpnSave").onclick=saveVpnCfg;
+  if(g("vpnRefreshNow")) g("vpnRefreshNow").onclick=vpnRefreshNow;
   if(g("vpnAdd")) g("vpnAdd").onclick=addVpnBlock;
   if(g("vpnClearFeed")) g("vpnClearFeed").onclick=()=>clearVpnSource("feed");
   if(g("vpnClearManual")) g("vpnClearManual").onclick=()=>clearVpnSource("manual");

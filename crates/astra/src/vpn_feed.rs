@@ -33,34 +33,53 @@ pub async fn refresh_loop(ctx: Arc<AppContext>) {
         }
     };
 
+    let notify = ctx.vpn_filter.refresh_notify();
+
+    // Descarga inicial: si el filtro ya viene habilitado de la config (o de un
+    // arranque previo), la lista debe estar cargada cuanto antes. Si al
+    // arrancar está vacía y habilitado, forzamos un ciclo ya.
+    let mut force = {
+        let cfg = ctx.vpn_filter.config();
+        cfg.enabled && !cfg.feed_url.trim().is_empty()
+    };
+
     loop {
         let cfg = ctx.vpn_filter.config();
-        // Sin URL o sin horas válidas: no hay nada que refrescar. Se vuelve a
-        // chequear en el próximo ciclo por si el admin lo cambia en el panel.
         let hours = cfg.refresh_hours.max(1);
-        let sleep = Duration::from_secs(hours * 60 * 60);
+        let sleep = tokio::time::sleep(Duration::from_secs(hours * 60 * 60));
+        tokio::pin!(sleep);
 
-        if !cfg.enabled || cfg.feed_url.trim().is_empty() {
-            tokio::time::sleep(sleep).await;
-            continue;
-        }
+        // Se descarga si el filtro está activo, si la lista está vacía con el
+        // filtro activo, o si un `request_refresh()` lo pidió (activación
+        // desde el panel, cambio de URL, botón "refrescar").
+        let should_fetch = (cfg.enabled || force) && !cfg.feed_url.trim().is_empty();
 
-        match fetch(&client, &cfg.feed_url).await {
-            Ok(text) => {
-                let loaded = ctx.vpn_filter.import_feed(&text);
-                info!(
-                    "vpn feed: {} entradas cargadas desde {}",
-                    loaded, cfg.feed_url
-                );
+        if should_fetch && ctx.vpn_filter.try_begin_refresh() {
+            match fetch(&client, &cfg.feed_url).await {
+                Ok(text) => {
+                    let loaded = ctx.vpn_filter.import_feed(&text);
+                    info!(
+                        "vpn feed: {} entradas cargadas desde {}",
+                        loaded, cfg.feed_url
+                    );
+                }
+                Err(e) => {
+                    // Se conserva la lista anterior: un fallo de red no debe
+                    // dejar la sala sin filtro.
+                    debug!("vpn feed falló (se conserva la lista anterior): {e}");
+                }
             }
-            Err(e) => {
-                // Se conserva la lista anterior: un fallo de red no debe dejar
-                // la sala sin filtro.
-                debug!("vpn feed falló (se conserva la lista anterior): {e}");
+            ctx.vpn_filter.end_refresh();
+        }
+        force = false;
+
+        tokio::select! {
+            _ = &mut sleep => {}
+            _ = notify.notified() => {
+                // Refresco pedido (activar filtro / cambiar URL / botón).
+                force = true;
             }
         }
-
-        tokio::time::sleep(sleep).await;
     }
 }
 
@@ -74,6 +93,8 @@ async fn fetch(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// El parseo real vive en `VpnFilterManager::import_feed` y está cubierto
     /// por tests en `server-core`. Aquí solo se valida que el loop no explota
     /// con un cliente HTTP mínimo y una URL vacía (no debe hacer request).
@@ -85,5 +106,41 @@ mod tests {
             ..server_core::VpnConfig::default()
         };
         assert!(cfg.feed_url.trim().is_empty());
+    }
+
+    /// Integración real contra el feed X4BNet (requiere red): descarga la
+    /// lista, la importa en un manager habilitado y comprueba que detecta una
+    /// IP concreta que el feed cubre. Es la verificación end-to-end del flujo
+    /// activar → descargar → match. Correr con:
+    /// `cargo test -p astra vpn_feed_real -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn vpn_feed_real_download_and_match() {
+        let client = reqwest::Client::builder()
+            .user_agent("astra-test")
+            .timeout(Duration::from_secs(120))
+            .build()
+            .unwrap();
+        let url = server_core::VpnConfig::default().feed_url;
+        let text = fetch(&client, &url).await.expect("descarga del feed X4BNet");
+
+        let db = server_core::db::Database::in_memory().unwrap();
+        let mgr = server_core::VpnFilterManager::new(db);
+        let loaded = mgr.import_feed(&text);
+        assert!(loaded > 1000, "feed demasiado chico: {loaded} entradas");
+        mgr.set_enabled(true);
+
+        let geoip = server_core::GeoIp::load(
+            server_core::db::Database::in_memory().unwrap(),
+            std::path::Path::new("/nonexistent"),
+            server_core::settings::GeoIpConfig::default(),
+        );
+        // 187.14.120.0/21 está en el feed y contiene esta IP.
+        assert!(
+            mgr.classify(&geoip, "187.14.127.35".parse().unwrap()).is_some(),
+            "el feed debería detectar 187.14.127.35"
+        );
+        // Una IP que no está en la lista no debe matchear.
+        assert!(mgr.classify(&geoip, "8.8.8.8".parse().unwrap()).is_none());
     }
 }
