@@ -234,6 +234,18 @@ pub enum ScriptEvent {
     BansAutoCleared,
     /// Proxy detectado. Paridad sb0t: onProxyDetected(userobj, reply) → (JSUser, bool).
     ProxyDetected { name: String, ip: String, reply: bool },
+    /// Filtro anti-VPN/proxy: una IP matcheó la blocklist. `rule` es la regla
+    /// (CIDR o ASN) y `action` la acción configurada (`report`/`reject`/...).
+    VpnDetected {
+        /// Nick del usuario.
+        name: String,
+        /// IP externa.
+        ip: String,
+        /// Regla que matcheó (CIDR o ASN).
+        rule: String,
+        /// Acción aplicada.
+        action: String,
+    },
 
     // --- Flood ---
     /// User flood
@@ -362,6 +374,7 @@ impl ScriptEvent {
             // Bans / proxies
             BansAutoCleared => "onBansAutoCleared",
             ProxyDetected { .. } => "onProxyDetected",
+            VpnDetected { .. } => "onVpnDetected",
 
             // Flood
             Flood { .. } => "onFlood",
@@ -527,6 +540,9 @@ impl ScriptEvent {
             // Bans / proxies
             BansAutoCleared => vec![],
             ProxyDetected { name, ip, reply } => vec![name.clone(), ip.clone(), reply.to_string()],
+            VpnDetected { name, ip, rule, action } => {
+                vec![name.clone(), ip.clone(), rule.clone(), action.clone()]
+            }
 
             // Flood
             Flood { name } => vec![name.clone()],
@@ -606,7 +622,7 @@ mod tests {
             "onNick", "onAdminLevelChanged", "onLoginGranted", "onLogout",
             "onInvalidLoginAttempt", "onCommand", "onIdled", "onUnidled",
             "onRegistering", "onRegistered", "onUnregistered",
-            "onBansAutoCleared", "onProxyDetected", "onFlood", "onFloodBefore",
+            "onBansAutoCleared", "onProxyDetected", "onVpnDetected", "onFlood", "onFloodBefore",
             "onFileReceived", "onScribbleCheck", "onHelp", "onLinked",
             "onUnlinked", "onLinkError", "onLinkedAdminDisabled",
             "onLeafJoin", "onLeafPart", "onVroomJoin", "onVroomJoinCheck",

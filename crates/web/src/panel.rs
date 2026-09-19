@@ -376,6 +376,21 @@ const I18N = {
     proxy_h:"Proxies de confianza", proxy_sub:"Para cuando tu servidor está detrás de un proxy (Cloudflare, nginx, etc.).",
     proxy_note:"Solo las IP de esta lista pueden decir cuál es la IP real del visitante (vía cabeceras <code>X-Forwarded-For</code>/<code>X-Real-IP</code>). Aplica solo a clientes web. La IP local (127.0.0.1) siempre es de confianza. Los cambios se aplican al instante.",
     toast_proxy_add:"Proxy agregado", toast_proxy_rem:"Proxy quitado",
+    nav_vpn:"Anti-VPN", vpn_h:"Filtro anti-VPN / proxy", vpn_sub:"Bloquea conexiones desde VPNs, proxies y datacenters conocidos.",
+    vpn_note:"Combina la base ASN local y una blocklist CIDR. En modo <b>report</b> solo registra (ideal para medir falsos positivos antes de bloquear); <b>reject</b> cierra la conexión; <b>captcha</b> y <b>quarantine</b> dejan entrar pero exigen captcha o silencian. Los cambios se aplican al instante.",
+    vpn_cfg_h:"Configuración", vpn_enabled:"Filtrar conexiones VPN/proxy", vpn_action:"Acción al detectar",
+    vpn_refresh:"Refrescar feed cada (horas)", vpn_feed:"URL del feed (vacío = sin descarga)",
+    vpn_entries_h:"Entradas", vpn_th_kind:"Tipo", vpn_th_value:"Valor", vpn_th_source:"Origen",
+    vpn_clear_feed:"Vaciar feed", vpn_clear_manual:"Vaciar manuales",
+    vpn_import_h:"Importar lista", vpn_import_sub:"Pegá una lista (una por línea): rangos CIDR o ASNs (<code>AS64500</code>). Reemplaza las entradas del feed, no las manuales.",
+    vpn_import_btn:"Importar", vpn_act_report:"Solo reportar", vpn_act_reject:"Rechazar", vpn_act_captcha:"Pedir captcha", vpn_act_quarantine:"Cuarentena (silenciar)",
+    vpn_saved:"Configuración guardada", vpn_added:"Entrada agregada", vpn_invalid:"Valor inválido", vpn_imported:"{0} entradas importadas",
+    geoip_h:"Base ASN/GeoIP", geoip_sub:"Sin la base ASN no se puede resolver el ASN de una IP: la parte ASN del filtro y <code>/asnban</code> quedan inertes.",
+    geoip_enabled:"Descargar/refrescar automáticamente", geoip_asn_url:"URL de la base ASN (admite {YYYY-MM})",
+    geoip_city_url:"URL de la base de ciudad (opcional)", geoip_city_ph:"Vacío = no descargar ciudad",
+    geoip_refresh:"Refrescar cada (horas)", geoip_refresh_now:"Actualizar ahora",
+    geoip_asn_loaded:"ASN cargado", geoip_asn_missing:"ASN sin cargar",
+    geoip_saved:"Configuración de GeoIP guardada", geoip_refresh_queued:"Actualización en curso…",
 
     perm_h:"Permisos de comandos", perm_sub:"Rango mínimo necesario para usar cada comando. Se aplica al instante.",
     perm_search:"🔎 Buscar comando…", th_command:"Comando", th_minrank:"Rango mínimo",
@@ -560,6 +575,21 @@ const I18N = {
     proxy_h:"Trusted proxies", proxy_sub:"For when your server sits behind a proxy (Cloudflare, nginx, etc.).",
     proxy_note:"Only IPs on this list may report the visitor's real IP (via <code>X-Forwarded-For</code>/<code>X-Real-IP</code> headers). Applies to web clients only. Localhost (127.0.0.1) is always trusted. Changes apply instantly.",
     toast_proxy_add:"Proxy added", toast_proxy_rem:"Proxy removed",
+    nav_vpn:"Anti-VPN", vpn_h:"Anti-VPN / proxy filter", vpn_sub:"Blocks connections from known VPNs, proxies and datacenters.",
+    vpn_note:"Combines the local ASN database and a CIDR blocklist. In <b>report</b> mode it only logs (ideal to measure false positives before blocking); <b>reject</b> closes the connection; <b>captcha</b> and <b>quarantine</b> let them in but require a captcha or mute them. Changes apply instantly.",
+    vpn_cfg_h:"Settings", vpn_enabled:"Filter VPN/proxy connections", vpn_action:"Action on detection",
+    vpn_refresh:"Refresh feed every (hours)", vpn_feed:"Feed URL (empty = no download)",
+    vpn_entries_h:"Entries", vpn_th_kind:"Kind", vpn_th_value:"Value", vpn_th_source:"Source",
+    vpn_clear_feed:"Clear feed", vpn_clear_manual:"Clear manual",
+    vpn_import_h:"Import list", vpn_import_sub:"Paste a list (one per line): CIDR ranges or ASNs (<code>AS64500</code>). Replaces feed entries, not manual ones.",
+    vpn_import_btn:"Import", vpn_act_report:"Report only", vpn_act_reject:"Reject", vpn_act_captcha:"Require captcha", vpn_act_quarantine:"Quarantine (mute)",
+    vpn_saved:"Settings saved", vpn_added:"Entry added", vpn_invalid:"Invalid value", vpn_imported:"{0} entries imported",
+    geoip_h:"ASN/GeoIP database", geoip_sub:"Without the ASN database Astra can't resolve a IP's ASN: the ASN part of the filter and <code>/asnban</code> stay inert.",
+    geoip_enabled:"Download/refresh automatically", geoip_asn_url:"ASN database URL (supports {YYYY-MM})",
+    geoip_city_url:"City database URL (optional)", geoip_city_ph:"Empty = don't download city",
+    geoip_refresh:"Refresh every (hours)", geoip_refresh_now:"Update now",
+    geoip_asn_loaded:"ASN loaded", geoip_asn_missing:"ASN not loaded",
+    geoip_saved:"GeoIP settings saved", geoip_refresh_queued:"Update in progress…",
 
     perm_h:"Command permissions", perm_sub:"Minimum rank required to run each command. Applies instantly.",
     perm_search:"🔎 Search command…", th_command:"Command", th_minrank:"Minimum rank",
@@ -699,6 +729,7 @@ const TABS = [
     {id:"enlace", icon:"🔗", k:"nav_enlace"},
     {id:"seguridad", icon:"🛡️", k:"nav_seguridad"},
     {id:"proxies", icon:"🌐", k:"nav_proxies"},
+    {id:"vpn", icon:"🕵️", k:"nav_vpn"},
     {id:"permisos", icon:"🔑", k:"nav_permisos"},
     {id:"plantillas", icon:"💬", k:"nav_plantillas"},
     {id:"config", icon:"📝", k:"nav_config"},
@@ -710,7 +741,7 @@ const TABS = [
 ];
 // Pestañas que NO se auto-refrescan (tienen formularios que se borrarían al
 // re-renderizar mientras el admin escribe).
-const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","avatares","motd","plantillas","bot","soporte"]);
+const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","vpn","avatares","motd","plantillas","bot","soporte"]);
 
 /* ============================ helpers ============================ */
 async function api(path, opts={}) {
@@ -816,7 +847,7 @@ function render(){
     inicio:renderInicio, usuarios:renderUsuarios, cuentas:renderCuentas,
     baneos:renderBaneos, filtros:renderFiltros, bienvenidas:renderBienvenidas,
     sala:renderSala, motd:renderMotd, avatares:renderAvatares, servidor:renderServidor,
-    enlace:renderEnlace, seguridad:renderSeguridad, proxies:renderProxies,
+    enlace:renderEnlace, seguridad:renderSeguridad, proxies:renderProxies, vpn:renderVpn,
     permisos:renderPermisos, plantillas:renderPlantillas, config:renderConfig, consola:renderConsola,
     bot:renderBot, soporte:renderSoporte
   };
@@ -1143,6 +1174,94 @@ function renderProxies(){
     <div class="note">${t("proxy_note")}</div>
     <div class="card"><div>${rows||`<span class=mut>${t("common_none_f")}</span>`}</div>
     <div class="inline" style="margin-top:12px"><input id="proxyIn" placeholder="1.2.3.4"><button class="btn primary" id="proxyAdd">${t("common_add")}</button></div></div>`;
+}
+
+function renderVpn(){
+  const v = STATE.vpn || {enabled:false,action:"report",feedUrl:"",refreshHours:24,entries:[]};
+  const g = STATE.geoip || {hasAsn:false,hasCity:false,enabled:false,asnUrl:"",cityUrl:"",refreshHours:24};
+  const actOpts = ["report","reject","captcha","quarantine"]
+    .map(a=>`<option value="${a}"${v.action===a?" selected":""}>${t("vpn_act_"+a)}</option>`).join("");
+  const rows=(v.entries||[]).map(e=>`<tr><td><span class="chip">${esc(e.kind)}</span></td>
+    <td><code>${esc(e.value)}</code></td><td>${esc(e.source)}</td>
+    <td style="text-align:right"><button class="btn sm danger" data-vpndel="${esc(e.kind)}|${esc(e.value)}">×</button></td></tr>`).join("");
+  const asnBadge = g.hasAsn ? `<span class="badge voice">${t("geoip_asn_loaded")}</span>` : `<span class="badge">${t("geoip_asn_missing")}</span>`;
+  return `<div class="cardhead"><h2>${t("vpn_h")}</h2><p class="sub">${t("vpn_sub")}</p></div>
+    <div class="note">${t("vpn_note")}</div>
+    <div class="card"><h3>${t("geoip_h")} ${asnBadge}</h3>
+      <p class="sub">${t("geoip_sub")}</p>
+      <label class="check"><input type="checkbox" id="geoipEnabled"${g.enabled?" checked":""}> ${t("geoip_enabled")}</label>
+      <label class="fld"><span>${t("geoip_asn_url")}</span><input id="geoipAsnUrl" value="${esc(g.asnUrl)}" placeholder="https://…"></label>
+      <label class="fld"><span>${t("geoip_city_url")}</span><input id="geoipCityUrl" value="${esc(g.cityUrl)}" placeholder="${t("geoip_city_ph")}"></label>
+      <label class="fld"><span>${t("geoip_refresh")}</span><input id="geoipHours" type="number" min="1" value="${g.refreshHours||24}"></label>
+      <div class="rowend"><button class="btn" id="geoipRefreshNow">${t("geoip_refresh_now")}</button>
+      <button class="btn primary" id="geoipSave">${t("common_save_changes")}</button></div>
+    </div>
+    <div class="card"><h3>${t("vpn_cfg_h")}</h3>
+      <label class="check"><input type="checkbox" id="vpnEnabled"${v.enabled?" checked":""}> ${t("vpn_enabled")}</label>
+      <div class="grid2">
+        <label class="fld"><span>${t("vpn_action")}</span><select id="vpnAction">${actOpts}</select></label>
+        <label class="fld"><span>${t("vpn_refresh")}</span><input id="vpnHours" type="number" min="1" value="${v.refreshHours||24}"></label>
+      </div>
+      <label class="fld"><span>${t("vpn_feed")}</span><input id="vpnFeedUrl" value="${esc(v.feedUrl)}" placeholder="https://…"></label>
+      <div class="rowend"><button class="btn primary" id="vpnSave">${t("common_save_changes")}</button></div>
+    </div>
+    <div class="card"><h3>${t("vpn_entries_h")}</h3>
+      <div class="inline"><select id="vpnKind" class="sel sm"><option value="cidr">CIDR</option><option value="asn">ASN</option></select>
+      <input id="vpnValue" placeholder="1.2.3.0/24 o 64500"><button class="btn primary" id="vpnAdd">${t("common_add")}</button></div>
+      <div class="inline" style="margin-top:10px">
+        <button class="btn" id="vpnClearFeed">${t("vpn_clear_feed")}</button>
+        <button class="btn danger" id="vpnClearManual">${t("vpn_clear_manual")}</button>
+      </div>
+      <div class="scroll"><table class="tbl"><thead><tr><th>${t("vpn_th_kind")}</th><th>${t("vpn_th_value")}</th><th>${t("vpn_th_source")}</th><th></th></tr></thead>
+      <tbody>${rows||'<tr><td colspan=4 class=mut>—</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="card"><h3>${t("vpn_import_h")}</h3>
+      <p class="sub">${t("vpn_import_sub")}</p>
+      <textarea id="vpnImport" spellcheck="false" style="width:100%;height:18vh;font-family:ui-monospace,monospace;font-size:12.5px" placeholder="1.2.3.0/24&#10;AS64500"></textarea>
+      <div class="rowend"><button class="btn primary" id="vpnImportBtn">${t("vpn_import_btn")}</button></div>
+    </div>`;
+}
+async function saveGeoipCfg(){
+  const body={enabled:document.getElementById("geoipEnabled").checked,
+    asnUrl:document.getElementById("geoipAsnUrl").value,
+    cityUrl:document.getElementById("geoipCityUrl").value,
+    refreshHours:parseInt(document.getElementById("geoipHours").value||"24",10)};
+  const r=await api("/admin/geoip/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(r.ok) toast(t("geoip_saved"),"ok"); else toast(t("err_prefix")+t("err_save"),"err");
+}
+async function geoipRefreshNow(){
+  const r=await api("/admin/geoip/refresh",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  if(r.ok) toast(t("geoip_refresh_queued"),"ok"); else toast(t("err_prefix")+t("err_save"),"err");
+}
+
+async function saveVpnCfg(){
+  const body={enabled:document.getElementById("vpnEnabled").checked,
+    action:document.getElementById("vpnAction").value,
+    feedUrl:document.getElementById("vpnFeedUrl").value,
+    refreshHours:parseInt(document.getElementById("vpnHours").value||"24",10)};
+  const r=await api("/admin/vpn/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(r.ok) toast(t("vpn_saved"),"ok"); else toast(t("err_prefix")+t("err_save"),"err");
+}
+async function addVpnBlock(){
+  const kind=document.getElementById("vpnKind").value, value=document.getElementById("vpnValue").value;
+  const r=await api("/admin/vpn/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,value})});
+  const j=await r.json().catch(()=>({ok:false}));
+  if(j.ok){ document.getElementById("vpnValue").value=""; toast(t("vpn_added"),"ok"); await refresh(); }
+  else toast(t("vpn_invalid"),"err");
+}
+async function removeVpnBlock(kind,value){
+  await api("/admin/vpn/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,value})});
+  await refresh();
+}
+async function clearVpnSource(source){
+  await api("/admin/vpn/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({source})});
+  await refresh();
+}
+async function importVpnFeed(){
+  const text=document.getElementById("vpnImport").value;
+  const r=await api("/admin/vpn/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+  const j=await r.json().catch(()=>({loaded:0}));
+  toast(t("vpn_imported", j.loaded||0),"ok"); await refresh();
 }
 
 function renderPermisos(){
@@ -1511,6 +1630,18 @@ function wire(){
     e.preventDefault();
     await api("/admin/proxy/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ip:a.dataset.rmproxy})});
     toast(t("toast_proxy_rem"),"ok"); await refresh();
+  });
+  if(g("geoipSave")) g("geoipSave").onclick=saveGeoipCfg;
+  if(g("geoipRefreshNow")) g("geoipRefreshNow").onclick=geoipRefreshNow;
+  if(g("vpnSave")) g("vpnSave").onclick=saveVpnCfg;
+  if(g("vpnAdd")) g("vpnAdd").onclick=addVpnBlock;
+  if(g("vpnClearFeed")) g("vpnClearFeed").onclick=()=>clearVpnSource("feed");
+  if(g("vpnClearManual")) g("vpnClearManual").onclick=()=>clearVpnSource("manual");
+  if(g("vpnImportBtn")) g("vpnImportBtn").onclick=importVpnFeed;
+  document.querySelectorAll("[data-vpndel]").forEach(a=>a.onclick=async e=>{
+    e.preventDefault();
+    const [kind,value]=a.dataset.vpndel.split("|");
+    await removeVpnBlock(kind,value);
   });
   if(g("permFilter")) g("permFilter").oninput=()=>{
     const q=g("permFilter").value.toLowerCase();

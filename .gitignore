@@ -25,6 +25,10 @@ data_*/
 # [directory] token): NUNCA se versiona. Usar astra.toml.example como plantilla.
 astra.toml
 
+# Plugin vpncheck: API key y cache locales (no versionar)
+data/scripts/vpncheck/registry.json
+data/scripts/vpncheck/sql/
+
 # Test fixtures
 fixtures/
 

@@ -10,6 +10,7 @@ members = [
     "crates/bot",
     "crates/web",
     "crates/link",
+    "crates/admission",
     "crates/astra",
 ]
 exclude = ["fuzz"]
@@ -40,6 +41,8 @@ hickory-dns = "0.24"
 http = "1.1"
 # Opciones de socket de bajo nivel (TCP keepalive, etc.).
 socket2 = "0.6"
+# Matching de rangos CIDR (filtro anti-VPN/proxy).
+ipnet = "2.10"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

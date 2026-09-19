@@ -403,6 +403,58 @@ async fn handle_admin_route(
             let body = format!("{{\"ok\":{}}}", crate::admin::remove_trusted_proxy(ctx, &ip));
             send_http_json(stream, 200, &body).await?;
         }
+        // ── Filtro anti-VPN/proxy ──────────────────────────────────────
+        (m, "/admin/vpn/config") if m.eq_ignore_ascii_case("POST") => {
+            let v: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let enabled = v.get("enabled").and_then(|x| x.as_bool());
+            let action = v.get("action").and_then(|x| x.as_str());
+            let feed_url = v.get("feedUrl").and_then(|x| x.as_str());
+            let refresh_hours = v.get("refreshHours").and_then(|x| x.as_u64());
+            let ok = crate::admin::set_vpn_config(ctx, enabled, action, feed_url, refresh_hours);
+            let body = format!("{{\"ok\":{}}}", ok);
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/vpn/add") if m.eq_ignore_ascii_case("POST") => {
+            let kind = json_field(&req.body, "kind").unwrap_or_default();
+            let value = json_field(&req.body, "value").unwrap_or_default();
+            let body = format!("{{\"ok\":{}}}", crate::admin::add_vpn_block(ctx, &kind, &value));
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/vpn/remove") if m.eq_ignore_ascii_case("POST") => {
+            let kind = json_field(&req.body, "kind").unwrap_or_default();
+            let value = json_field(&req.body, "value").unwrap_or_default();
+            let body = format!(
+                "{{\"ok\":{}}}",
+                crate::admin::remove_vpn_block(ctx, &kind, &value)
+            );
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/vpn/clear") if m.eq_ignore_ascii_case("POST") => {
+            let source = json_field(&req.body, "source").unwrap_or_else(|| "feed".to_string());
+            let n = crate::admin::clear_vpn_source(ctx, &source);
+            let body = format!("{{\"ok\":true,\"removed\":{}}}", n);
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/vpn/import") if m.eq_ignore_ascii_case("POST") => {
+            let text = json_field(&req.body, "text").unwrap_or_default();
+            let n = crate::admin::import_vpn_feed(ctx, &text);
+            let body = format!("{{\"ok\":true,\"loaded\":{}}}", n);
+            send_http_json(stream, 200, &body).await?;
+        }
+        // ── Bases GeoIP/ASN ────────────────────────────────────────────
+        (m, "/admin/geoip/config") if m.eq_ignore_ascii_case("POST") => {
+            let v: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let enabled = v.get("enabled").and_then(|x| x.as_bool());
+            let asn_url = v.get("asnUrl").and_then(|x| x.as_str()).map(String::from);
+            let city_url = v.get("cityUrl").and_then(|x| x.as_str()).map(String::from);
+            let refresh_hours = v.get("refreshHours").and_then(|x| x.as_u64());
+            crate::admin::set_geoip_config(ctx, enabled, asn_url, city_url, refresh_hours);
+            send_http_json(stream, 200, "{\"ok\":true}").await?;
+        }
+        (m, "/admin/geoip/refresh") if m.eq_ignore_ascii_case("POST") => {
+            ctx.geoip.request_update();
+            send_http_json(stream, 200, "{\"ok\":true}").await?;
+        }
         (m, "/admin/avatar") if m.eq_ignore_ascii_case("POST") => {
             let kind = json_field(&req.body, "kind").unwrap_or_default();
             let data_b64 = json_field(&req.body, "data_b64").unwrap_or_default();

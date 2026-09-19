@@ -801,6 +801,10 @@ pub fn dispatch_builtin(
             handle_listasnbans(ctx, user, args);
             (true, vec![])
         }
+        "vpncheck" => {
+            handle_vpncheck(ctx, user, args);
+            (true, vec![])
+        }
         "clearbans" | "cbans" => {
             handle_clearbans(ctx, user, args);
             (true, vec![])
@@ -3775,6 +3779,59 @@ fn handle_listasnbans(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {
     }
     let joined = list.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
     send_system_line(ctx, user, &format!("ASN bans ({}): {}", list.len(), joined));
+}
+
+/// `/vpncheck <ip|nick>`: diagnostica si una IP matchea el filtro anti-VPN.
+/// Funciona aunque el filtro esté apagado (usa `classify_raw`), para que el
+/// admin pueda medir falsos positivos antes de activarlo.
+fn handle_vpncheck(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
+    if !has_level(user, ILevel::Admin) {
+        send_system_line(ctx, user, "Access denied. Admin+ required.");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_system_line(ctx, user, "Usage: /vpncheck <ip|nick>");
+        return;
+    }
+    let ip = if let Ok(ip) = arg.parse::<std::net::IpAddr>() {
+        ip
+    } else if let Some(target) = find_target(ctx, arg) {
+        target.external_ip
+    } else {
+        send_system_line(ctx, user, "User not found. Use an IP address or an online nick.");
+        return;
+    };
+
+    let cfg = ctx.vpn_filter.config();
+    let asn = ctx.geoip.lookup_asn(ip);
+    let asn_str = asn.map(|a| format!("ASN{}", a)).unwrap_or_else(|| "ASN?".to_string());
+    match ctx.vpn_filter.classify_raw(&ctx.geoip, ip) {
+        Some(hit) => send_system_line(
+            ctx,
+            user,
+            &format!(
+                "{} ({}) MATCH: regla {} '{}'. Filtro {} (acción: {}).",
+                ip,
+                asn_str,
+                hit.kind.as_str(),
+                hit.rule,
+                if cfg.enabled { "activo" } else { "apagado" },
+                cfg.action.as_str(),
+            ),
+        ),
+        None => send_system_line(
+            ctx,
+            user,
+            &format!(
+                "{} ({}) sin match en el filtro ({} entradas, {}).",
+                ip,
+                asn_str,
+                ctx.vpn_filter.len(),
+                if cfg.enabled { "activo" } else { "apagado" },
+            ),
+        ),
+    }
 }
 
 fn handle_clearbans(ctx: &AppContext, user: &Arc<AresUser>, _args: &str) {

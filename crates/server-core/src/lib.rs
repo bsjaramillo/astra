@@ -119,6 +119,9 @@ pub mod ip_autologin;
 
 pub mod flood_control;
 
+/// Filtro anti-VPN/proxy (ASN + blocklist CIDR).
+pub mod vpn_filter;
+
 /// Re-exports comunes.
 pub use app::{
     admin_action, AppContext, KillScriptFn, LeafDirected, LinkEvent, LinkLeafInfo, LinkRequest,
@@ -132,7 +135,11 @@ pub use greets::{GreetContext, GreetManager};
 pub use motd::{MotdContext, MotdManager};
 pub use templates::{TemplateManager, TEMPLATE_DEFAULTS};
 pub use geoip::GeoIp;
+/// Re-export de `maxminddb` para que los consumidores (tests, updater) puedan
+/// tipar/leer un `Reader` sin depender directamente del crate.
+pub use maxminddb;
 pub use ip_bans::{AsnBanManager, RangeBanManager};
+pub use vpn_filter::{VpnAction, VpnBlockEntry, VpnBlockKind, VpnConfig, VpnFilterManager, VpnHit};
 pub use name_filters::NameFilterManager;
 pub use room_flags::RoomFlags;
 pub use room::Room;

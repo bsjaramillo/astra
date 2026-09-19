@@ -66,6 +66,8 @@ pub enum RejectReason {
     SuspiciousProfile,
     /// Capa 5: demasiados logins fallidos.
     TooManyFailedLogins,
+    /// Filtro anti-VPN/proxy: la IP matchea la blocklist con acción `reject`.
+    VpnBlocked,
 }
 
 /// Issues detectados en un login que NO son rechazos, pero generan
@@ -90,6 +92,7 @@ impl RejectReason {
             Self::SpamBot => "Connection rejected.",
             Self::SuspiciousProfile => "Invalid client profile.",
             Self::TooManyFailedLogins => "Too many failed login attempts. Please try again later.",
+            Self::VpnBlocked => "Connection rejected.",
         }
     }
 }

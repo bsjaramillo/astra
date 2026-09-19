@@ -149,6 +149,7 @@ name = "astra"
 version = "0.2.7"
 dependencies = [
  "anyhow",
+ "astra-admission",
  "astra-bot",
  "astra-captcha",
  "astra-commands",
@@ -160,6 +161,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "flate2",
  "proto-ares",
  "rand 0.8.8",
  "reqwest 0.12.28",
@@ -176,6 +178,16 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "astra-admission"
+version = "0.2.7"
+dependencies = [
+ "astra-scripting",
+ "rand 0.8.8",
+ "server-core",
+ "tracing",
 ]
 
 [[package]]
@@ -298,6 +310,7 @@ name = "astra-web"
 version = "0.2.7"
 dependencies = [
  "anyhow",
+ "astra-admission",
  "astra-bot",
  "astra-commands",
  "astra-scripting",
@@ -3454,6 +3467,7 @@ dependencies = [
  "futures",
  "hmac",
  "image",
+ "ipnet",
  "maxminddb",
  "md-5",
  "once_cell",

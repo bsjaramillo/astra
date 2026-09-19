@@ -74,6 +74,9 @@ web_port = 5010
 #   - <data_dir>/asn.mmdb   → GeoLite2-ASN  o dbip-asn-lite  (ASN)
 # Fuentes gratuitas sin cuenta: DB-IP Lite (https://db-ip.com/db/lite.php).
 # Sin estos archivos, /trace y asnban degradan a un mensaje honesto.
+#
+# No hace falta ponerlos a mano: la sección [geoip] de abajo los descarga y
+# refresca sola (asn.mmdb incluido). Ver `[geoip]`.
 data_dir = "./data"
 
 # --- Link Hub/Leaf (multi-servidor) ---------------------------------------
@@ -218,3 +221,41 @@ failed_login_ban_secs = 3600           # duración del auto-ban (1h)
 captcha_enabled = false                # default: deshabilitado (opt-in)
 captcha_expiration_secs = 300          # tiempo para resolver (5 min)
 captcha_max_attempts = 3               # intentos antes de kickear
+
+# --- Filtro anti-VPN / proxy ----------------------------------------------
+# Se configura EN VIVO desde el panel (/admin → Anti-VPN), no desde este
+# archivo: la config vive en SQLite para que los cambios rijan sin reiniciar
+# (igual que bans/proxies). Por defecto está DESHABILITADO y en modo `report`.
+#
+# Detecta conexiones desde VPNs, proxies y datacenters combinando:
+#   - la base ASN local (`<data_dir>/asn.mmdb`), y
+#   - una blocklist CIDR (manual y/o descargada de un feed).
+#
+# Cuenta con un feed por defecto (X4BNet `lists_vpn`, VPN-only) que se refresca
+# cada 24h. Para incluir datacenters, cambiar la URL del feed a la variante
+# `output/datacenter/ipv4.txt` del mismo repo.
+#
+# Acciones ante un hit: report (solo log) · reject (cerrar) · captcha (exigir
+# captcha) · quarantine (entrar silenciado). El comando `/vpncheck <ip|nick>`
+# (Admin+) diagnostica matchs aunque el filtro esté apagado.
+
+# --- GeoIP / ASN (descarga automática) ------------------------------------
+# Descarga y refresca las bases MMDB sin reiniciar. Es lo que permite resolver
+# el ASN de una IP, del que dependen la parte ASN del filtro anti-VPN y el
+# comando /asnban. Por defecto DESHABILITADO (no genera tráfico saliente).
+#
+# La config vive en SQLite y se edita EN VIVO desde el panel (/admin →
+# Anti-VPN → "Base ASN/GeoIP"); esta sección es el valor inicial del primer
+# arranque. Una vez que el panel guarda un cambio, manda la DB.
+[geoip]
+enabled = false                        # interruptor maestro del updater
+# URL de la base ASN. El placeholder {YYYY-MM} se resuelve al mes actual (y al
+# anterior si el actual aún no está publicado). DB-IP Lite es gratuito, sin
+# cuenta, licencia CC-BY. Para MaxMind GeoLite2-ASN, poné la URL directa de tu
+# cuenta (sin placeholder).
+asn_url = "https://download.db-ip.com/free/dbip-asn-lite-{YYYY-MM}.mmdb.gz"
+# URL de la base de ciudad (opcional; vacío = no descargar). Habilita /trace
+# con ciudad/país. La de DB-IP pesa ~124 MB.
+city_url = ""
+# Horas entre comprobaciones. DB-IP publica mensualmente; 24h es buen balance.
+refresh_hours = 24

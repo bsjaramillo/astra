@@ -22,6 +22,8 @@ use tracing::{debug, error, info, warn};
 mod tcp_handler;
 mod directory;
 mod update_check;
+mod vpn_feed;
+mod geoip_update;
 
 use tcp_handler::handle_tcp_client;
 
@@ -618,6 +620,16 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(update_check::check_loop(ctx.clone()));
     }
 
+    // Refresco del feed del filtro anti-VPN/proxy. El loop mismo decide si
+    // hay algo que hacer (filtro activo + feed_url no vacío), así que se
+    // spawnea siempre; sin config no gasta red.
+    tokio::spawn(vpn_feed::refresh_loop(ctx.clone()));
+
+    // Descarga automática de las bases GeoIP/ASN (asn.mmdb). El loop decide
+    // en cada ciclo si hay algo que hacer (config live, editable en el panel);
+    // deshabilitado no gasta red.
+    tokio::spawn(geoip_update::update_loop(ctx.clone()));
+
     // Publicación en el directorio público de salas. Opt-in: sin
     // `[directory] enabled = true` no sale ninguna petición de aquí.
     if ctx.settings.directory.enabled {
@@ -833,6 +845,12 @@ async fn main() -> anyhow::Result<()> {
             stats_ctx.user_history.prune(30 * 24 * 60 * 60);
             // Cleanup de las 5 capas de seguridad
             stats_ctx.security.cleanup();
+            // Captchas vencidos: se limpian para no acumular challenges de
+            // usuarios que nunca respondieron.
+            let expired_captchas = stats_ctx.captcha.expire_old();
+            if expired_captchas > 0 {
+                debug!("captcha: expirados {} challenges", expired_captchas);
+            }
             // Prune de bans expirados + dispatch de BansAutoCleared
             let pruned = stats_ctx.bans.prune_expired();
             if pruned > 0 {

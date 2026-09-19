@@ -133,14 +133,11 @@ pub async fn handle_tcp_client(
     let user_id = user.id;
 
     // Gate de scripts (onJoinCheck, paridad sb0t `Joining`): un script puede
-    // rechazar el join ANTES de anunciar al usuario a la sala.
+    // rechazar el join ANTES de anunciar al usuario a la sala. Compartido con
+    // el path web (`astra_admission::join_allowed`).
     {
         let jname = user.name.read().clone();
-        let jip = user.external_ip.to_string();
-        // El "local host" no puede ser rechazado por un script (paridad sb0t:
-        // `if (!Events.Joining(client)) if (!Helpers.IsLocalHost(client))`),
-        // para que un script con un bug no deje al dueño fuera de su sala.
-        if !ctx.is_local_host(user.external_ip) && !scripting.check_join(&jname, &jip) {
+        if !astra_admission::join_allowed(&ctx, &user, &scripting) {
             info!("join de '{}' rechazado por script (onJoinCheck)", jname);
             let mut w = proto_ares::PacketWriter::with_msg_crypto(
                 proto_ares::TcpMsg::ServerError,
@@ -148,11 +145,7 @@ pub async fn handle_tcp_client(
             );
             w.write_string_nt("You have been rejected from this room.").ok();
             let _ = user.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
-            scripting.dispatch(astra_scripting::ScriptEvent::Rejected {
-                name: jname,
-                ip: jip,
-                reason: "script".to_string(),
-            });
+            astra_admission::dispatch_rejected(&scripting, &jname, user.external_ip, "script");
             ctx.user_pool.remove(user_id);
             ctx.stats.on_user_part();
             return Ok(());
@@ -522,111 +515,55 @@ async fn process_handshake(
                     // los gates de entrada y entra como Owner. Desactivado
                     // por defecto (ajuste `local_host`).
                     let is_local = ctx.is_local_host(peer.ip());
-                    // CAPA 4: validación
-                    let (validation_result, issues) = ctx.security.login_validator.validate(&login);
-                    // Disparar eventos de scripting para issues detectados (no rechazos)
-                    for issue in &issues {
-                        match issue {
-                            server_core::security::DetectedIssue::Proxy => {
-                                // sb0t parity: gate onProxyDetected — usa el retorno
-                                // del script (default: false = rechazar).
-                                let allowed = scripting.check_proxy_detected(&login.org_name, &peer.ip().to_string());
-                                scripting.dispatch(astra_scripting::ScriptEvent::ProxyDetected {
-                                    name: login.org_name.clone(),
-                                    ip: peer.ip().to_string(),
-                                    reply: allowed,
-                                });
-                            }
-                        }
-                    }
-                    if let Err(reason) = validation_result {
-                        warn!("REJECTED (capa 4): peer={} nick='{}' razón={:?}", peer, login.org_name, reason);
-                        ctx.security.failed_logins.record_failure(peer.ip());
-                        let _ = tx.send(server_error_packet(reason.message()));
-                        // Disparar evento de scripting
-                        ctx.stats.on_invalid_login();
-                        scripting.dispatch(astra_scripting::ScriptEvent::InvalidLoginAttempt {
-                            name: login.org_name.clone(),
-                            ip: peer.ip().to_string(),
-                        });
-                        return Ok(None);
-                    }
-
                     let external_ip = peer.ip();
                     let now_ms = server_core::time::unix_time();
 
-                    // Ban persistente. El "local host" queda exento
-                    // (paridad sb0t: `if (BanSystem.IsBanned(client)) if
-                    // (!Helpers.IsLocalHost(client))`) — así el dueño no se
-                    // deja fuera de su propia sala por un ban de IP.
-                    if !is_local && ctx.bans.is_banned(&login.guid, external_ip) {
-                        warn!("REJECTED (ban persistente): peer={}", peer);
-                        let _ = tx.send(server_error_packet("You are banned from this room"));
-                        return Ok(None);
-                    }
-
-                    // Range ban (prefijo de IP) — misma exención.
-                    if !is_local && ctx.range_bans.is_banned(external_ip) {
-                        warn!("REJECTED (range ban): peer={}", peer);
-                        let _ = tx.send(server_error_packet("You are banned from this room"));
-                        return Ok(None);
-                    }
-
-                    // Join filter (patrón de nick)
-                    if ctx.join_filters.matches(&login.org_name) {
-                        warn!("REJECTED (join filter): peer={} name='{}'", peer, login.org_name);
-                        let _ = tx.send(server_error_packet("Your nickname is not allowed here"));
-                        return Ok(None);
-                    }
-
-                    // Nick duplicado: si la sesión existente es de la MISMA IP
-                    // externa, es una reconexión (el cliente perdió la conexión
-                    // sin que el server se enterara todavía) — la tratamos como
-                    // un hijack, paridad `TCPProcessor.cs` de sb0t (busca por
-                    // Name/OrgName, compara `OriginalIP`): se saca la sesión
-                    // vieja y se deja pasar la nueva. Si es una IP DISTINTA, se
-                    // rechaza como antes ("name in use" real).
+                    // Admisión compartida con el path web (`astra-admission`):
+                    // un único orden de gates (Capa 4, proxy, bans, ASN, VPN,
+                    // flood, nick/hijack) para que ambos transports no divergan.
+                    let admission = astra_admission::evaluate(&ctx, &login, external_ip, scripting);
                     let mut hijacked = false;
-                    if let Some(existing) = ctx.user_pool.get_by_name(&login.org_name) {
-                        if existing.external_ip == external_ip {
-                            info!(
-                                "hijack (misma IP): peer={} nick='{}' reemplaza sesión vieja id={}",
-                                peer, login.org_name, existing.id
+                    let captcha_pending = match admission {
+                        astra_admission::Admission::Allow { hijacked: h } => {
+                            hijacked = h;
+                            if hijacked {
+                                info!(
+                                    "hijack (misma IP): peer={} nick='{}'",
+                                    peer, login.org_name
+                                );
+                            }
+                            None
+                        }
+                        astra_admission::Admission::Reject { kind, client_message } => {
+                            warn!(
+                                "REJECTED (admission {:?}): peer={} nick='{}'",
+                                kind, peer, login.org_name
                             );
-                            hijacked = true;
-                            // GHOST (paridad sb0t Disconnect(true)): sin PART
-                            // ni anuncio — la sesión nueva reemplaza el nombre
-                            // en las userlists sin que la sala vea "has parted".
-                            ctx.ghost_part_user(&existing);
-                        } else {
-                            warn!("REJECTED (nick en uso): peer={} nick='{}'", peer, login.org_name);
-                            let _ = tx.send(server_error_packet("Nickname already in use"));
+                            ctx.security.failed_logins.record_failure(external_ip);
+                            let _ = tx.send(server_error_packet(&client_message));
+                            // El rechazo por Capa 4 cuenta como login inválido.
+                            if matches!(
+                                kind,
+                                server_core::security::RejectReason::InvalidName
+                                    | server_core::security::RejectReason::InvalidVersion
+                                    | server_core::security::RejectReason::InvalidGuid
+                                    | server_core::security::RejectReason::SpamBot
+                                    | server_core::security::RejectReason::SuspiciousProfile
+                            ) {
+                                astra_admission::on_invalid_login(
+                                    &ctx,
+                                    scripting,
+                                    &login.org_name,
+                                    external_ip,
+                                );
+                            }
                             return Ok(None);
                         }
-                    }
-
-                    // ASN ban (requiere base GeoIP-ASN cargada; si no, no-op)
-                    if !is_local && !ctx.asn_bans.is_empty() {
-                        if let Some(asn) = ctx.geoip.lookup_asn(external_ip) {
-                            if ctx.asn_bans.is_banned(asn) {
-                                warn!("REJECTED (ASN ban {}): peer={}", asn, peer);
-                                let _ = tx.send(server_error_packet("You are banned from this room"));
-                                return Ok(None);
-                            }
+                        astra_admission::Admission::Captcha { prompt, hijacked: h } => {
+                            hijacked = h;
+                            Some(prompt)
                         }
-                    }
-
-                    // Join-flood
-                    if ctx.user_history.is_join_flooding(external_ip, now_ms) {
-                        warn!("REJECTED (join-flood): peer={}", peer);
-                        let _ = tx.send(server_error_packet("Joining too quickly. Please wait 15 seconds."));
-                        // Disparar evento de scripting
-                        ctx.stats.on_flood();
-                        scripting.dispatch(astra_scripting::ScriptEvent::Flood {
-                            name: login.org_name.clone(),
-                        });
-                        return Ok(None);
-                    }
+                    };
 
                     // Construir usuario
                     let wants_crypto = login.crypto; // crypto == 250 en el login
@@ -659,11 +596,12 @@ async fn process_handshake(
                     }
                     let user_arc = Arc::new(user);
 
-                    // Captcha gate (chequear ANTES de add_user, para que la
-                    // primera conexión de una IP sea considerada "nueva").
-                    let needs_captcha_now = ctx.settings.security.captcha_enabled
-                        && !is_local
-                        && !ctx.user_history.has_prior_join(external_ip);
+                    // Captcha: por gate de IP nueva (paridad histórica) o por
+                    // acción `captcha` del filtro anti-VPN. Se chequea ANTES de
+                    // add_user para que la primera conexión de una IP cuente
+                    // como "nueva".
+                    let needs_captcha_now = captcha_pending.is_some()
+                        || astra_admission::needs_captcha_now(&ctx, external_ip);
 
                     ctx.user_pool.add(user_arc.clone());
                     ctx.stats.on_user_join(ctx.user_pool.len() as u32);
@@ -718,20 +656,22 @@ async fn process_handshake(
                     // reconexión y reinicio). Compartido con el login web.
                     ctx.restore_persisted_state(&user_arc);
 
+                    // Cuarentena por acción `quarantine` del filtro anti-VPN
+                    // (independiente del captcha).
+                    let vpn_quarantined = astra_admission::apply_vpn_quarantine(&ctx, &user_arc);
+
                     if needs_captcha_now {
-                        let user_id = user_arc.id.to_string();
-                        let challenge = ctx.captcha.create(user_id.clone());
-                        user_arc.needs_captcha.store(true, std::sync::atomic::Ordering::Relaxed);
-                        user_arc.quarantined.store(true, std::sync::atomic::Ordering::Relaxed);
-                        let visual = obfuscate_captcha_word(&challenge.word);
-                        let prompt = format!(
-                            "Welcome! Please type this code to enter: {}  (PM it back to {})",
-                            visual, ctx.settings.bot_name
-                        );
+                        let prompt = astra_admission::issue_captcha(&ctx, &user_arc);
                         send_bot_pm(&user_arc, &ctx.settings.bot_name, &prompt, scripting);
                         info!(
-                            "CAPTCHA issued: id={} ip={} word={}",
-                            user_arc.id, peer.ip(), challenge.word
+                            "CAPTCHA issued: id={} ip={}",
+                            user_arc.id,
+                            peer.ip()
+                        );
+                    } else if vpn_quarantined {
+                        info!(
+                            "VPN quarantine: id={} ip={} (acción del filtro)",
+                            user_arc.id, external_ip
                         );
                     }
 
@@ -1587,28 +1527,6 @@ async fn handle_public(
     debug!("public de '{}': {}", name, text);
 }
 
-/// Emite una variante visual del captcha: cada letra tiene 50% de
-/// probabilidad de estar en mayúscula o minúscula, y se añaden 1-2
-/// caracteres "0Oo1l" como ruido para OCRs simples.
-fn obfuscate_captcha_word(word: &str) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mut out = String::with_capacity(word.len() + 3);
-    for c in word.chars() {
-        let mapped = if rng.gen_bool(0.5) { c.to_ascii_lowercase() } else { c };
-        out.push(mapped);
-    }
-    // Añade 0-2 caracteres de ruido
-    let noise_count = rng.gen_range(0..=2);
-    let noise_chars = ['0', 'o', '1', 'l', 'I'];
-    for _ in 0..noise_count {
-        let nc = noise_chars[rng.gen_range(0..noise_chars.len())];
-        let pos = rng.gen_range(0..=out.len());
-        out.insert(pos, nc);
-    }
-    out
-}
-
 /// Maneja MSG_CHAT_CLIENT_EMOTE (11).
 async fn handle_emote(
     ctx: &AppContext,
@@ -1682,6 +1600,45 @@ async fn handle_pvt(
         Err(_) => return,
     };
     if text.is_empty() {
+        return;
+    }
+
+    // Captcha pendiente: si la respuesta va dirigida al bot del servidor, se
+    // verifica aquí y NO se entrega como PM normal. Sin este camino el
+    // captcha era irresoluble (se emitía pero nadie leía la respuesta).
+    if astra_admission::has_pending_captcha(user)
+        && target_name.eq_ignore_ascii_case(&ctx.settings.bot_name)
+    {
+        match astra_admission::verify_captcha(ctx, user, &text) {
+            astra_admission::CaptchaOutcome::Solved => {
+                send_bot_pm(
+                    user,
+                    &ctx.settings.bot_name,
+                    "Correct! Welcome to the room.",
+                    scripting,
+                );
+                info!("CAPTCHA solved: id={} nick='{}'", user.id, user.name.read());
+            }
+            astra_admission::CaptchaOutcome::Wrong { remaining } => {
+                send_bot_pm(
+                    user,
+                    &ctx.settings.bot_name,
+                    &format!("Incorrect. {} attempt(s) left.", remaining),
+                    scripting,
+                );
+            }
+            astra_admission::CaptchaOutcome::Failed => {
+                send_bot_pm(
+                    user,
+                    &ctx.settings.bot_name,
+                    "Captcha failed or expired. Disconnecting.",
+                    scripting,
+                );
+                info!("CAPTCHA failed: id={} nick='{}' — kick", user.id, user.name.read());
+                user.request_kill();
+            }
+            astra_admission::CaptchaOutcome::NoChallenge => {}
+        }
         return;
     }
 

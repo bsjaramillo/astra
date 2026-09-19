@@ -17,6 +17,7 @@ astra-udp = { path = "../udp" }
 astra-captcha = { path = "../captcha" }
 astra-commands = { path = "../commands" }
 astra-scripting = { path = "../scripting" }
+astra-admission = { path = "../admission" }
 astra-bot = { path = "../bot" }
 astra-web = { path = "../web" }
 astra-link = { path = "../link" }
@@ -33,6 +34,7 @@ serde = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
 scopeguard = { workspace = true }
+flate2 = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }

@@ -29,6 +29,7 @@ use super::ip_autologin::IpAutologinManager;
 use super::ip_bans::{AsnBanManager, RangeBanManager};
 use super::name_filters::NameFilterManager;
 use super::proxy_trust::TrustedProxyManager;
+use super::vpn_filter::VpnFilterManager;
 use super::room_flags::RoomFlags;
 use super::urls::UrlManager;
 use super::word_filter::WordFilterManager;
@@ -420,6 +421,8 @@ pub struct AppContext {
     pub range_bans: Arc<RangeBanManager>,
     /// ASN bans.
     pub asn_bans: Arc<AsnBanManager>,
+    /// Filtro anti-VPN/proxy (ASN + blocklist CIDR, acción configurable en vivo).
+    pub vpn_filter: Arc<VpnFilterManager>,
     /// Flags de sala (toggles caps/scribbles/audios/...).
     pub room_flags: Arc<RoomFlags>,
     /// Gate de cambio de vroom (onVroomJoinCheck), registrado por `main`.
@@ -590,6 +593,7 @@ impl AppContext {
         let urls = Arc::new(UrlManager::new(db.clone()));
         let range_bans = Arc::new(RangeBanManager::new(db.clone()));
         let asn_bans = Arc::new(AsnBanManager::new(db.clone()));
+        let vpn_filter = Arc::new(VpnFilterManager::new(db.clone()));
         let room_flags = Arc::new(RoomFlags::new(db.clone()));
         let custom_data = Arc::new(CustomDataStore::new());
         let pm_custom_data = Arc::new(CustomDataStore::new());
@@ -616,7 +620,11 @@ impl AppContext {
             );
             (!scaled.is_empty()).then_some(scaled)
         });
-        let geoip = Arc::new(GeoIp::load(std::path::Path::new(&settings.data_dir)));
+        let geoip = Arc::new(GeoIp::load(
+            db.clone(),
+            std::path::Path::new(&settings.data_dir),
+            settings.geoip.clone(),
+        ));
         let (link_events, _) = broadcast::channel(1024);
         Self {
             settings: Arc::new(settings),
@@ -637,6 +645,7 @@ impl AppContext {
             urls,
             range_bans,
             asn_bans,
+            vpn_filter,
             room_flags,
             vroom_check: parking_lot::RwLock::new(None),
             available_update: parking_lot::RwLock::new(None),

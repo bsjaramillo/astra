@@ -107,6 +107,10 @@ pub struct Settings {
     #[serde(default)]
     pub github: GithubConfig,
 
+    /// Descarga/refresco automático de las bases GeoIP/ASN (`asn.mmdb`).
+    #[serde(default)]
+    pub geoip: GeoIpConfig,
+
     /// Auto-owner para quien entra "desde el propio servidor" (paridad
     /// `Helpers.IsLocalHost` de sb0t, ajuste `local_host`).
     ///
@@ -338,6 +342,50 @@ impl Default for GithubConfig {
     }
 }
 
+/// Descarga automática de las bases MMDB de GeoIP/ASN.
+///
+/// Astra no puede leer ASN de una IP sin `asn.mmdb` (`GeoIp::lookup_asn`
+/// devuelve `None`), y sin ese dato la parte ASN del filtro anti-VPN y el
+/// comando `asnban` no funcionan. Con esto activo, un loop periódico descarga
+/// la base, la valida y la instala **sin reiniciar**.
+///
+/// El feed por defecto es DB-IP Lite (gratuito, sin cuenta, licencia CC-BY).
+/// Soporta el placeholder `{YYYY-MM}` en la URL para la variante mensual de
+/// DB-IP; si no está, se usa la URL tal cual (p. ej. un mirror fijo).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeoIpConfig {
+    /// Interruptor maestro del updater. **Desactivado por defecto**: no genera
+    /// tráfico saliente salvo que el dueño lo habilite.
+    pub enabled: bool,
+    /// URL de descarga de la base ASN (`.mmdb` o `.mmdb.gz`). Admite el
+    /// placeholder `{YYYY-MM}`.
+    pub asn_url: String,
+    /// URL de descarga de la base de ciudad (`.mmdb` o `.mmdb.gz`). Vacío =
+    /// no descargar ciudad. Admite `{YYYY-MM}`.
+    pub city_url: String,
+    /// Horas entre comprobaciones. DB-IP publica mensualmente, así que 24h es
+    /// un buen balance entre frescura y tráfico.
+    pub refresh_hours: u64,
+}
+
+fn default_geoip_asn_url() -> String {
+    // Base mensual de DB-IP. El `{YYYY-MM}` se resuelve al mes actual (o al
+    // anterior si el actual todavía no está publicado).
+    "https://download.db-ip.com/free/dbip-asn-lite-{YYYY-MM}.mmdb.gz".to_string()
+}
+
+impl Default for GeoIpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            asn_url: default_geoip_asn_url(),
+            city_url: String::new(),
+            refresh_hours: 24,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -364,6 +412,7 @@ impl Default for Settings {
             seed_url: default_seed_url(),
             update_check: true,
             github: GithubConfig::default(),
+            geoip: GeoIpConfig::default(),
             local_host: false,
             server_ip: String::new(),
             script_in_room: false,

@@ -31,7 +31,10 @@ web, en cualquier plataforma.
 - **Panel de administración web** (`/admin`) con auth por owner password.
 - Motor de scripting JS (boa_engine) para plugins de sala.
 - Link Hub/Leaf entre servidores con **cifrado AES-256**.
-- GeoIP/ASN opcional (MaxMind GeoLite2 o DB-IP Lite) para `/trace` y `asnban`.
+- GeoIP/ASN opcional (MaxMind GeoLite2 o DB-IP Lite) para `/trace` y `asnban`,
+  con **descarga automática** del `asn.mmdb` (editor en vivo desde el panel).
+- **Filtro anti-VPN/proxy** configurable: ASN + blocklist CIDR, con acción
+  `report`/`reject`/`captcha`/`quarantine` y feed auto-refrescado.
 - **Aviso de actualizaciones**: chequea el registry cada 6h y avisa por PM a
   los admins/owners cuando hay versión nueva (badge en `/admin`; opt-out con
   `update_check = false`).

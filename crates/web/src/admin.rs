@@ -613,6 +613,47 @@ pub fn state_json(ctx: &AppContext) -> String {
     }
     s.push(']');
 
+    // Filtro anti-VPN/proxy: config live + entradas.
+    let vpn_cfg = ctx.vpn_filter.config();
+    s.push_str(",\"vpn\":{");
+    write!(
+        s,
+        "\"enabled\":{},\"action\":\"{}\",\"feedUrl\":\"{}\",\"refreshHours\":{},\"count\":{}",
+        vpn_cfg.enabled,
+        vpn_cfg.action.as_str(),
+        esc(&vpn_cfg.feed_url),
+        vpn_cfg.refresh_hours,
+        ctx.vpn_filter.len(),
+    )
+    .ok();
+    s.push_str(",\"entries\":[");
+    for (i, e) in ctx.vpn_filter.list().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        write!(
+            s,
+            "{{\"kind\":\"{}\",\"value\":\"{}\",\"source\":\"{}\"}}",
+            e.kind.as_str(),
+            esc(&e.value),
+            esc(&e.source)
+        )
+        .ok();
+    }
+    s.push_str("]}");
+
+    // Bases GeoIP/ASN: estado de carga + config del updater automático.
+    let geo_cfg = ctx.geoip.config();
+    s.push_str(&format!(
+        ",\"geoip\":{{\"hasAsn\":{},\"hasCity\":{},\"enabled\":{},\"asnUrl\":\"{}\",\"cityUrl\":\"{}\",\"refreshHours\":{}}}",
+        ctx.geoip.has_asn(),
+        ctx.geoip.has_city(),
+        geo_cfg.enabled,
+        esc(&geo_cfg.asn_url),
+        esc(&geo_cfg.city_url),
+        geo_cfg.refresh_hours,
+    ));
+
     // Reporte a GitHub: el panel necesita saber si puede ofrecer el envío
     // directo. El token NUNCA sale aquí.
     s.push_str(&format!(
@@ -664,6 +705,76 @@ pub fn add_trusted_proxy(ctx: &AppContext, ip: &str) -> bool {
 /// existía.
 pub fn remove_trusted_proxy(ctx: &AppContext, ip: &str) -> bool {
     ctx.trusted_proxies.remove(ip)
+}
+
+/// Aplica un cambio de configuración del filtro anti-VPN desde el panel
+/// (`enabled`, `action`, `feedUrl`, `refreshHours`). Los campos ausentes se
+/// dejan como están. Retorna `false` si la acción no es válida.
+pub fn set_vpn_config(
+    ctx: &AppContext,
+    enabled: Option<bool>,
+    action: Option<&str>,
+    feed_url: Option<&str>,
+    refresh_hours: Option<u64>,
+) -> bool {
+    if let Some(e) = enabled {
+        ctx.vpn_filter.set_enabled(e);
+    }
+    if let Some(a) = action {
+        let valid = server_core::VpnAction::all();
+        if !valid.iter().any(|v| v.as_str() == a.trim().to_ascii_lowercase()) {
+            return false;
+        }
+        ctx.vpn_filter
+            .set_action(server_core::VpnAction::from_str_lossy(a));
+    }
+    let current = ctx.vpn_filter.config();
+    let url = feed_url.map(|s| s.to_string()).unwrap_or(current.feed_url);
+    let hours = refresh_hours.unwrap_or(current.refresh_hours);
+    if feed_url.is_some() || refresh_hours.is_some() {
+        ctx.vpn_filter.set_feed(url, hours);
+    }
+    true
+}
+
+/// Agrega una entrada al filtro anti-VPN (CIDR o ASN). Retorna `false` si el
+/// valor no es válido.
+pub fn add_vpn_block(ctx: &AppContext, kind: &str, value: &str) -> bool {
+    let Some(kind) = server_core::VpnBlockKind::from_str_lossy(kind) else {
+        return false;
+    };
+    ctx.vpn_filter.add(kind, value)
+}
+
+/// Quita una entrada del filtro anti-VPN. Retorna `false` si no existía.
+pub fn remove_vpn_block(ctx: &AppContext, kind: &str, value: &str) -> bool {
+    let Some(kind) = server_core::VpnBlockKind::from_str_lossy(kind) else {
+        return false;
+    };
+    ctx.vpn_filter.remove(kind, value)
+}
+
+/// Borra todas las entradas de una fuente (`manual`/`feed`). Retorna cuántas.
+pub fn clear_vpn_source(ctx: &AppContext, source: &str) -> usize {
+    ctx.vpn_filter.clear_source(source)
+}
+
+/// Importa una blocklist pegada por el admin (una línea por CIDR/ASN).
+/// Reemplaza la fuente `feed`. Retorna cuántas entradas cargó.
+pub fn import_vpn_feed(ctx: &AppContext, text: &str) -> usize {
+    ctx.vpn_filter.import_feed(text)
+}
+
+/// Actualiza la config live del updater de GeoIP/ASN desde el panel.
+pub fn set_geoip_config(
+    ctx: &AppContext,
+    enabled: Option<bool>,
+    asn_url: Option<String>,
+    city_url: Option<String>,
+    refresh_hours: Option<u64>,
+) {
+    ctx.geoip
+        .set_config(enabled, asn_url, city_url, refresh_hours);
 }
 
 /// Kinds válidos de avatar administrable (sala/default).

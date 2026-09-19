@@ -290,6 +290,31 @@ impl Database {
                 created_at INTEGER NOT NULL
             );
 
+            -- Filtro anti-VPN/proxy: entradas CIDR/ASN + config singleton.
+            CREATE TABLE IF NOT EXISTS vpn_blocks (
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'manual',
+                PRIMARY KEY (kind, value)
+            );
+
+            CREATE TABLE IF NOT EXISTS vpn_config (
+                id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 0,
+                action TEXT NOT NULL DEFAULT 'report',
+                feed_url TEXT NOT NULL DEFAULT '',
+                refresh_hours INTEGER NOT NULL DEFAULT 24
+            );
+
+            -- Config live del updater de GeoIP/ASN (singleton).
+            CREATE TABLE IF NOT EXISTS geoip_config (
+                id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 0,
+                asn_url TEXT NOT NULL DEFAULT '',
+                city_url TEXT NOT NULL DEFAULT '',
+                refresh_hours INTEGER NOT NULL DEFAULT 24
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bans_guid ON bans(guid);
             CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans(externalip);
             CREATE INDEX IF NOT EXISTS idx_accounts_guid ON accounts(guid);
@@ -1341,6 +1366,155 @@ impl Database {
     }
 
     // ========================================================================
+    // Filtro anti-VPN/proxy (`vpn_blocks` + `vpn_config`)
+    // ========================================================================
+
+    /// Agrega una entrada a la blocklist. Retorna `true` si era nueva.
+    pub fn add_vpn_block(&self, kind: &str, value: &str, source: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO vpn_blocks (kind, value, source) VALUES (?1, ?2, ?3)",
+            params![kind, value, source],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Elimina una entrada (por tipo y valor). Retorna `true` si existía.
+    pub fn remove_vpn_block(&self, kind: &str, value: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "DELETE FROM vpn_blocks WHERE kind = ?1 AND value = ?2",
+            params![kind, value],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Lista todas las entradas como `(kind, value, source)`.
+    pub fn list_vpn_blocks(&self) -> DbResult<Vec<crate::vpn_filter::VpnBlockEntry>> {
+        use crate::vpn_filter::{VpnBlockEntry, VpnBlockKind};
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT kind, value, source FROM vpn_blocks ORDER BY kind, value")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (kind, value, source) = r?;
+            let Some(kind) = VpnBlockKind::from_str_lossy(&kind) else {
+                continue;
+            };
+            out.push(VpnBlockEntry {
+                kind,
+                value,
+                source,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Borra las entradas de una fuente (`manual` o `feed`). Retorna cuántas.
+    pub fn clear_vpn_blocks_by_source(&self, source: &str) -> DbResult<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute("DELETE FROM vpn_blocks WHERE source = ?1", params![source])?)
+    }
+
+    /// Guarda (upsert) la config del filtro (fila singleton `id = 1`).
+    pub fn save_vpn_config(&self, cfg: &crate::vpn_filter::VpnConfig) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO vpn_config (id, enabled, action, feed_url, refresh_hours) \
+             VALUES (1, ?1, ?2, ?3, ?4) \
+             ON CONFLICT(id) DO UPDATE SET enabled = ?1, action = ?2, feed_url = ?3, refresh_hours = ?4",
+            params![
+                cfg.enabled as i64,
+                cfg.action.as_str(),
+                cfg.feed_url,
+                cfg.refresh_hours as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Carga la config del filtro. Si la fila no existe, retorna el default.
+    pub fn load_vpn_config(&self) -> DbResult<crate::vpn_filter::VpnConfig> {
+        use crate::vpn_filter::{VpnAction, VpnConfig};
+        let conn = self.conn.lock();
+        let row = conn
+            .query_row(
+                "SELECT enabled, action, feed_url, refresh_hours FROM vpn_config WHERE id = 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(match row {
+            Some((enabled, action, feed_url, refresh_hours)) => VpnConfig {
+                enabled: enabled != 0,
+                action: VpnAction::from_str_lossy(&action),
+                feed_url,
+                refresh_hours: refresh_hours.max(1) as u64,
+            },
+            None => VpnConfig::default(),
+        })
+    }
+
+    /// Guarda (upsert) la config del updater de GeoIP (fila singleton `id = 1`).
+    pub fn save_geoip_config(&self, cfg: &crate::settings::GeoIpConfig) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO geoip_config (id, enabled, asn_url, city_url, refresh_hours) \
+             VALUES (1, ?1, ?2, ?3, ?4) \
+             ON CONFLICT(id) DO UPDATE SET enabled = ?1, asn_url = ?2, city_url = ?3, refresh_hours = ?4",
+            params![
+                cfg.enabled as i64,
+                cfg.asn_url,
+                cfg.city_url,
+                cfg.refresh_hours as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Carga la config del updater de GeoIP. `None` si la fila no existe
+    /// (primera ejecución): el caller usa el bootstrap de `astra.toml`.
+    pub fn load_geoip_config(&self) -> DbResult<Option<crate::settings::GeoIpConfig>> {
+        let conn = self.conn.lock();
+        let row = conn
+            .query_row(
+                "SELECT enabled, asn_url, city_url, refresh_hours FROM geoip_config WHERE id = 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.map(|(enabled, asn_url, city_url, refresh_hours)| {
+            crate::settings::GeoIpConfig {
+                enabled: enabled != 0,
+                asn_url,
+                city_url,
+                refresh_hours: refresh_hours.max(1) as u64,
+            }
+        }))
+    }
+
+    // ========================================================================
     // IP autologins (`/addautologin`, reconocimiento por GUID+IP sin cuenta)
     // ========================================================================
 
@@ -1857,6 +2031,60 @@ mod tests {
     fn guid_hex_invalid() {
         assert!(guid_from_hex("tooshort").is_none());
         assert!(guid_from_hex("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ").is_none());
+    }
+
+    #[test]
+    fn vpn_blocks_crud_and_config_roundtrip() {
+        use crate::vpn_filter::{VpnAction, VpnBlockKind, VpnConfig};
+        let db = Database::in_memory().unwrap();
+
+        assert!(db.add_vpn_block("cidr", "1.2.3.0/24", "manual").unwrap());
+        assert!(!db.add_vpn_block("cidr", "1.2.3.0/24", "manual").unwrap());
+        assert!(db.add_vpn_block("asn", "64500", "feed").unwrap());
+
+        let list = db.list_vpn_blocks().unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list
+            .iter()
+            .any(|e| e.kind == VpnBlockKind::Cidr && e.value == "1.2.3.0/24"));
+        assert!(list
+            .iter()
+            .any(|e| e.kind == VpnBlockKind::Asn && e.source == "feed"));
+
+        // clear por fuente solo borra esa fuente.
+        assert_eq!(db.clear_vpn_blocks_by_source("feed").unwrap(), 1);
+        assert_eq!(db.list_vpn_blocks().unwrap().len(), 1);
+
+        assert!(db.remove_vpn_block("cidr", "1.2.3.0/24").unwrap());
+        assert!(!db.remove_vpn_block("cidr", "1.2.3.0/24").unwrap());
+
+        // Config singleton: default, luego roundtrip.
+        assert_eq!(db.load_vpn_config().unwrap(), VpnConfig::default());
+        let cfg = VpnConfig {
+            enabled: true,
+            action: VpnAction::Reject,
+            feed_url: "https://example.test/list.txt".to_string(),
+            refresh_hours: 6,
+        };
+        db.save_vpn_config(&cfg).unwrap();
+        assert_eq!(db.load_vpn_config().unwrap(), cfg);
+    }
+
+    #[test]
+    fn geoip_config_roundtrip() {
+        use crate::settings::GeoIpConfig;
+        let db = Database::in_memory().unwrap();
+        // Primera ejecución: la fila no existe → None (el caller usa el TOML).
+        assert!(db.load_geoip_config().unwrap().is_none());
+        let cfg = GeoIpConfig {
+            enabled: true,
+            asn_url: "https://example.test/dbip-{YYYY-MM}.mmdb.gz".to_string(),
+            city_url: "https://example.test/city.mmdb".to_string(),
+            refresh_hours: 6,
+        };
+        db.save_geoip_config(&cfg).unwrap();
+        let back = db.load_geoip_config().unwrap().unwrap();
+        assert_eq!(back, cfg);
     }
 
     #[test]

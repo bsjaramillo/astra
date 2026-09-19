@@ -12,6 +12,7 @@ server-core = { path = "../server-core" }
 astra-bot = { path = "../bot" }
 astra-commands = { path = "../commands" }
 astra-scripting = { path = "../scripting" }
+astra-admission = { path = "../admission" }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
