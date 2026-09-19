@@ -238,6 +238,11 @@ captcha_max_attempts = 3               # intentos antes de kickear
 # Acciones ante un hit: report (solo log) · reject (cerrar) · captcha (exigir
 # captcha) · quarantine (entrar silenciado). El comando `/vpncheck <ip|nick>`
 # (Admin+) diagnostica matchs aunque el filtro esté apagado.
+#
+# En el panel hay además una allowlist (IPs/rangos exentos, para corregir
+# falsos positivos) y un registro de detecciones recientes con un botón
+# "Permitir" por detección. Al aplicar `reject`/`quarantine`, la acción se
+# reevalúa también sobre los usuarios ya conectados.
 
 # --- GeoIP / ASN (descarga automática) ------------------------------------
 # Descarga y refresca las bases MMDB sin reiniciar. Es lo que permite resolver

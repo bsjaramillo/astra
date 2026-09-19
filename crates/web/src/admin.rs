@@ -641,6 +641,29 @@ pub fn state_json(ctx: &AppContext) -> String {
         )
         .ok();
     }
+    s.push_str("],\"allow\":[");
+    for (i, value) in ctx.vpn_filter.allow_list().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        write!(s, "\"{}\"", esc(value)).ok();
+    }
+    s.push_str("],\"detections\":[");
+    for (i, d) in ctx.vpn_filter.detections(200).iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        write!(
+            s,
+            "{{\"ip\":\"{}\",\"name\":\"{}\",\"rule\":\"{}\",\"action\":\"{}\",\"at\":{}}}",
+            esc(&d.ip),
+            esc(&d.name),
+            esc(&d.rule),
+            esc(&d.action),
+            d.detected_at,
+        )
+        .ok();
+    }
     s.push_str("]}");
 
     // Bases GeoIP/ASN: estado de carga + config del updater automático.
@@ -764,6 +787,22 @@ pub fn clear_vpn_source(ctx: &AppContext, source: &str) -> usize {
 /// Reemplaza la fuente `feed`. Retorna cuántas entradas cargó.
 pub fn import_vpn_feed(ctx: &AppContext, text: &str) -> usize {
     ctx.vpn_filter.import_feed(text)
+}
+
+/// Agrega una IP/rango a la allowlist (exención del filtro). `false` si no
+/// parsea.
+pub fn add_vpn_allow(ctx: &AppContext, value: &str) -> bool {
+    ctx.vpn_filter.allow_add(value)
+}
+
+/// Quita una IP/rango de la allowlist. `false` si no existía.
+pub fn remove_vpn_allow(ctx: &AppContext, value: &str) -> bool {
+    ctx.vpn_filter.allow_remove(value)
+}
+
+/// Borra el registro de detecciones. Retorna cuántas había.
+pub fn clear_vpn_detections(ctx: &AppContext) -> usize {
+    ctx.vpn_filter.clear_detections()
 }
 
 /// Actualiza la config live del updater de GeoIP/ASN desde el panel.

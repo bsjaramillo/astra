@@ -411,7 +411,14 @@ async fn handle_admin_route(
             let feed_url = v.get("feedUrl").and_then(|x| x.as_str());
             let refresh_hours = v.get("refreshHours").and_then(|x| x.as_u64());
             let ok = crate::admin::set_vpn_config(ctx, enabled, action, feed_url, refresh_hours);
-            let body = format!("{{\"ok\":{}}}", ok);
+            // Si la acción quedó en reject/quarantine, aplicarla también a los
+            // usuarios YA conectados: el gate de login solo actúa al entrar.
+            let sh = astra_scripting::ScriptHandle::dummy();
+            let (kicked, quarantined) = astra_admission::enforce_vpn_on_connected(ctx, &sh);
+            let body = format!(
+                "{{\"ok\":{},\"kicked\":{},\"quarantined\":{}}}",
+                ok, kicked, quarantined
+            );
             send_http_json(stream, 200, &body).await?;
         }
         (m, "/admin/vpn/add") if m.eq_ignore_ascii_case("POST") => {
@@ -444,6 +451,31 @@ async fn handle_admin_route(
         (m, "/admin/vpn/refresh") if m.eq_ignore_ascii_case("POST") => {
             ctx.vpn_filter.request_refresh();
             send_http_json(stream, 200, "{\"ok\":true}").await?;
+        }
+        (m, "/admin/vpn/allow") if m.eq_ignore_ascii_case("POST") => {
+            let value = json_field(&req.body, "value").unwrap_or_default();
+            let body = format!("{{\"ok\":{}}}", crate::admin::add_vpn_allow(ctx, &value));
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/vpn/allow/remove") if m.eq_ignore_ascii_case("POST") => {
+            let value = json_field(&req.body, "value").unwrap_or_default();
+            let body = format!("{{\"ok\":{}}}", crate::admin::remove_vpn_allow(ctx, &value));
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/vpn/detections/clear") if m.eq_ignore_ascii_case("POST") => {
+            let n = crate::admin::clear_vpn_detections(ctx);
+            let body = format!("{{\"ok\":true,\"removed\":{}}}", n);
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/vpn/enforce") if m.eq_ignore_ascii_case("POST") => {
+            // Reevalúa a los conectados y expulsa/silencia según la acción.
+            let sh = astra_scripting::ScriptHandle::dummy();
+            let (kicked, quarantined) = astra_admission::enforce_vpn_on_connected(ctx, &sh);
+            let body = format!(
+                "{{\"ok\":true,\"kicked\":{},\"quarantined\":{}}}",
+                kicked, quarantined
+            );
+            send_http_json(stream, 200, &body).await?;
         }
         // ── Bases GeoIP/ASN ────────────────────────────────────────────
         (m, "/admin/geoip/config") if m.eq_ignore_ascii_case("POST") => {

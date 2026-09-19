@@ -139,7 +139,9 @@ pub use geoip::GeoIp;
 /// tipar/leer un `Reader` sin depender directamente del crate.
 pub use maxminddb;
 pub use ip_bans::{AsnBanManager, RangeBanManager};
-pub use vpn_filter::{VpnAction, VpnBlockEntry, VpnBlockKind, VpnConfig, VpnFilterManager, VpnHit};
+pub use vpn_filter::{
+    VpnAction, VpnBlockEntry, VpnBlockKind, VpnConfig, VpnDetection, VpnFilterManager, VpnHit,
+};
 pub use name_filters::NameFilterManager;
 pub use room_flags::RoomFlags;
 pub use room::Room;

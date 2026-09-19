@@ -394,6 +394,11 @@ const I18N = {
     vpn_refreshing:"Descargando feed…", vpn_count:"{0} entradas", vpn_empty:"Sin entradas",
     vpn_refresh_now:"Refrescar feed", vpn_refresh_queued:"Descarga del feed en curso…",
     vpn_count_hint:"Al activar el filtro, el feed se descarga de inmediato. El conteo se actualiza al terminar.",
+    vpn_enforce_now:"Aplicar a conectados", vpn_enforced:"Aplicado: {0} expulsados, {1} en cuarentena",
+    vpn_allow_h:"Exenciones (allowlist)", vpn_allow_sub:"IPs o rangos que nunca se bloquean, aunque aparezcan en la lista. Usalo para corregir falsos positivos.",
+    vpn_allow_btn:"Permitir", vpn_allow_added:"Exención agregada",
+    vpn_det_h:"Detecciones recientes", vpn_det_sub:"Últimas conexiones bloqueadas o reportadas por el filtro. Si alguna es un falso positivo, tocá «Permitir» para eximirla.",
+    vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Regla", vpn_det_th_action:"Acción", vpn_det_clear:"Vaciar registro", vpn_det_cleared:"Registro vaciado",
 
     perm_h:"Permisos de comandos", perm_sub:"Rango mínimo necesario para usar cada comando. Se aplica al instante.",
     perm_search:"🔎 Buscar comando…", th_command:"Comando", th_minrank:"Rango mínimo",
@@ -596,6 +601,11 @@ const I18N = {
     vpn_refreshing:"Downloading feed…", vpn_count:"{0} entries", vpn_empty:"No entries",
     vpn_refresh_now:"Refresh feed", vpn_refresh_queued:"Feed download in progress…",
     vpn_count_hint:"When you enable the filter, the feed downloads immediately. The count updates when it finishes.",
+    vpn_enforce_now:"Apply to connected", vpn_enforced:"Applied: {0} kicked, {1} quarantined",
+    vpn_allow_h:"Exemptions (allowlist)", vpn_allow_sub:"IPs or ranges that are never blocked, even if they appear on the list. Use it to fix false positives.",
+    vpn_allow_btn:"Allow", vpn_allow_added:"Exemption added",
+    vpn_det_h:"Recent detections", vpn_det_sub:"Latest connections blocked or reported by the filter. If one is a false positive, tap 'Allow' to exempt it.",
+    vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Rule", vpn_det_th_action:"Action", vpn_det_clear:"Clear log", vpn_det_cleared:"Log cleared",
 
     perm_h:"Command permissions", perm_sub:"Minimum rank required to run each command. Applies instantly.",
     perm_search:"🔎 Search command…", th_command:"Command", th_minrank:"Minimum rank",
@@ -1190,6 +1200,11 @@ function renderVpn(){
   const rows=(v.entries||[]).map(e=>`<tr><td><span class="chip">${esc(e.kind)}</span></td>
     <td><code>${esc(e.value)}</code></td><td>${esc(e.source)}</td>
     <td style="text-align:right"><button class="btn sm danger" data-vpndel="${esc(e.kind)}|${esc(e.value)}">×</button></td></tr>`).join("");
+  const allowRows=(v.allow||[]).map(a=>`<span class="pill">${esc(a)} <a href="#" data-vpnallowdel="${esc(a)}">×</a></span>`).join("");
+  const detRows=(v.detections||[]).map(d=>`<tr>
+    <td><code>${esc(d.ip)}</code></td><td>${esc(d.name)}</td>
+    <td><span class="chip">${esc(d.rule)}</span></td><td>${esc(d.action)}</td>
+    <td style="text-align:right"><button class="btn sm" data-vpnallowip="${esc(d.ip)}">${t("vpn_allow_btn")}</button></td></tr>`).join("");
   const asnBadge = g.hasAsn ? `<span class="badge voice">${t("geoip_asn_loaded")}</span>` : `<span class="badge">${t("geoip_asn_missing")}</span>`;
   const vpnCount = v.count||0;
   const feedBadge = v.refreshing
@@ -1216,6 +1231,7 @@ function renderVpn(){
       </div>
       <label class="fld"><span>${t("vpn_feed")}</span><input id="vpnFeedUrl" value="${esc(v.feedUrl)}" placeholder="https://…"></label>
       <div class="rowend"><button class="btn" id="vpnRefreshNow">${t("vpn_refresh_now")}</button>
+      <button class="btn" id="vpnEnforce">${t("vpn_enforce_now")}</button>
       <button class="btn primary" id="vpnSave">${t("common_save_changes")}</button></div>
     </div>
     <div class="card"><h3>${t("vpn_entries_h")}</h3>
@@ -1232,6 +1248,17 @@ function renderVpn(){
       <p class="sub">${t("vpn_import_sub")}</p>
       <textarea id="vpnImport" spellcheck="false" style="width:100%;height:18vh;font-family:ui-monospace,monospace;font-size:12.5px" placeholder="1.2.3.0/24&#10;AS64500"></textarea>
       <div class="rowend"><button class="btn primary" id="vpnImportBtn">${t("vpn_import_btn")}</button></div>
+    </div>
+    <div class="card"><h3>${t("vpn_allow_h")}</h3>
+      <p class="sub">${t("vpn_allow_sub")}</p>
+      <div>${allowRows||`<span class=mut>${t("common_none_f")}</span>`}</div>
+      <div class="inline" style="margin-top:12px"><input id="vpnAllowIn" placeholder="1.2.3.4 o 1.2.3.0/24"><button class="btn primary" id="vpnAllowAdd">${t("common_add")}</button></div>
+    </div>
+    <div class="card"><h3>${t("vpn_det_h")} <span class="badge">${(v.detections||[]).length}</span></h3>
+      <p class="sub">${t("vpn_det_sub")}</p>
+      <div class="scroll"><table class="tbl"><thead><tr><th>${t("vpn_det_th_ip")}</th><th>${t("vpn_det_th_name")}</th><th>${t("vpn_det_th_rule")}</th><th>${t("vpn_det_th_action")}</th><th></th></tr></thead>
+      <tbody>${detRows||'<tr><td colspan=5 class=mut>—</td></tr>'}</tbody></table></div>
+      <div class="rowend"><button class="btn danger" id="vpnDetClear">${t("vpn_det_clear")}</button></div>
     </div>`;
 }
 async function saveGeoipCfg(){
@@ -1251,6 +1278,28 @@ async function vpnRefreshNow(){
   const r=await api("/admin/vpn/refresh",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
   if(r.ok) toast(t("vpn_refresh_queued"),"ok"); else toast(t("err_prefix")+t("err_save"),"err");
 }
+async function vpnEnforceNow(){
+  const r=await api("/admin/vpn/enforce",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  const j=await r.json().catch(()=>({kicked:0,quarantined:0}));
+  toast(t("vpn_enforced", j.kicked||0, j.quarantined||0),"ok");
+  await refresh();
+}
+async function vpnAllowAdd(value){
+  const v = value!=null ? value : (document.getElementById("vpnAllowIn")||{}).value;
+  if(!v) return;
+  const r=await api("/admin/vpn/allow",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({value:v})});
+  const j=await r.json().catch(()=>({ok:false}));
+  if(j.ok){ toast(t("vpn_allow_added"),"ok"); await refresh(); }
+  else toast(t("vpn_invalid"),"err");
+}
+async function vpnAllowRemove(value){
+  await api("/admin/vpn/allow/remove",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({value})});
+  await refresh();
+}
+async function vpnClearDetections(){
+  await api("/admin/vpn/detections/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  toast(t("vpn_det_cleared"),"ok"); await refresh();
+}
 
 async function saveVpnCfg(){
   const body={enabled:document.getElementById("vpnEnabled").checked,
@@ -1258,7 +1307,12 @@ async function saveVpnCfg(){
     feedUrl:document.getElementById("vpnFeedUrl").value,
     refreshHours:parseInt(document.getElementById("vpnHours").value||"24",10)};
   const r=await api("/admin/vpn/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-  if(r.ok) toast(t("vpn_saved"),"ok"); else toast(t("err_prefix")+t("err_save"),"err");
+  if(r.ok){
+    const j=await r.json().catch(()=>({}));
+    if((j.kicked||0)+(j.quarantined||0)>0) toast(t("vpn_enforced", j.kicked||0, j.quarantined||0),"ok");
+    else toast(t("vpn_saved"),"ok");
+    await refresh();
+  } else toast(t("err_prefix")+t("err_save"),"err");
 }
 async function addVpnBlock(){
   const kind=document.getElementById("vpnKind").value, value=document.getElementById("vpnValue").value;
@@ -1653,14 +1707,26 @@ function wire(){
   if(g("geoipRefreshNow")) g("geoipRefreshNow").onclick=geoipRefreshNow;
   if(g("vpnSave")) g("vpnSave").onclick=saveVpnCfg;
   if(g("vpnRefreshNow")) g("vpnRefreshNow").onclick=vpnRefreshNow;
+  if(g("vpnEnforce")) g("vpnEnforce").onclick=vpnEnforceNow;
   if(g("vpnAdd")) g("vpnAdd").onclick=addVpnBlock;
   if(g("vpnClearFeed")) g("vpnClearFeed").onclick=()=>clearVpnSource("feed");
   if(g("vpnClearManual")) g("vpnClearManual").onclick=()=>clearVpnSource("manual");
   if(g("vpnImportBtn")) g("vpnImportBtn").onclick=importVpnFeed;
+  if(g("vpnAllowAdd")) g("vpnAllowAdd").onclick=()=>vpnAllowAdd();
+  if(g("vpnDetClear")) g("vpnDetClear").onclick=vpnClearDetections;
   document.querySelectorAll("[data-vpndel]").forEach(a=>a.onclick=async e=>{
     e.preventDefault();
     const [kind,value]=a.dataset.vpndel.split("|");
     await removeVpnBlock(kind,value);
+  });
+  document.querySelectorAll("[data-vpnallowdel]").forEach(a=>a.onclick=async e=>{
+    e.preventDefault(); await vpnAllowRemove(a.dataset.vpnallowdel);
+  });
+  document.querySelectorAll("[data-vpnallowip]").forEach(a=>a.onclick=async e=>{
+    e.preventDefault();
+    const ip=a.dataset.vpnallowip;
+    // Permitir una /32 (la IP exacta detectada).
+    await vpnAllowAdd(ip);
   });
   if(g("permFilter")) g("permFilter").oninput=()=>{
     const q=g("permFilter").value.toLowerCase();

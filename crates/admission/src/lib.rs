@@ -156,6 +156,9 @@ pub fn evaluate(
                 rule: hit.rule.clone(),
                 action: action.as_str().to_string(),
             });
+            // Registrar para que el admin revise falsos positivos en el panel.
+            ctx.vpn_filter
+                .record_detection(name, ip, &hit.rule, action);
             match action {
                 VpnAction::Report | VpnAction::Quarantine => {
                     // `quarantine` se aplica tras crear el usuario
@@ -235,6 +238,68 @@ pub fn apply_vpn_quarantine(ctx: &AppContext, user: &AresUser) -> bool {
         return true;
     }
     false
+}
+
+/// Reevalúa el filtro anti-VPN sobre los usuarios **ya conectados** y aplica
+/// la acción configurada a los que matchean: `reject` los expulsa (kick),
+/// `quarantine` los silencia. No hace nada con `report`.
+///
+/// El gate de login solo actúa al entrar; sin esto, activar el filtro con
+/// usuarios dentro no los toca hasta que reconecten, lo que da la falsa
+/// impresión de que "el filtro no funciona".
+///
+/// Retorna `(kicked, quarantined)`.
+pub fn enforce_vpn_on_connected(ctx: &AppContext, scripting: &astra_scripting::ScriptHandle) -> (usize, usize) {
+    if !ctx.vpn_filter.is_enabled() {
+        return (0, 0);
+    }
+    let action = ctx.vpn_filter.action();
+    if matches!(action, VpnAction::Report | VpnAction::Captcha) {
+        // `report` no actúa; `captcha` no tiene sentido retroactivo.
+        return (0, 0);
+    }
+    let mut kicked = 0;
+    let mut quarantined = 0;
+    for user in ctx.user_pool.users() {
+        if !user.logged_in || ctx.is_local_host(user.external_ip) {
+            continue;
+        }
+        let Some(hit) = ctx.vpn_filter.classify(&ctx.geoip, user.external_ip) else {
+            continue;
+        };
+        let name = user.name.read().clone();
+        ctx.vpn_filter
+            .record_detection(&name, user.external_ip, &hit.rule, action);
+        match action {
+            VpnAction::Reject => {
+                tracing::warn!(
+                    "vpn enforcement: expulsando '{}' ({}) por regla VPN",
+                    name,
+                    user.external_ip
+                );
+                scripting.dispatch(astra_scripting::ScriptEvent::VpnDetected {
+                    name,
+                    ip: user.external_ip.to_string(),
+                    rule: hit.rule.clone(),
+                    action: action.as_str().to_string(),
+                });
+                user.request_kill();
+                kicked += 1;
+            }
+            VpnAction::Quarantine => {
+                if !user
+                    .quarantined
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    user.quarantined
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    quarantined += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    (kicked, quarantined)
 }
 
 /// Gate `onJoinCheck` (paridad sb0t `Joining`): un script puede rechazar el
@@ -550,6 +615,85 @@ mod tests {
             evaluate(&ctx, &login("Alice"), ip, false, &sh),
             Admission::Captcha { .. }
         ));
+    }
+
+    #[test]
+    fn enforce_kicks_connected_vpn_user_on_reject() {
+        use server_core::user_pool::AresUser;
+        let ctx = test_ctx();
+        let sh = astra_scripting::ScriptHandle::dummy();
+        ctx.vpn_filter
+            .add(server_core::VpnBlockKind::Cidr, "198.51.100.0/24");
+        ctx.vpn_filter.set_enabled(true);
+        ctx.vpn_filter.set_action(server_core::VpnAction::Reject);
+
+        let mut u = AresUser::new(7, "198.51.100.7".parse().unwrap(), [0x11; 16]);
+        u.logged_in = true;
+        *u.name.write() = "VpnUser".to_string();
+        let u = Arc::new(u);
+        ctx.user_pool.add(u.clone());
+
+        let (kicked, quarantined) = enforce_vpn_on_connected(&ctx, &sh);
+        assert_eq!(kicked, 1);
+        assert_eq!(quarantined, 0);
+        assert!(u.is_killed(), "el usuario VPN debía ser expulsado");
+
+        // Sacamos al expulsado (en producción el loop lo limpia) y probamos
+        // que un usuario limpio no se toca.
+        ctx.user_pool.remove(7);
+        let mut clean = AresUser::new(8, "8.8.8.8".parse().unwrap(), [0x22; 16]);
+        clean.logged_in = true;
+        *clean.name.write() = "Clean".to_string();
+        let clean = Arc::new(clean);
+        ctx.user_pool.add(clean.clone());
+        let (k2, _) = enforce_vpn_on_connected(&ctx, &sh);
+        assert_eq!(k2, 0);
+        assert!(!clean.is_killed());
+    }
+
+    #[test]
+    fn enforce_quarantines_connected_vpn_user() {
+        use server_core::user_pool::AresUser;
+        let ctx = test_ctx();
+        let sh = astra_scripting::ScriptHandle::dummy();
+        ctx.vpn_filter
+            .add(server_core::VpnBlockKind::Cidr, "198.51.100.0/24");
+        ctx.vpn_filter.set_enabled(true);
+        ctx.vpn_filter.set_action(server_core::VpnAction::Quarantine);
+
+        let mut u = AresUser::new(9, "198.51.100.9".parse().unwrap(), [0x33; 16]);
+        u.logged_in = true;
+        *u.name.write() = "VpnUser2".to_string();
+        let u = Arc::new(u);
+        ctx.user_pool.add(u.clone());
+
+        let (kicked, quarantined) = enforce_vpn_on_connected(&ctx, &sh);
+        assert_eq!(kicked, 0);
+        assert_eq!(quarantined, 1);
+        assert!(is_quarantined(&u));
+        assert!(!u.is_killed());
+    }
+
+    #[test]
+    fn enforce_is_noop_on_report() {
+        use server_core::user_pool::AresUser;
+        let ctx = test_ctx();
+        let sh = astra_scripting::ScriptHandle::dummy();
+        ctx.vpn_filter
+            .add(server_core::VpnBlockKind::Cidr, "198.51.100.0/24");
+        ctx.vpn_filter.set_enabled(true);
+        ctx.vpn_filter.set_action(server_core::VpnAction::Report);
+
+        let mut u = AresUser::new(10, "198.51.100.10".parse().unwrap(), [0x44; 16]);
+        u.logged_in = true;
+        *u.name.write() = "VpnUser3".to_string();
+        let u = Arc::new(u);
+        ctx.user_pool.add(u.clone());
+
+        let (kicked, quarantined) = enforce_vpn_on_connected(&ctx, &sh);
+        assert_eq!((kicked, quarantined), (0, 0));
+        assert!(!u.is_killed());
+        assert!(!is_quarantined(&u));
     }
 
     #[test]

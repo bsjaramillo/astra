@@ -108,6 +108,21 @@ pub struct VpnBlockEntry {
     pub source: String,
 }
 
+/// Una detección registrada (para revisar falsos positivos en el panel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VpnDetection {
+    /// IP detectada.
+    pub ip: String,
+    /// Nick que intentó entrar (o el de la sesión reevaluada).
+    pub name: String,
+    /// Regla que matcheó (CIDR o ASN).
+    pub rule: String,
+    /// Acción aplicada (`report`/`reject`/...).
+    pub action: String,
+    /// Timestamp unix (segundos) de la detección.
+    pub detected_at: i64,
+}
+
 /// Resultado de un match contra la blocklist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VpnHit {
@@ -158,6 +173,8 @@ pub struct VpnFilterManager {
     v6: RwLock<Vec<(IpNet, String)>>,
     /// ASNs bloqueados.
     asns: RwLock<HashSet<u32>>,
+    /// Exenciones: IPs/rangos que nunca se bloquean (falsos positivos).
+    allow: RwLock<Vec<IpNet>>,
     /// Señal para pedir un refresco inmediato del feed. La dispara el panel al
     /// activar el filtro o al pulsar "refrescar", para no esperar el intervalo
     /// (24h) con la lista vacía.
@@ -191,12 +208,19 @@ impl VpnFilterManager {
                 }
             }
         }
+        let allow = db
+            .list_vpn_allow()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|s| s.parse::<IpNet>().ok())
+            .collect();
         Self {
             db,
             config: RwLock::new(config),
             v4: RwLock::new(v4),
             v6: RwLock::new(v6),
             asns: RwLock::new(asns),
+            allow: RwLock::new(allow),
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             refreshing: std::sync::atomic::AtomicBool::new(false),
         }
@@ -332,6 +356,12 @@ impl VpnFilterManager {
         geoip: &crate::geoip::GeoIp,
         ip: IpAddr,
     ) -> Option<VpnHit> {
+        // Exención: una IP en la allowlist nunca matchea (falso positivo
+        // corregido a mano por el admin).
+        if self.allow.read().iter().any(|net| net.contains(&ip)) {
+            return None;
+        }
+
         let asn = geoip.lookup_asn(ip);
 
         if let Some(asn) = asn {
@@ -544,6 +574,84 @@ impl VpnFilterManager {
         *self.v6.write() = v6;
         *self.asns.write() = asns;
     }
+
+    // ========================================================================
+    // Allowlist (exenciones / falsos positivos)
+    // ========================================================================
+
+    /// Agrega una IP o rango CIDR a la allowlist. Retorna `false` si no parsea.
+    pub fn allow_add(&self, value: &str) -> bool {
+        let value = value.trim();
+        // Aceptamos tanto `1.2.3.4` como `1.2.3.0/24`. Una IP suelta se
+        // normaliza a `/32` (o `/128`).
+        let Ok(net) = Self::parse_allow(value) else {
+            return false;
+        };
+        let canonical = net.to_string();
+        let is_new = self.db.add_vpn_allow(&canonical).unwrap_or(false);
+        if is_new {
+            self.allow.write().push(net);
+        }
+        is_new
+    }
+
+    /// Quita una IP/rango de la allowlist. Retorna `true` si existía.
+    pub fn allow_remove(&self, value: &str) -> bool {
+        let value = value.trim();
+        let Ok(net) = Self::parse_allow(value) else {
+            return false;
+        };
+        let removed = self
+            .db
+            .remove_vpn_allow(&net.to_string())
+            .unwrap_or(false);
+        if removed {
+            self.allow.write().retain(|n| *n != net);
+        }
+        removed
+    }
+
+    /// Lista la allowlist.
+    pub fn allow_list(&self) -> Vec<String> {
+        self.db.list_vpn_allow().unwrap_or_default()
+    }
+
+    /// ¿La IP está exenta?
+    pub fn is_allowed(&self, ip: IpAddr) -> bool {
+        self.allow.read().iter().any(|net| net.contains(&ip))
+    }
+
+    /// Parsea una IP suelta (`/32` o `/128`) o un CIDR.
+    fn parse_allow(value: &str) -> Result<IpNet, ()> {
+        if let Ok(ip) = value.parse::<IpAddr>() {
+            return Ok(IpNet::from(ip));
+        }
+        value.parse::<IpNet>().map_err(|_| ())
+    }
+
+    // ========================================================================
+    // Registro de detecciones
+    // ========================================================================
+
+    /// Registra una detección y poda el histórico (ring buffer de 500).
+    pub fn record_detection(&self, name: &str, ip: IpAddr, rule: &str, action: VpnAction) {
+        let now = crate::time::unix_time() as i64;
+        let _ = self
+            .db
+            .add_vpn_detection(&ip.to_string(), name, rule, action.as_str(), now);
+        // Poda barata: mantener las últimas 500.
+        let _ = self.db.prune_vpn_detections(500);
+    }
+
+    /// Lista las detecciones más recientes.
+    pub fn detections(&self, limit: usize) -> Vec<VpnDetection> {
+        self.db.list_vpn_detections(limit).unwrap_or_default()
+    }
+
+    /// Borra el registro de detecciones. Retorna cuántas había.
+    pub fn clear_detections(&self) -> usize {
+        self.db.clear_vpn_detections().unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -693,5 +801,60 @@ mod tests {
         }
         assert_eq!(VpnAction::from_str_lossy("REJECT"), VpnAction::Reject);
         assert_eq!(VpnAction::from_str_lossy("basura"), VpnAction::Report);
+    }
+
+    #[test]
+    fn allowlist_exempts_ip_and_range() {
+        let m = VpnFilterManager::new(mem_db());
+        m.add(VpnBlockKind::Cidr, "187.14.120.0/21");
+        m.set_enabled(true);
+        let ip: IpAddr = "187.14.127.35".parse().unwrap();
+        // Sin exención: matchea.
+        assert!(m.classify(&empty_geoip(), ip).is_some());
+
+        // Exención por IP exacta (/32): ya no matchea.
+        assert!(m.allow_add("187.14.127.35"));
+        assert!(m.is_allowed(ip));
+        assert!(m.classify(&empty_geoip(), ip).is_none());
+        // Otra IP del mismo rango sigue bloqueada.
+        assert!(m.classify(&empty_geoip(), "187.14.120.5".parse().unwrap()).is_some());
+
+        // Exención por rango completo.
+        m.allow_remove("187.14.127.35");
+        assert!(m.allow_add("187.14.120.0/21"));
+        assert!(m.classify(&empty_geoip(), ip).is_none());
+        assert!(m.classify(&empty_geoip(), "187.14.120.5".parse().unwrap()).is_none());
+
+        // Quitar la exención vuelve a bloquear.
+        assert!(m.allow_remove("187.14.120.0/21"));
+        assert!(m.classify(&empty_geoip(), ip).is_some());
+        assert!(!m.allow_remove("no-es-ip"));
+        assert!(!m.allow_add("basura"));
+    }
+
+    #[test]
+    fn allowlist_persists() {
+        let db = mem_db();
+        {
+            let m = VpnFilterManager::new(db.clone());
+            m.allow_add("1.2.3.4");
+        }
+        let m2 = VpnFilterManager::new(db);
+        assert!(m2.is_allowed("1.2.3.4".parse().unwrap()));
+        assert_eq!(m2.allow_list(), vec!["1.2.3.4/32".to_string()]);
+    }
+
+    #[test]
+    fn detections_record_and_clear() {
+        let m = VpnFilterManager::new(mem_db());
+        let ip: IpAddr = "9.9.9.9".parse().unwrap();
+        m.record_detection("Alice", ip, "1.2.3.0/24", VpnAction::Reject);
+        m.record_detection("Bob", ip, "64500", VpnAction::Quarantine);
+        let dets = m.detections(10);
+        assert_eq!(dets.len(), 2);
+        assert!(dets.iter().any(|d| d.name == "Alice" && d.rule == "1.2.3.0/24"));
+        assert!(dets.iter().any(|d| d.name == "Bob" && d.action == "quarantine"));
+        assert_eq!(m.clear_detections(), 2);
+        assert!(m.detections(10).is_empty());
     }
 }

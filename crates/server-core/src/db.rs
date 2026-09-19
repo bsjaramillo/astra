@@ -306,6 +306,23 @@ impl Database {
                 refresh_hours INTEGER NOT NULL DEFAULT 24
             );
 
+            -- Exenciones al filtro: IPs/rangos que NUNCA se bloquean aunque
+            -- matcheen (falsos positivos). Igual formato que vpn_blocks.
+            CREATE TABLE IF NOT EXISTS vpn_allow (
+                value TEXT NOT NULL PRIMARY KEY
+            );
+
+            -- Registro de detecciones (para revisar falsos positivos y
+            -- permitir acceso desde el panel). Ring buffer podado por cantidad.
+            CREATE TABLE IF NOT EXISTS vpn_detections (
+                ip TEXT NOT NULL,
+                name TEXT NOT NULL,
+                rule TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detected_at INTEGER NOT NULL,
+                PRIMARY KEY (ip, rule, detected_at)
+            );
+
             -- Config live del updater de GeoIP/ASN (singleton).
             CREATE TABLE IF NOT EXISTS geoip_config (
                 id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
@@ -1423,6 +1440,99 @@ impl Database {
         Ok(conn.execute("DELETE FROM vpn_blocks WHERE source = ?1", params![source])?)
     }
 
+    // ---- vpn_allow: exenciones ----
+
+    /// Agrega una IP/rango a la allowlist. Retorna `true` si era nueva.
+    pub fn add_vpn_allow(&self, value: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO vpn_allow (value) VALUES (?1)",
+            params![value],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Quita una IP/rango de la allowlist. Retorna `true` si existía.
+    pub fn remove_vpn_allow(&self, value: &str) -> DbResult<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute("DELETE FROM vpn_allow WHERE value = ?1", params![value])?;
+        Ok(n > 0)
+    }
+
+    /// Lista la allowlist ordenada.
+    pub fn list_vpn_allow(&self) -> DbResult<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT value FROM vpn_allow ORDER BY value")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ---- vpn_detections: registro de detecciones ----
+
+    /// Registra una detección (upsert; si ya existe la misma IP+regla en el
+    /// mismo segundo, se ignora).
+    pub fn add_vpn_detection(
+        &self,
+        ip: &str,
+        name: &str,
+        rule: &str,
+        action: &str,
+        detected_at: i64,
+    ) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO vpn_detections (ip, name, rule, action, detected_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![ip, name, rule, action, detected_at],
+        )?;
+        Ok(())
+    }
+
+    /// Lista las detecciones más recientes (máx `limit`), de más nueva a más
+    /// vieja.
+    pub fn list_vpn_detections(&self, limit: usize) -> DbResult<Vec<crate::vpn_filter::VpnDetection>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT ip, name, rule, action, detected_at FROM vpn_detections \
+             ORDER BY detected_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(crate::vpn_filter::VpnDetection {
+                ip: row.get(0)?,
+                name: row.get(1)?,
+                rule: row.get(2)?,
+                action: row.get(3)?,
+                detected_at: row.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Borra todas las detecciones registradas.
+    pub fn clear_vpn_detections(&self) -> DbResult<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute("DELETE FROM vpn_detections", [])?)
+    }
+
+    /// Poda el registro dejando solo las `keep` detecciones más recientes.
+    pub fn prune_vpn_detections(&self, keep: usize) -> DbResult<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute(
+            "DELETE FROM vpn_detections WHERE rowid NOT IN ( \
+                 SELECT rowid FROM vpn_detections ORDER BY detected_at DESC LIMIT ?1 \
+             )",
+            params![keep as i64],
+        )?)
+    }
+
     /// Guarda (upsert) la config del filtro (fila singleton `id = 1`).
     pub fn save_vpn_config(&self, cfg: &crate::vpn_filter::VpnConfig) -> DbResult<()> {
         let conn = self.conn.lock();
@@ -2068,6 +2178,34 @@ mod tests {
         };
         db.save_vpn_config(&cfg).unwrap();
         assert_eq!(db.load_vpn_config().unwrap(), cfg);
+    }
+
+    #[test]
+    fn vpn_allow_and_detections_crud() {
+        let db = Database::in_memory().unwrap();
+
+        // Allowlist.
+        assert!(db.add_vpn_allow("1.2.3.4/32").unwrap());
+        assert!(!db.add_vpn_allow("1.2.3.4/32").unwrap());
+        assert_eq!(db.list_vpn_allow().unwrap(), vec!["1.2.3.4/32".to_string()]);
+        assert!(db.remove_vpn_allow("1.2.3.4/32").unwrap());
+        assert!(!db.remove_vpn_allow("1.2.3.4/32").unwrap());
+
+        // Detecciones: se listan de más nueva a más vieja.
+        db.add_vpn_detection("9.9.9.9", "Alice", "1.2.3.0/24", "reject", 100)
+            .unwrap();
+        db.add_vpn_detection("9.9.9.9", "Alice", "1.2.3.0/24", "reject", 200)
+            .unwrap();
+        let dets = db.list_vpn_detections(10).unwrap();
+        assert_eq!(dets.len(), 2);
+        assert_eq!(dets[0].detected_at, 200);
+        assert_eq!(dets[0].name, "Alice");
+
+        // Poda: dejar solo la más reciente.
+        db.prune_vpn_detections(1).unwrap();
+        assert_eq!(db.list_vpn_detections(10).unwrap().len(), 1);
+        assert_eq!(db.clear_vpn_detections().unwrap(), 1);
+        assert!(db.list_vpn_detections(10).unwrap().is_empty());
     }
 
     #[test]
