@@ -286,9 +286,18 @@ impl LoginValidator {
     /// - `resultado` es `Ok(())` si el login es legítimo, `Err(razón)` si debe rechazarse.
     /// - `issues` es una lista de issues detectadas que NO son rechazos pero
     ///   generan eventos de scripting (ej. `ProxyDetected`).
+    ///
+    /// `is_web` distingue el path WebSocket/ib0t del Ares binario. La
+    /// diferencia real es la **versión**: en el protocolo nativo es un string
+    /// corto ("Ares 2.1.0") y un valor gigante es firma de spam, mientras que
+    /// en el web la versión es `client_version [user_agent]` por diseño
+    /// (`WebProcessor.Login` de sb0t) y siempre supera los 40 chars. El tope
+    /// de longitud aplica solo al nativo; el resto de checks (nombre, spam
+    /// bots, perfil) valen para ambos.
     pub fn validate(
         &self,
         login: &LoginData,
+        is_web: bool,
     ) -> (Result<(), RejectReason>, Vec<DetectedIssue>) {
         let mut issues = Vec::new();
 
@@ -305,7 +314,9 @@ impl LoginValidator {
         if login.version.is_empty() {
             return (Err(RejectReason::InvalidVersion), issues);
         }
-        if login.version.len() > 40 {
+        // Tope de longitud solo para clientes Ares nativos: el user-agent web
+        // es legítimamente largo y no debe rechazarse.
+        if !is_web && login.version.len() > 40 {
             return (Err(RejectReason::InvalidVersion), issues);
         }
 
@@ -719,14 +730,14 @@ mod tests {
     fn validator_accepts_good_login() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Alice", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert!((v.validate(&login).0).is_ok());
+        assert!((v.validate(&login, false).0).is_ok());
     }
 
     #[test]
     fn validator_rejects_empty_name() {
         let v = LoginValidator::new(test_config());
         let login = make_login("", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidName));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::InvalidName));
     }
 
     #[test]
@@ -734,28 +745,47 @@ mod tests {
         let v = LoginValidator::new(test_config());
         let long = "A".repeat(50);
         let login = make_login(&long, "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidName));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::InvalidName));
     }
 
     #[test]
     fn validator_rejects_control_chars() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Bad\x00Name", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidName));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::InvalidName));
     }
 
     #[test]
     fn validator_rejects_zero_width() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Bad\u{200B}Name", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidName));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::InvalidName));
     }
 
     #[test]
     fn validator_rejects_empty_version() {
         let v = LoginValidator::new(test_config());
         let login = make_login("X", "", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(v.validate(&login).0, Err(RejectReason::InvalidVersion));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::InvalidVersion));
+    }
+
+    /// Un login web trae `version = "client_version [user_agent]"`, que supera
+    /// los 40 chars por diseño. El tope de longitud NO debe aplicarse al path
+    /// web (regresión: un cliente ib0t real era rechazado con InvalidVersion).
+    #[test]
+    fn validator_accepts_long_web_useragent_version() {
+        let v = LoginValidator::new(test_config());
+        let ua = "inbizio web v0.1.5 [Mozilla/5.0 (X11; Ubuntu; Linux x86_64) \
+                  AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15]";
+        assert!(ua.len() > 40);
+        let login = make_login("Despistada", ua, varied_guid(0xAB), Ipv4Addr::new(88, 8, 74, 89));
+        // Web: aceptado aunque la versión sea larga.
+        assert!((v.validate(&login, true).0).is_ok());
+        // Nativo: el mismo string largo sigue rechazado (anti-spam).
+        assert_eq!(
+            v.validate(&login, false).0,
+            Err(RejectReason::InvalidVersion)
+        );
     }
 
     #[test]
@@ -764,7 +794,7 @@ mod tests {
         // produce un hash no-trivial y debe ser aceptado.
         let v = LoginValidator::new(test_config());
         let login = make_login("X", "Ares 2.1.0", [0; 16], Ipv4Addr::new(192, 168, 1, 1));
-        assert!((v.validate(&login).0).is_ok());
+        assert!((v.validate(&login, false).0).is_ok());
     }
 
     #[test]
@@ -772,21 +802,21 @@ mod tests {
         // Mismo caso: [0xFF;16] -> MD5 -> hash no uniforme -> OK
         let v = LoginValidator::new(test_config());
         let login = make_login("X", "Ares 2.1.0", [0xFF; 16], Ipv4Addr::new(192, 168, 1, 1));
-        assert!((v.validate(&login).0).is_ok());
+        assert!((v.validate(&login, false).0).is_ok());
     }
 
     #[test]
     fn validator_rejects_666_local_ip() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Bot", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(6, 6, 6, 6));
-        assert_eq!(v.validate(&login).0, Err(RejectReason::SpamBot));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::SpamBot));
     }
 
     #[test]
     fn validator_rejects_7878_local_ip() {
         let v = LoginValidator::new(test_config());
         let login = make_login("Bot", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(7, 8, 7, 8));
-        assert_eq!(v.validate(&login).0, Err(RejectReason::SpamBot));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::SpamBot));
     }
 
     #[test]
@@ -794,7 +824,7 @@ mod tests {
         let v = LoginValidator::new(test_config());
         let mut login = make_login("Bot", "Ares 2.1.0", varied_guid(0xAB), Ipv4Addr::new(192, 168, 1, 1));
         login.file_count = 6969;
-        assert_eq!(v.validate(&login).0, Err(RejectReason::SpamBot));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::SpamBot));
     }
 
     #[test]
@@ -804,7 +834,7 @@ mod tests {
         login.country = 0;
         login.file_count = 100;
         login.age = 0;
-        assert_eq!(v.validate(&login).0, Err(RejectReason::SuspiciousProfile));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::SuspiciousProfile));
     }
 
     #[test]
@@ -814,7 +844,7 @@ mod tests {
         login.country = 49;
         login.age = 25;
         login.file_count = 60001;
-        assert_eq!(v.validate(&login).0, Err(RejectReason::SuspiciousProfile));
+        assert_eq!(v.validate(&login, false).0, Err(RejectReason::SuspiciousProfile));
     }
 
     // ==================== Capa 5: FailedLoginTracker ====================

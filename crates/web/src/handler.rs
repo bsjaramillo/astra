@@ -610,7 +610,7 @@ async fn ws_handshake_login(
     // join-flood, nick/hijack). Antes este path se saltaba range bans, join
     // filters, ASN bans, validación de login y captcha.
     let login_data = make_login_data(&login);
-    let admission = astra_admission::evaluate(&ctx, &login_data, external_ip, scripting);
+    let admission = astra_admission::evaluate(&ctx, &login_data, external_ip, true, scripting);
     let mut hijacked = false;
     let captcha_pending = match admission {
         astra_admission::Admission::Allow { hijacked: h } => {

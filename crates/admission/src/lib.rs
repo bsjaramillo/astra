@@ -53,6 +53,9 @@ pub enum Admission {
 /// Evalúa los gates de entrada de un login. **No crea el usuario**: eso lo
 /// hace cada transport después de recibir [`Admission::Allow`].
 ///
+/// `is_web` se pasa a la validación de campos para que el tope de longitud de
+/// versión no rechace el user-agent web (ver `LoginValidator::validate`).
+///
 /// Orden (idéntico para TCP y web):
 /// 1. validación de campos (Capa 4) + gate de proxy (`onProxyDetected`);
 /// 2. ban persistente;
@@ -68,13 +71,14 @@ pub fn evaluate(
     ctx: &AppContext,
     login: &LoginData,
     ip: IpAddr,
+    is_web: bool,
     scripting: &astra_scripting::ScriptHandle,
 ) -> Admission {
     let is_local = ctx.is_local_host(ip);
     let name = &login.org_name;
 
     // ── 1. Validación de campos (Capa 4) + issue de proxy ──────────────
-    let (validation, issues) = ctx.security.login_validator.validate(login);
+    let (validation, issues) = ctx.security.login_validator.validate(login, is_web);
     for issue in &issues {
         match issue {
             server_core::security::DetectedIssue::Proxy => {
@@ -473,7 +477,7 @@ mod tests {
         let l = login("Alice");
         let ip: IpAddr = "203.0.113.9".parse().unwrap();
         assert!(matches!(
-            evaluate(&ctx, &l, ip, &sh),
+            evaluate(&ctx, &l, ip, false, &sh),
             Admission::Allow { hijacked: false }
         ));
     }
@@ -484,7 +488,7 @@ mod tests {
         let sh = astra_scripting::ScriptHandle::dummy();
         ctx.join_filters.add("Bad*");
         let ip: IpAddr = "203.0.113.9".parse().unwrap();
-        match evaluate(&ctx, &login("BadActor"), ip, &sh) {
+        match evaluate(&ctx, &login("BadActor"), ip, false, &sh) {
             Admission::Reject { kind, .. } => {
                 assert_eq!(kind, server_core::security::RejectReason::InvalidName)
             }
@@ -499,7 +503,7 @@ mod tests {
         ctx.range_bans.add("203.0.113");
         let ip: IpAddr = "203.0.113.9".parse().unwrap();
         assert!(matches!(
-            evaluate(&ctx, &login("Alice"), ip, &sh),
+            evaluate(&ctx, &login("Alice"), ip, false, &sh),
             Admission::Reject { .. }
         ));
     }
@@ -512,7 +516,7 @@ mod tests {
         ctx.vpn_filter.set_enabled(true);
         ctx.vpn_filter.set_action(server_core::VpnAction::Reject);
         let ip: IpAddr = "198.51.100.7".parse().unwrap();
-        match evaluate(&ctx, &login("Alice"), ip, &sh) {
+        match evaluate(&ctx, &login("Alice"), ip, false, &sh) {
             Admission::Reject { kind, .. } => {
                 assert_eq!(kind, server_core::security::RejectReason::VpnBlocked)
             }
@@ -529,7 +533,7 @@ mod tests {
         ctx.vpn_filter.set_action(server_core::VpnAction::Report);
         let ip: IpAddr = "198.51.100.7".parse().unwrap();
         assert!(matches!(
-            evaluate(&ctx, &login("Alice"), ip, &sh),
+            evaluate(&ctx, &login("Alice"), ip, false, &sh),
             Admission::Allow { .. }
         ));
     }
@@ -543,7 +547,7 @@ mod tests {
         ctx.vpn_filter.set_action(server_core::VpnAction::Captcha);
         let ip: IpAddr = "198.51.100.7".parse().unwrap();
         assert!(matches!(
-            evaluate(&ctx, &login("Alice"), ip, &sh),
+            evaluate(&ctx, &login("Alice"), ip, false, &sh),
             Admission::Captcha { .. }
         ));
     }

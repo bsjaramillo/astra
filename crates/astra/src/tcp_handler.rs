@@ -521,7 +521,8 @@ async fn process_handshake(
                     // Admisión compartida con el path web (`astra-admission`):
                     // un único orden de gates (Capa 4, proxy, bans, ASN, VPN,
                     // flood, nick/hijack) para que ambos transports no divergan.
-                    let admission = astra_admission::evaluate(&ctx, &login, external_ip, scripting);
+                    let admission =
+                        astra_admission::evaluate(&ctx, &login, external_ip, false, scripting);
                     let mut hijacked = false;
                     let captcha_pending = match admission {
                         astra_admission::Admission::Allow { hijacked: h } => {
