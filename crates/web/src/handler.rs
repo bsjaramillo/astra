@@ -1041,6 +1041,15 @@ fn handle_ws_public(
             return;
         }
     }
+    // Muzzled: puede ejecutar comandos pero no hablar en público (paridad TCP).
+    // (is_muzzled auto-expira los muzzles temporales de /mtimeout)
+    if user.is_muzzled() {
+        let _ = user.send_pvt(
+            &ctx.settings.bot_name,
+            "You are muzzled and cannot chat in public.",
+        );
+        return;
+    }
     // Word filter: solo aplica (censura) a usuarios regulares (Moderator+ exentos).
     if (*user.level.read() as u8) < server_core::ILevel::Moderator as u8 {
         if let Some((action, fargs)) = ctx.word_filter.check(&text) {
@@ -1769,6 +1778,14 @@ fn handle_ws_emote(
     scripting: &astra_scripting::ScriptHandle,
 ) {
     if text.is_empty() {
+        return;
+    }
+    // Muzzled: sin voz en público (paridad TCP, aplica también a emotes).
+    if user.is_muzzled() {
+        let _ = user.send_pvt(
+            &ctx.settings.bot_name,
+            "You are muzzled and cannot chat in public.",
+        );
         return;
     }
     let name = user.name.read().clone();

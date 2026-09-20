@@ -186,6 +186,12 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
   .toast.ok{border-color:rgba(52,199,89,.5)}
   .toast.err{border-color:rgba(255,82,87,.5)}
 
+  .modal{position:fixed;inset:0;z-index:210;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px}
+  .modalbox{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);width:100%;max-width:520px;max-height:82vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 50px rgba(0,0,0,.5)}
+  .modalhead{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border)}
+  .modalhead b{font-size:15px}
+  #modalBody{margin:0;padding:14px;overflow:auto;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg)}
+
   /* ---- Ajustes de ancho para desktop ----
      Van al FINAL de la hoja a propósito: son overrides de reglas definidas
      más arriba (.tiles, .card) y con la misma especificidad gana la última,
@@ -247,6 +253,13 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
 </div>
 </div>
 
+<div id="modal" class="modal hidden">
+  <div class="modalbox">
+    <div class="modalhead"><b id="modalTitle"></b><button class="iconbtn" id="modalClose" aria-label="Close">✕</button></div>
+    <pre id="modalBody"></pre>
+  </div>
+</div>
+
 <div id="toasts"></div>
 
 <script>
@@ -270,7 +283,7 @@ const I18N = {
     nav_proxies:"Proxies", nav_permisos:"Permisos de comandos", nav_config:"Config avanzada", nav_consola:"Consola",
     nav_motd:"Mensaje de entrada", nav_plantillas:"Textos del sistema", nav_bot:"Bot agente",
     common_save:"Guardar", common_save_changes:"Guardar cambios", common_add:"Agregar", common_remove:"Quitar",
-    common_none:"Ninguno.", common_none_f:"Ninguna.", common_loading:"Cargando…", common_error:"Error", common_done:"Listo",
+    common_none:"Ninguno.", common_none_f:"Ninguna.", common_loading:"Cargando…", common_error:"Error", common_done:"Listo", common_close:"Cerrar",
     restart_note:"⚠️ Estos cambios se guardan en el archivo de configuración y se aplican al <b>reiniciar el servidor</b>.",
     saved_restart:"Guardado. Reinicia el servidor para aplicar los cambios.",
     err_prefix:"Error: ", err_save:"no se pudo guardar",
@@ -478,7 +491,7 @@ const I18N = {
     nav_proxies:"Proxies", nav_permisos:"Command permissions", nav_config:"Advanced config", nav_consola:"Console",
     nav_motd:"Join message", nav_plantillas:"System texts", nav_bot:"Agent bot",
     common_save:"Save", common_save_changes:"Save changes", common_add:"Add", common_remove:"Remove",
-    common_none:"None.", common_none_f:"None.", common_loading:"Loading…", common_error:"Error", common_done:"Done",
+    common_none:"None.", common_none_f:"None.", common_loading:"Loading…", common_error:"Error", common_done:"Done", common_close:"Close",
     restart_note:"⚠️ These changes are written to the config file and take effect after <b>restarting the server</b>.",
     saved_restart:"Saved. Restart the server to apply the changes.",
     err_prefix:"Error: ", err_save:"couldn't save",
@@ -796,6 +809,13 @@ function toast(msg, kind){
   requestAnimationFrame(()=>el.classList.add("show"));
   setTimeout(()=>{ el.classList.remove("show"); setTimeout(()=>el.remove(),300); }, 2800);
 }
+
+function showOutput(title, lines){
+  document.getElementById("modalTitle").textContent = title || "";
+  document.getElementById("modalBody").textContent = (lines || []).join("\n") || t("common_none");
+  document.getElementById("modal").classList.remove("hidden");
+}
+function closeModal(){ document.getElementById("modal").classList.add("hidden"); }
 
 async function run(line, okMsg){
   const out = await cmd(line);
@@ -1694,10 +1714,11 @@ async function uploadAvatar(kind, fileInputId){
 
 function wire(){
   const g=(id)=>document.getElementById(id);
-  document.querySelectorAll("[data-act]").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("[data-act]").forEach(b=>b.onclick=async()=>{
     const n=b.dataset.n, a=b.dataset.act;
     if(a==="ban"&&!confirm(t("cf_ban",n)))return;
-    const msg={whois:false,kick:t("toast_kicked",n),ban:t("toast_banned",n),muzzle:t("toast_muted",n),unmuzzle:t("toast_unmuted",n)}[a];
+    if(a==="whois"){ showOutput(n, await cmd(`/whois ${n}`)); return; }
+    const msg={kick:t("toast_kicked",n),ban:t("toast_banned",n),muzzle:t("toast_muted",n),unmuzzle:t("toast_unmuted",n)}[a];
     run(`/${a} ${n}`, msg);
   });
   document.querySelectorAll("[data-act2]").forEach(b=>b.onclick=()=>run(`/${b.dataset.act2} ${b.dataset.n}`,t("toast_ban_rem")));
@@ -1825,6 +1846,8 @@ document.getElementById("menuBtn").onclick=openDrawer;
 document.getElementById("backdrop").onclick=closeDrawer;
 document.getElementById("refreshBtn").onclick=()=>{ CONFIG=null; refresh(); };
 document.getElementById("logoutBtn").onclick=logout;
+document.getElementById("modalClose").onclick=closeModal;
+document.getElementById("modal").onclick=e=>{ if(e.target.id==="modal") closeModal(); };
 document.getElementById("langBtn").onclick=()=>setLang(LANG==="es"?"en":"es");
 document.getElementById("langLink").onclick=e=>{ e.preventDefault(); setLang(LANG==="es"?"en":"es"); };
 
