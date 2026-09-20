@@ -627,21 +627,9 @@ pub fn state_json(ctx: &AppContext) -> String {
         ctx.vpn_filter.is_refreshing(),
     )
     .ok();
-    s.push_str(",\"entries\":[");
-    for (i, e) in ctx.vpn_filter.list().iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        write!(
-            s,
-            "{{\"kind\":\"{}\",\"value\":\"{}\",\"source\":\"{}\"}}",
-            e.kind.as_str(),
-            esc(&e.value),
-            esc(&e.source)
-        )
-        .ok();
-    }
-    s.push_str("],\"allow\":[");
+    // Las entries NO viajan en el state (son decenas de miles): el panel las
+    // pide paginadas y con búsqueda a `/admin/vpn/entries`.
+    s.push_str(",\"allow\":[");
     for (i, value) in ctx.vpn_filter.allow_list().iter().enumerate() {
         if i > 0 {
             s.push(',');
@@ -655,12 +643,13 @@ pub fn state_json(ctx: &AppContext) -> String {
         }
         write!(
             s,
-            "{{\"ip\":\"{}\",\"name\":\"{}\",\"rule\":\"{}\",\"action\":\"{}\",\"at\":{}}}",
+            "{{\"ip\":\"{}\",\"name\":\"{}\",\"rule\":\"{}\",\"action\":\"{}\",\"at\":{},\"hits\":{}}}",
             esc(&d.ip),
             esc(&d.name),
             esc(&d.rule),
             esc(&d.action),
             d.detected_at,
+            d.hits,
         )
         .ok();
     }
@@ -787,6 +776,52 @@ pub fn clear_vpn_source(ctx: &AppContext, source: &str) -> usize {
 /// Reemplaza la fuente `feed`. Retorna cuántas entradas cargó.
 pub fn import_vpn_feed(ctx: &AppContext, text: &str) -> usize {
     ctx.vpn_filter.import_feed(text)
+}
+
+/// Listado paginado y filtrable de las entries del filtro anti-VPN.
+///
+/// `query` busca por substring en el valor; `kind` filtra por `cidr`/`asn`
+/// (vacío = todos). `page` es 0-indexado y `per` el tamaño de página.
+/// Devuelve JSON `{total, page, per, entries:[...]}`.
+pub fn vpn_entries_json(
+    ctx: &AppContext,
+    query: &str,
+    kind: &str,
+    page: usize,
+    per: usize,
+) -> String {
+    let per = per.clamp(1, 500);
+    let q = query.trim().to_lowercase();
+    let kind_filter = kind.trim().to_lowercase();
+
+    let all = ctx.vpn_filter.list();
+    let filtered: Vec<_> = all
+        .into_iter()
+        .filter(|e| kind_filter.is_empty() || e.kind.as_str() == kind_filter)
+        .filter(|e| q.is_empty() || e.value.to_lowercase().contains(&q))
+        .collect();
+
+    let total = filtered.len();
+    let start = page.saturating_mul(per).min(total);
+    let slice = &filtered[start..(start + per).min(total)];
+
+    let mut s = String::with_capacity(64 + slice.len() * 64);
+    use std::fmt::Write as _;
+    let _ = write!(s, "{{\"total\":{},\"page\":{},\"per\":{},\"entries\":[", total, page, per);
+    for (i, e) in slice.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let _ = write!(
+            s,
+            "{{\"kind\":\"{}\",\"value\":\"{}\",\"source\":\"{}\"}}",
+            e.kind.as_str(),
+            esc(&e.value),
+            esc(&e.source)
+        );
+    }
+    s.push_str("]}");
+    s
 }
 
 /// Agrega una IP/rango a la allowlist (exención del filtro). `false` si no
@@ -1382,5 +1417,45 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&state_json(&ctx_with_owner("secret"))).unwrap();
         assert_eq!(v["github"]["configured"], false);
+    }
+
+    #[test]
+    fn vpn_entries_json_paginates_and_filters() {
+        let ctx = ctx_with_owner("secret");
+        // 250 CIDR + 1 ASN.
+        for i in 0..250u16 {
+            ctx.vpn_filter
+                .add(server_core::VpnBlockKind::Cidr, &format!("10.{}.0.0/16", i));
+        }
+        ctx.vpn_filter.add(server_core::VpnBlockKind::Asn, "64500");
+
+        // Página 0, 100 por página.
+        let v: serde_json::Value =
+            serde_json::from_str(&vpn_entries_json(&ctx, "", "", 0, 100)).unwrap();
+        assert_eq!(v["total"], 251);
+        assert_eq!(v["entries"].as_array().unwrap().len(), 100);
+        assert_eq!(v["page"], 0);
+
+        // Última página parcial.
+        let v: serde_json::Value =
+            serde_json::from_str(&vpn_entries_json(&ctx, "", "", 2, 100)).unwrap();
+        assert_eq!(v["entries"].as_array().unwrap().len(), 51);
+
+        // Filtro por tipo.
+        let v: serde_json::Value =
+            serde_json::from_str(&vpn_entries_json(&ctx, "", "asn", 0, 100)).unwrap();
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["entries"][0]["value"], "64500");
+
+        // Búsqueda por substring.
+        let v: serde_json::Value =
+            serde_json::from_str(&vpn_entries_json(&ctx, "10.7.", "", 0, 100)).unwrap();
+        assert!(v["total"].as_u64().unwrap() >= 1);
+        assert!(v["total"].as_u64().unwrap() < 251);
+
+        // Página fuera de rango: sin entries, sin panic.
+        let v: serde_json::Value =
+            serde_json::from_str(&vpn_entries_json(&ctx, "", "", 999, 100)).unwrap();
+        assert_eq!(v["entries"].as_array().unwrap().len(), 0);
     }
 }

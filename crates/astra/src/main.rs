@@ -851,6 +851,9 @@ async fn main() -> anyhow::Result<()> {
             if expired_captchas > 0 {
                 debug!("captcha: expirados {} challenges", expired_captchas);
             }
+            // Poda del registro de detecciones del filtro anti-VPN (una fila
+            // por IP; se conservan las 1000 más recientes).
+            stats_ctx.vpn_filter.prune_detections(1000);
             // Prune de bans expirados + dispatch de BansAutoCleared
             let pruned = stats_ctx.bans.prune_expired();
             if pruned > 0 {

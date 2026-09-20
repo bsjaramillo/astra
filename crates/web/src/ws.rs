@@ -442,6 +442,18 @@ async fn handle_admin_route(
             let body = format!("{{\"ok\":true,\"removed\":{}}}", n);
             send_http_json(stream, 200, &body).await?;
         }
+        ("GET", "/admin/vpn/entries") => {
+            let q = query_param(&req.path, "q").unwrap_or_default();
+            let kind = query_param(&req.path, "kind").unwrap_or_default();
+            let page: usize = query_param(&req.path, "page")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0);
+            let per: usize = query_param(&req.path, "per")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(100);
+            let json = crate::admin::vpn_entries_json(ctx, &q, &kind, page, per);
+            send_http_json(stream, 200, &json).await?;
+        }
         (m, "/admin/vpn/import") if m.eq_ignore_ascii_case("POST") => {
             let text = json_field(&req.body, "text").unwrap_or_default();
             let n = crate::admin::import_vpn_feed(ctx, &text);
@@ -603,6 +615,20 @@ fn json_field(body: &str, field: &str) -> Option<String> {
 fn json_i64(body: &str, field: &str) -> Option<i64> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     v.get(field)?.as_i64()
+}
+
+/// Extrae un parámetro del query string de `req.path` (p.ej.
+/// `/admin/vpn/entries?q=1.2&page=2`). Devuelve `None` si falta.
+fn query_param(path_with_query: &str, key: &str) -> Option<String> {
+    let qs = path_with_query.split_once('?')?.1;
+    for pair in qs.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == key {
+            // Decodificación mínima: `%20` y `+` a espacio.
+            return Some(v.replace('+', " ").replace("%20", " "));
+        }
+    }
+    None
 }
 
 fn json_escape(s: &str) -> String {

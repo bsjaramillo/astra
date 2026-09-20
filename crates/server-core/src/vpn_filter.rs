@@ -121,6 +121,8 @@ pub struct VpnDetection {
     pub action: String,
     /// Timestamp unix (segundos) de la detección.
     pub detected_at: i64,
+    /// Cuántas veces se detectó esta IP (intentos acumulados).
+    pub hits: i64,
 }
 
 /// Resultado de un match contra la blocklist.
@@ -633,14 +635,20 @@ impl VpnFilterManager {
     // Registro de detecciones
     // ========================================================================
 
-    /// Registra una detección y poda el histórico (ring buffer de 500).
+    /// Registra una detección (upsert por IP: actualiza el último intento e
+    /// incrementa `hits`). La poda del histórico corre en el loop de
+    /// mantenimiento, no acá, para no pagar un DELETE en cada reconexión.
     pub fn record_detection(&self, name: &str, ip: IpAddr, rule: &str, action: VpnAction) {
         let now = crate::time::unix_time() as i64;
         let _ = self
             .db
             .add_vpn_detection(&ip.to_string(), name, rule, action.as_str(), now);
-        // Poda barata: mantener las últimas 500.
-        let _ = self.db.prune_vpn_detections(500);
+    }
+
+    /// Poda el histórico de detecciones dejando las `keep` más recientes.
+    /// Se llama desde el loop de mantenimiento.
+    pub fn prune_detections(&self, keep: usize) {
+        let _ = self.db.prune_vpn_detections(keep);
     }
 
     /// Lista las detecciones más recientes.
@@ -845,15 +853,22 @@ mod tests {
     }
 
     #[test]
-    fn detections_record_and_clear() {
+    fn detections_are_deduped_by_ip() {
         let m = VpnFilterManager::new(mem_db());
         let ip: IpAddr = "9.9.9.9".parse().unwrap();
+        // Tres intentos de la MISMA IP: una sola fila, con contador.
         m.record_detection("Alice", ip, "1.2.3.0/24", VpnAction::Reject);
-        m.record_detection("Bob", ip, "64500", VpnAction::Quarantine);
+        m.record_detection("Alice", ip, "1.2.3.0/24", VpnAction::Reject);
+        m.record_detection("Alice", ip, "1.2.3.0/24", VpnAction::Reject);
         let dets = m.detections(10);
-        assert_eq!(dets.len(), 2);
-        assert!(dets.iter().any(|d| d.name == "Alice" && d.rule == "1.2.3.0/24"));
-        assert!(dets.iter().any(|d| d.name == "Bob" && d.action == "quarantine"));
+        assert_eq!(dets.len(), 1, "una fila por IP, no una por intento");
+        assert_eq!(dets[0].hits, 3);
+        assert_eq!(dets[0].name, "Alice");
+
+        // Otra IP es otra fila.
+        m.record_detection("Bob", "8.8.8.8".parse().unwrap(), "64500", VpnAction::Quarantine);
+        assert_eq!(m.detections(10).len(), 2);
+
         assert_eq!(m.clear_detections(), 2);
         assert!(m.detections(10).is_empty());
     }

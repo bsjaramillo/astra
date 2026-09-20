@@ -270,7 +270,7 @@ const I18N = {
     nav_proxies:"Proxies", nav_permisos:"Permisos de comandos", nav_config:"Config avanzada", nav_consola:"Consola",
     nav_motd:"Mensaje de entrada", nav_plantillas:"Textos del sistema", nav_bot:"Bot agente",
     common_save:"Guardar", common_save_changes:"Guardar cambios", common_add:"Agregar", common_remove:"Quitar",
-    common_none:"Ninguno.", common_none_f:"Ninguna.", common_done:"Listo",
+    common_none:"Ninguno.", common_none_f:"Ninguna.", common_loading:"Cargando…", common_error:"Error", common_done:"Listo",
     restart_note:"⚠️ Estos cambios se guardan en el archivo de configuración y se aplican al <b>reiniciar el servidor</b>.",
     saved_restart:"Guardado. Reinicia el servidor para aplicar los cambios.",
     err_prefix:"Error: ", err_save:"no se pudo guardar",
@@ -398,7 +398,8 @@ const I18N = {
     vpn_allow_h:"Exenciones (allowlist)", vpn_allow_sub:"IPs o rangos que nunca se bloquean, aunque aparezcan en la lista. Usalo para corregir falsos positivos.",
     vpn_allow_btn:"Permitir", vpn_allow_added:"Exención agregada",
     vpn_det_h:"Detecciones recientes", vpn_det_sub:"Últimas conexiones bloqueadas o reportadas por el filtro. Si alguna es un falso positivo, tocá «Permitir» para eximirla.",
-    vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Regla", vpn_det_th_action:"Acción", vpn_det_clear:"Vaciar registro", vpn_det_cleared:"Registro vaciado",
+    vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Regla", vpn_det_th_action:"Acción", vpn_det_th_hits:"Intentos", vpn_det_clear:"Vaciar registro", vpn_det_cleared:"Registro vaciado",
+    vpn_search_ph:"Buscar IP o ASN…", vpn_filter_all:"Todas", vpn_prev:"Anterior", vpn_next:"Siguiente", vpn_page_info:"Página {0} de {1} ({2})",
 
     perm_h:"Permisos de comandos", perm_sub:"Rango mínimo necesario para usar cada comando. Se aplica al instante.",
     perm_search:"🔎 Buscar comando…", th_command:"Comando", th_minrank:"Rango mínimo",
@@ -477,7 +478,7 @@ const I18N = {
     nav_proxies:"Proxies", nav_permisos:"Command permissions", nav_config:"Advanced config", nav_consola:"Console",
     nav_motd:"Join message", nav_plantillas:"System texts", nav_bot:"Agent bot",
     common_save:"Save", common_save_changes:"Save changes", common_add:"Add", common_remove:"Remove",
-    common_none:"None.", common_none_f:"None.", common_done:"Done",
+    common_none:"None.", common_none_f:"None.", common_loading:"Loading…", common_error:"Error", common_done:"Done",
     restart_note:"⚠️ These changes are written to the config file and take effect after <b>restarting the server</b>.",
     saved_restart:"Saved. Restart the server to apply the changes.",
     err_prefix:"Error: ", err_save:"couldn't save",
@@ -605,7 +606,8 @@ const I18N = {
     vpn_allow_h:"Exemptions (allowlist)", vpn_allow_sub:"IPs or ranges that are never blocked, even if they appear on the list. Use it to fix false positives.",
     vpn_allow_btn:"Allow", vpn_allow_added:"Exemption added",
     vpn_det_h:"Recent detections", vpn_det_sub:"Latest connections blocked or reported by the filter. If one is a false positive, tap 'Allow' to exempt it.",
-    vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Rule", vpn_det_th_action:"Action", vpn_det_clear:"Clear log", vpn_det_cleared:"Log cleared",
+    vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Rule", vpn_det_th_action:"Action", vpn_det_th_hits:"Attempts", vpn_det_clear:"Clear log", vpn_det_cleared:"Log cleared",
+    vpn_search_ph:"Search IP or ASN…", vpn_filter_all:"All", vpn_prev:"Previous", vpn_next:"Next", vpn_page_info:"Page {0} of {1} ({2})",
 
     perm_h:"Command permissions", perm_sub:"Minimum rank required to run each command. Applies instantly.",
     perm_search:"🔎 Search command…", th_command:"Command", th_minrank:"Minimum rank",
@@ -1197,13 +1199,11 @@ function renderVpn(){
   const g = STATE.geoip || {hasAsn:false,hasCity:false,enabled:false,asnUrl:"",cityUrl:"",refreshHours:24};
   const actOpts = ["report","reject","captcha","quarantine"]
     .map(a=>`<option value="${a}"${v.action===a?" selected":""}>${t("vpn_act_"+a)}</option>`).join("");
-  const rows=(v.entries||[]).map(e=>`<tr><td><span class="chip">${esc(e.kind)}</span></td>
-    <td><code>${esc(e.value)}</code></td><td>${esc(e.source)}</td>
-    <td style="text-align:right"><button class="btn sm danger" data-vpndel="${esc(e.kind)}|${esc(e.value)}">×</button></td></tr>`).join("");
   const allowRows=(v.allow||[]).map(a=>`<span class="pill">${esc(a)} <a href="#" data-vpnallowdel="${esc(a)}">×</a></span>`).join("");
   const detRows=(v.detections||[]).map(d=>`<tr>
     <td><code>${esc(d.ip)}</code></td><td>${esc(d.name)}</td>
     <td><span class="chip">${esc(d.rule)}</span></td><td>${esc(d.action)}</td>
+    <td>${d.hits||1}</td>
     <td style="text-align:right"><button class="btn sm" data-vpnallowip="${esc(d.ip)}">${t("vpn_allow_btn")}</button></td></tr>`).join("");
   const asnBadge = g.hasAsn ? `<span class="badge voice">${t("geoip_asn_loaded")}</span>` : `<span class="badge">${t("geoip_asn_missing")}</span>`;
   const vpnCount = v.count||0;
@@ -1241,8 +1241,17 @@ function renderVpn(){
         <button class="btn" id="vpnClearFeed">${t("vpn_clear_feed")}</button>
         <button class="btn danger" id="vpnClearManual">${t("vpn_clear_manual")}</button>
       </div>
+      <div class="inline" style="margin-top:10px">
+        <input id="vpnSearch" placeholder="${t("vpn_search_ph")}" style="flex:1">
+        <select id="vpnFilterKind" class="sel sm"><option value="">${t("vpn_filter_all")}</option><option value="cidr">CIDR</option><option value="asn">ASN</option></select>
+      </div>
       <div class="scroll"><table class="tbl"><thead><tr><th>${t("vpn_th_kind")}</th><th>${t("vpn_th_value")}</th><th>${t("vpn_th_source")}</th><th></th></tr></thead>
-      <tbody>${rows||'<tr><td colspan=4 class=mut>—</td></tr>'}</tbody></table></div>
+      <tbody id="vpnEntriesBody"><tr><td colspan=4 class=mut>${t("common_loading")}</td></tr></tbody></table></div>
+      <div class="rowend">
+        <button class="btn sm" id="vpnPrev">‹ ${t("vpn_prev")}</button>
+        <span id="vpnPageInfo" class="mut" style="margin:0 8px"></span>
+        <button class="btn sm" id="vpnNext">${t("vpn_next")} ›</button>
+      </div>
     </div>
     <div class="card"><h3>${t("vpn_import_h")}</h3>
       <p class="sub">${t("vpn_import_sub")}</p>
@@ -1256,10 +1265,44 @@ function renderVpn(){
     </div>
     <div class="card"><h3>${t("vpn_det_h")} <span class="badge">${(v.detections||[]).length}</span></h3>
       <p class="sub">${t("vpn_det_sub")}</p>
-      <div class="scroll"><table class="tbl"><thead><tr><th>${t("vpn_det_th_ip")}</th><th>${t("vpn_det_th_name")}</th><th>${t("vpn_det_th_rule")}</th><th>${t("vpn_det_th_action")}</th><th></th></tr></thead>
-      <tbody>${detRows||'<tr><td colspan=5 class=mut>—</td></tr>'}</tbody></table></div>
+      <div class="scroll"><table class="tbl"><thead><tr><th>${t("vpn_det_th_ip")}</th><th>${t("vpn_det_th_name")}</th><th>${t("vpn_det_th_rule")}</th><th>${t("vpn_det_th_action")}</th><th>${t("vpn_det_th_hits")}</th><th></th></tr></thead>
+      <tbody>${detRows||'<tr><td colspan=6 class=mut>—</td></tr>'}</tbody></table></div>
       <div class="rowend"><button class="btn danger" id="vpnDetClear">${t("vpn_det_clear")}</button></div>
     </div>`;
+}
+/* ---------------- Entries VPN: lista paginada con búsqueda ---------------- */
+const VPNPAGE = { page: 0, per: 100, q: "", kind: "", total: 0 };
+function vpnEntriesRender(entries){
+  const body = document.getElementById("vpnEntriesBody");
+  if(!body) return;
+  body.innerHTML = entries.length
+    ? entries.map(e=>`<tr><td><span class="chip">${esc(e.kind)}</span></td>
+        <td><code>${esc(e.value)}</code></td><td>${esc(e.source)}</td>
+        <td style="text-align:right"><button class="btn sm danger" data-vpndel="${esc(e.kind)}|${esc(e.value)}">×</button></td></tr>`).join("")
+    : `<tr><td colspan=4 class=mut>${t("common_none_f")}</td></tr>`;
+  // Rewire los botones de borrado.
+  body.querySelectorAll("[data-vpndel]").forEach(a=>a.onclick=async e=>{
+    e.preventDefault();
+    const [kind,value]=a.dataset.vpndel.split("|");
+    await removeVpnBlock(kind,value);
+    await loadVpnEntries();
+  });
+}
+let vpnSearchTimer = null;
+async function loadVpnEntries(){
+  const info = document.getElementById("vpnPageInfo");
+  const qs = `q=${encodeURIComponent(VPNPAGE.q)}&kind=${encodeURIComponent(VPNPAGE.kind)}&page=${VPNPAGE.page}&per=${VPNPAGE.per}`;
+  const r = await api("/admin/vpn/entries?"+qs);
+  if(!r.ok){ if(info) info.textContent = t("common_error"); return; }
+  const j = await r.json().catch(()=>({entries:[],total:0,page:0,per:VPNPAGE.per}));
+  VPNPAGE.total = j.total||0;
+  VPNPAGE.page = j.page||0;
+  vpnEntriesRender(j.entries||[]);
+  const pages = Math.max(1, Math.ceil(VPNPAGE.total/VPNPAGE.per));
+  if(info) info.textContent = t("vpn_page_info", VPNPAGE.page+1, pages, VPNPAGE.total);
+  const prev=document.getElementById("vpnPrev"), next=document.getElementById("vpnNext");
+  if(prev) prev.disabled = VPNPAGE.page<=0;
+  if(next) next.disabled = VPNPAGE.page+1>=pages;
 }
 async function saveGeoipCfg(){
   const body={enabled:document.getElementById("geoipEnabled").checked,
@@ -1714,6 +1757,16 @@ function wire(){
   if(g("vpnImportBtn")) g("vpnImportBtn").onclick=importVpnFeed;
   if(g("vpnAllowAdd")) g("vpnAllowAdd").onclick=()=>vpnAllowAdd();
   if(g("vpnDetClear")) g("vpnDetClear").onclick=vpnClearDetections;
+  // Lista de entries paginada: se carga al renderizar la tab y se re-carga
+  // en búsqueda/filtro/paginación (sin re-renderizar todo el panel).
+  if(g("vpnEntriesBody")){
+    loadVpnEntries();
+    const s=g("vpnSearch"), f=g("vpnFilterKind");
+    if(s) s.oninput=()=>{ clearTimeout(vpnSearchTimer); vpnSearchTimer=setTimeout(()=>{ VPNPAGE.q=s.value.trim(); VPNPAGE.page=0; loadVpnEntries(); }, 250); };
+    if(f) f.onchange=()=>{ VPNPAGE.kind=f.value; VPNPAGE.page=0; loadVpnEntries(); };
+    if(g("vpnPrev")) g("vpnPrev").onclick=()=>{ if(VPNPAGE.page>0){ VPNPAGE.page--; loadVpnEntries(); } };
+    if(g("vpnNext")) g("vpnNext").onclick=()=>{ VPNPAGE.page++; loadVpnEntries(); };
+  }
   document.querySelectorAll("[data-vpndel]").forEach(a=>a.onclick=async e=>{
     e.preventDefault();
     const [kind,value]=a.dataset.vpndel.split("|");

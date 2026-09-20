@@ -313,14 +313,16 @@ impl Database {
             );
 
             -- Registro de detecciones (para revisar falsos positivos y
-            -- permitir acceso desde el panel). Ring buffer podado por cantidad.
+            -- permitir acceso desde el panel). UNA fila por IP: se actualiza
+            -- el último nick/regla/acción y se incrementa `hits`, en vez de
+            -- acumular una fila por cada intento de reconexión.
             CREATE TABLE IF NOT EXISTS vpn_detections (
-                ip TEXT NOT NULL,
+                ip TEXT NOT NULL PRIMARY KEY,
                 name TEXT NOT NULL,
                 rule TEXT NOT NULL,
                 action TEXT NOT NULL,
                 detected_at INTEGER NOT NULL,
-                PRIMARY KEY (ip, rule, detected_at)
+                hits INTEGER NOT NULL DEFAULT 1
             );
 
             -- Config live del updater de GeoIP/ASN (singleton).
@@ -380,6 +382,40 @@ impl Database {
                     ALTER TABLE nodes_new RENAME TO nodes;
                     CREATE INDEX IF NOT EXISTS idx_nodes_ack ON nodes(ack);
                     CREATE INDEX IF NOT EXISTS idx_nodes_last ON nodes(last_connect);
+                    "#,
+                )?;
+            }
+        }
+
+        // Migración de `vpn_detections`: el esquema viejo tenía PK
+        // (ip, rule, detected_at), que acumulaba una fila por cada
+        // reconexión del mismo usuario. Se colapsa a una fila por IP con
+        // contador `hits`, quedándose con la detección más reciente.
+        let det_ddl: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vpn_detections'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(ddl) = det_ddl {
+            let normalized = ddl.replace([' ', '\n', '\t'], "").to_lowercase();
+            if !normalized.contains("primarykey(ip)") {
+                conn.execute_batch(
+                    r#"
+                    CREATE TABLE vpn_detections_new (
+                        ip TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        rule TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        detected_at INTEGER NOT NULL,
+                        hits INTEGER NOT NULL DEFAULT 1
+                    );
+                    INSERT INTO vpn_detections_new (ip, name, rule, action, detected_at, hits)
+                        SELECT ip, name, rule, action, MAX(detected_at), COUNT(*)
+                        FROM vpn_detections GROUP BY ip;
+                    DROP TABLE vpn_detections;
+                    ALTER TABLE vpn_detections_new RENAME TO vpn_detections;
                     "#,
                 )?;
             }
@@ -1473,8 +1509,9 @@ impl Database {
 
     // ---- vpn_detections: registro de detecciones ----
 
-    /// Registra una detección (upsert; si ya existe la misma IP+regla en el
-    /// mismo segundo, se ignora).
+    /// Registra una detección. **Upsert por IP**: actualiza el nick/regla/
+    /// acción/timestamp al último intento e incrementa `hits`. Así un usuario
+    /// que reconecta en bucle aparece UNA sola vez, con su contador.
     pub fn add_vpn_detection(
         &self,
         ip: &str,
@@ -1485,19 +1522,21 @@ impl Database {
     ) -> DbResult<()> {
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT OR IGNORE INTO vpn_detections (ip, name, rule, action, detected_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO vpn_detections (ip, name, rule, action, detected_at, hits) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 1) \
+             ON CONFLICT(ip) DO UPDATE SET \
+                 name = ?2, rule = ?3, action = ?4, detected_at = ?5, hits = hits + 1",
             params![ip, name, rule, action, detected_at],
         )?;
         Ok(())
     }
 
     /// Lista las detecciones más recientes (máx `limit`), de más nueva a más
-    /// vieja.
+    /// vieja. Una fila por IP.
     pub fn list_vpn_detections(&self, limit: usize) -> DbResult<Vec<crate::vpn_filter::VpnDetection>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT ip, name, rule, action, detected_at FROM vpn_detections \
+            "SELECT ip, name, rule, action, detected_at, hits FROM vpn_detections \
              ORDER BY detected_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -1507,6 +1546,7 @@ impl Database {
                 rule: row.get(2)?,
                 action: row.get(3)?,
                 detected_at: row.get(4)?,
+                hits: row.get(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -2191,15 +2231,23 @@ mod tests {
         assert!(db.remove_vpn_allow("1.2.3.4/32").unwrap());
         assert!(!db.remove_vpn_allow("1.2.3.4/32").unwrap());
 
-        // Detecciones: se listan de más nueva a más vieja.
+        // Detecciones: upsert por IP — dos intentos de la misma IP son UNA
+        // fila con `hits = 2` y el timestamp actualizado al último.
         db.add_vpn_detection("9.9.9.9", "Alice", "1.2.3.0/24", "reject", 100)
             .unwrap();
         db.add_vpn_detection("9.9.9.9", "Alice", "1.2.3.0/24", "reject", 200)
             .unwrap();
         let dets = db.list_vpn_detections(10).unwrap();
-        assert_eq!(dets.len(), 2);
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0].hits, 2);
         assert_eq!(dets[0].detected_at, 200);
-        assert_eq!(dets[0].name, "Alice");
+
+        // Una segunda IP es otra fila; el orden es por timestamp descendente.
+        db.add_vpn_detection("8.8.8.8", "Bob", "64500", "quarantine", 300)
+            .unwrap();
+        let dets = db.list_vpn_detections(10).unwrap();
+        assert_eq!(dets.len(), 2);
+        assert_eq!(dets[0].ip, "8.8.8.8");
 
         // Poda: dejar solo la más reciente.
         db.prune_vpn_detections(1).unwrap();
