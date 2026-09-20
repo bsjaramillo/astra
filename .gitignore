@@ -34,3 +34,7 @@ fixtures/
 
 # Herramienta de prueba anti-DDoS (no debe trackearse)
 tools/ddos_test.py
+
+# Monitoreo de host de la VPS (específico del servidor, no se versiona)
+deploy/monitoring/
+deploy/hardening/
