@@ -490,10 +490,14 @@ impl Default for UserPool {
 }
 
 /// Normaliza un nick para usarlo como clave del índice `by_name`: minúsculas
-/// + sin códigos de color/formato. Así un nick coloreado (`\x03John`) se
-/// resuelve con su nombre "limpio" (`John`), y viceversa.
+/// + sin códigos de color/formato + sin una `@` inicial. Así un nick coloreado
+/// (`\x03John`) se resuelve con su nombre "limpio" (`John`), y viceversa; y un
+/// `@nick` (formato de mención que suelen emitir los LLM al pedir un comando)
+/// resuelve contra el nick real.
 fn normalize_name(name: &str) -> String {
-    crate::text_effects::strip_colors(name).to_lowercase()
+    crate::text_effects::strip_colors(name)
+        .trim_start_matches('@')
+        .to_lowercase()
 }
 
 impl UserPool {
@@ -640,6 +644,9 @@ mod tests {
         assert!(pool.get_by_name("John").is_some());
         assert!(pool.get_by_name("john").is_some());
         assert!(pool.get_by_name("\x0301John").is_some());
+        // Mención tipo LLM (`@nick`): se resuelve contra el nick real.
+        assert!(pool.get_by_name("@John").is_some());
+        assert!(pool.get_by_name("@john").is_some());
         assert!(pool.get_by_name("Johnny").is_none());
 
         // rename mantiene el índice limpio.

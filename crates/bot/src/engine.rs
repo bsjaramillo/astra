@@ -572,6 +572,8 @@ fn build_system_prompt(
              kickear, desmutear, listar, etc.) o escribe un comando, respondé con el comando \
              entre [CMD] y [/CMD], opcionalmente precedido de una breve frase. \
              Ejemplo: \"Listo, lo hago. [CMD]/topic Nuevo tema[/CMD]\". \
+             Cuando el comando lleve un nick, usá el nick EXACTO como aparece en \
+             'Usuarios conectados': sin @, sin comillas y sin puntuación. \
              Si no está seguro de qué comando usar, respondé normalmente como asistente.",
             scope
         );
@@ -1454,6 +1456,47 @@ mod tests {
             "out: {:?}",
             out
         );
+    }
+
+    fn add_plain_user(ctx: &AppContext, id: u16, name: &str) {
+        let mut u = server_core::user_pool::AresUser::new(
+            id,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            [0u8; 16],
+        );
+        *u.name.write() = name.to_string();
+        u.logged_in = true;
+        ctx.user_pool.add(Arc::new(u));
+    }
+
+    #[test]
+    fn execute_as_user_kick_resolves_target() {
+        let ctx = ctx_with_user_level("owner", server_core::ILevel::Owner);
+        add_plain_user(&ctx, 2, "Bob");
+        let dummy = astra_scripting::ScriptHandle::dummy();
+        let out = execute_as_user(&ctx, &ctx.user_pool, "owner", "/kick Bob", &[], &dummy);
+        assert!(
+            out.iter().any(|l| l.to_lowercase().contains("kick")),
+            "out: {:?}",
+            out
+        );
+        assert!(ctx.user_pool.get_by_name("Bob").is_none());
+    }
+
+    #[test]
+    fn execute_as_user_kick_accepts_mention_target() {
+        // Un LLM suele pedir el comando con el nick como mención (`@Bob`).
+        // El índice de nicks lo normaliza y el kick resuelve igual.
+        let ctx = ctx_with_user_level("owner", server_core::ILevel::Owner);
+        add_plain_user(&ctx, 2, "Bob");
+        let dummy = astra_scripting::ScriptHandle::dummy();
+        let out = execute_as_user(&ctx, &ctx.user_pool, "owner", "/kick @Bob", &[], &dummy);
+        assert!(
+            out.iter().any(|l| l.to_lowercase().contains("kick")),
+            "out: {:?}",
+            out
+        );
+        assert!(ctx.user_pool.get_by_name("Bob").is_none());
     }
 
     #[tokio::test]
