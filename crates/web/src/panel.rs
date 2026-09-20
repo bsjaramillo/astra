@@ -396,7 +396,7 @@ const I18N = {
     vpn_count_hint:"Al activar el filtro, el feed se descarga de inmediato. El conteo se actualiza al terminar.",
     vpn_enforce_now:"Aplicar a conectados", vpn_enforced:"Aplicado: {0} expulsados, {1} en cuarentena",
     vpn_allow_h:"Exenciones (allowlist)", vpn_allow_sub:"IPs o rangos que nunca se bloquean, aunque aparezcan en la lista. Usalo para corregir falsos positivos.",
-    vpn_allow_btn:"Permitir", vpn_allow_added:"Exención agregada",
+    vpn_allow_btn:"Permitir", vpn_allow_added:"Exención agregada", vpn_allow_exists:"Esa IP ya estaba permitida",
     vpn_det_h:"Detecciones recientes", vpn_det_sub:"Últimas conexiones bloqueadas o reportadas por el filtro. Si alguna es un falso positivo, tocá «Permitir» para eximirla.",
     vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Regla", vpn_det_th_action:"Acción", vpn_det_th_hits:"Intentos", vpn_det_clear:"Vaciar registro", vpn_det_cleared:"Registro vaciado",
     vpn_search_ph:"Buscar IP o ASN…", vpn_filter_all:"Todas", vpn_prev:"Anterior", vpn_next:"Siguiente", vpn_page_info:"Página {0} de {1} ({2})",
@@ -604,7 +604,7 @@ const I18N = {
     vpn_count_hint:"When you enable the filter, the feed downloads immediately. The count updates when it finishes.",
     vpn_enforce_now:"Apply to connected", vpn_enforced:"Applied: {0} kicked, {1} quarantined",
     vpn_allow_h:"Exemptions (allowlist)", vpn_allow_sub:"IPs or ranges that are never blocked, even if they appear on the list. Use it to fix false positives.",
-    vpn_allow_btn:"Allow", vpn_allow_added:"Exemption added",
+    vpn_allow_btn:"Allow", vpn_allow_added:"Exemption added", vpn_allow_exists:"That IP was already allowed",
     vpn_det_h:"Recent detections", vpn_det_sub:"Latest connections blocked or reported by the filter. If one is a false positive, tap 'Allow' to exempt it.",
     vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Rule", vpn_det_th_action:"Action", vpn_det_th_hits:"Attempts", vpn_det_clear:"Clear log", vpn_det_cleared:"Log cleared",
     vpn_search_ph:"Search IP or ASN…", vpn_filter_all:"All", vpn_prev:"Previous", vpn_next:"Next", vpn_page_info:"Page {0} of {1} ({2})",
@@ -1331,8 +1331,9 @@ async function vpnAllowAdd(value){
   const v = value!=null ? value : (document.getElementById("vpnAllowIn")||{}).value;
   if(!v) return;
   const r=await api("/admin/vpn/allow",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({value:v})});
-  const j=await r.json().catch(()=>({ok:false}));
-  if(j.ok){ toast(t("vpn_allow_added"),"ok"); await refresh(); }
+  const j=await r.json().catch(()=>({ok:false,status:"invalid"}));
+  if(j.status==="exists"){ toast(t("vpn_allow_exists"),"ok"); await refresh(); }
+  else if(j.ok){ toast(t("vpn_allow_added"),"ok"); await refresh(); }
   else toast(t("vpn_invalid"),"err");
 }
 async function vpnAllowRemove(value){

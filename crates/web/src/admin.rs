@@ -824,10 +824,17 @@ pub fn vpn_entries_json(
     s
 }
 
-/// Agrega una IP/rango a la allowlist (exención del filtro). `false` si no
-/// parsea.
-pub fn add_vpn_allow(ctx: &AppContext, value: &str) -> bool {
-    ctx.vpn_filter.allow_add(value)
+/// Agrega una IP/rango a la allowlist (exención del filtro). Devuelve un JSON
+/// con `{ok, status}` donde `status` es `added`/`exists`/`invalid`, para que
+/// el panel distinga "ya estaba" de "valor inválido".
+pub fn add_vpn_allow_json(ctx: &AppContext, value: &str) -> String {
+    use server_core::AllowOutcome;
+    let (ok, status) = match ctx.vpn_filter.allow_add(value) {
+        AllowOutcome::Added => (true, "added"),
+        AllowOutcome::AlreadyPresent => (true, "exists"),
+        AllowOutcome::Invalid => (false, "invalid"),
+    };
+    format!("{{\"ok\":{},\"status\":\"{}\"}}", ok, status)
 }
 
 /// Quita una IP/rango de la allowlist. `false` si no existía.
@@ -1417,6 +1424,27 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&state_json(&ctx_with_owner("secret"))).unwrap();
         assert_eq!(v["github"]["configured"], false);
+    }
+
+    #[test]
+    fn add_vpn_allow_json_distinguishes_exists_from_invalid() {
+        let ctx = ctx_with_owner("secret");
+        let v: serde_json::Value =
+            serde_json::from_str(&add_vpn_allow_json(&ctx, "187.14.127.35")).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["status"], "added");
+
+        // Repetir: ya estaba, pero NO es error (el bug reportado).
+        let v: serde_json::Value =
+            serde_json::from_str(&add_vpn_allow_json(&ctx, "187.14.127.35")).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["status"], "exists");
+
+        // Valor inválido: sí es error.
+        let v: serde_json::Value =
+            serde_json::from_str(&add_vpn_allow_json(&ctx, "no-es-ip")).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["status"], "invalid");
     }
 
     #[test]

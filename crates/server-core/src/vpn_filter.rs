@@ -108,6 +108,17 @@ pub struct VpnBlockEntry {
     pub source: String,
 }
 
+/// Resultado de agregar una entrada a la allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllowOutcome {
+    /// Se agregó.
+    Added,
+    /// Ya estaba en la allowlist.
+    AlreadyPresent,
+    /// El valor no parsea como IP ni CIDR.
+    Invalid,
+}
+
 /// Una detección registrada (para revisar falsos positivos en el panel).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VpnDetection {
@@ -581,20 +592,25 @@ impl VpnFilterManager {
     // Allowlist (exenciones / falsos positivos)
     // ========================================================================
 
-    /// Agrega una IP o rango CIDR a la allowlist. Retorna `false` si no parsea.
-    pub fn allow_add(&self, value: &str) -> bool {
+    /// Agrega una IP o rango CIDR a la allowlist.
+    ///
+    /// Distingue "inválido" de "ya estaba": antes ambos devolvían `false` y el
+    /// panel mostraba "valor inválido" al permitir una IP ya exenta.
+    pub fn allow_add(&self, value: &str) -> AllowOutcome {
         let value = value.trim();
         // Aceptamos tanto `1.2.3.4` como `1.2.3.0/24`. Una IP suelta se
         // normaliza a `/32` (o `/128`).
         let Ok(net) = Self::parse_allow(value) else {
-            return false;
+            return AllowOutcome::Invalid;
         };
         let canonical = net.to_string();
         let is_new = self.db.add_vpn_allow(&canonical).unwrap_or(false);
         if is_new {
             self.allow.write().push(net);
+            AllowOutcome::Added
+        } else {
+            AllowOutcome::AlreadyPresent
         }
-        is_new
     }
 
     /// Quita una IP/rango de la allowlist. Retorna `true` si existía.
@@ -821,7 +837,9 @@ mod tests {
         assert!(m.classify(&empty_geoip(), ip).is_some());
 
         // Exención por IP exacta (/32): ya no matchea.
-        assert!(m.allow_add("187.14.127.35"));
+        assert_eq!(m.allow_add("187.14.127.35"), AllowOutcome::Added);
+        // Repetirla no es un error: ya estaba.
+        assert_eq!(m.allow_add("187.14.127.35"), AllowOutcome::AlreadyPresent);
         assert!(m.is_allowed(ip));
         assert!(m.classify(&empty_geoip(), ip).is_none());
         // Otra IP del mismo rango sigue bloqueada.
@@ -829,7 +847,7 @@ mod tests {
 
         // Exención por rango completo.
         m.allow_remove("187.14.127.35");
-        assert!(m.allow_add("187.14.120.0/21"));
+        assert_eq!(m.allow_add("187.14.120.0/21"), AllowOutcome::Added);
         assert!(m.classify(&empty_geoip(), ip).is_none());
         assert!(m.classify(&empty_geoip(), "187.14.120.5".parse().unwrap()).is_none());
 
@@ -837,7 +855,7 @@ mod tests {
         assert!(m.allow_remove("187.14.120.0/21"));
         assert!(m.classify(&empty_geoip(), ip).is_some());
         assert!(!m.allow_remove("no-es-ip"));
-        assert!(!m.allow_add("basura"));
+        assert_eq!(m.allow_add("basura"), AllowOutcome::Invalid);
     }
 
     #[test]

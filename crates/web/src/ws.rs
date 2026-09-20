@@ -466,7 +466,7 @@ async fn handle_admin_route(
         }
         (m, "/admin/vpn/allow") if m.eq_ignore_ascii_case("POST") => {
             let value = json_field(&req.body, "value").unwrap_or_default();
-            let body = format!("{{\"ok\":{}}}", crate::admin::add_vpn_allow(ctx, &value));
+            let body = crate::admin::add_vpn_allow_json(ctx, &value);
             send_http_json(stream, 200, &body).await?;
         }
         (m, "/admin/vpn/allow/remove") if m.eq_ignore_ascii_case("POST") => {

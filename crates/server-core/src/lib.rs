@@ -140,7 +140,8 @@ pub use geoip::GeoIp;
 pub use maxminddb;
 pub use ip_bans::{AsnBanManager, RangeBanManager};
 pub use vpn_filter::{
-    VpnAction, VpnBlockEntry, VpnBlockKind, VpnConfig, VpnDetection, VpnFilterManager, VpnHit,
+    AllowOutcome, VpnAction, VpnBlockEntry, VpnBlockKind, VpnConfig, VpnDetection,
+    VpnFilterManager, VpnHit,
 };
 pub use name_filters::NameFilterManager;
 pub use room_flags::RoomFlags;
