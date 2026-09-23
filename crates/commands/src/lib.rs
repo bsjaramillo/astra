@@ -1953,6 +1953,13 @@ fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: boo
         .muzzled
         .swap(muzzle, std::sync::atomic::Ordering::Relaxed);
     if already == muzzle {
+        // Aun sin cambio en memoria, reconciliamos el disco: si el estado
+        // persistido quedó desincronizado (p. ej. "0" viejo de un unmuzzle
+        // anterior), lo corregimos para que no reintroduzca el muzzle al
+        // volver a entrar.
+        if !muzzle {
+            let _ = ctx.db.remove_user_state(target_name, "muzzle");
+        }
         let state = if muzzle { "already muzzled" } else { "not muzzled" };
         send_system_line(ctx, user, &format!("'{}' is {}.", target_name, state));
         return;
@@ -1986,8 +1993,14 @@ fn handle_muzzle(ctx: &AppContext, user: &Arc<AresUser>, args: &str, muzzle: boo
         send_system_line(ctx, user, &ctx.templates.render("unmuzzle.confirm", &[("+n", target_name)]));
         announce_admin_action(ctx, user, "adminaction.unmuzzle", target_name);
     }
-    // Persistir a disco (paridad sb0t: Muzzles persiste en archivo).
-    let _ = ctx.db.set_user_state(target_name, "muzzle", if muzzle { "1" } else { "0" });
+    // Persistir a disco (paridad sb0t: Muzzles persiste en archivo). Al
+    // desmuzzlear se BORRA la fila (no un "0"), para que el estado persistido
+    // no reactive el mute en el próximo login.
+    if muzzle {
+        let _ = ctx.db.set_user_state(target_name, "muzzle", "1");
+    } else {
+        let _ = ctx.db.remove_user_state(target_name, "muzzle");
+    }
 }
 
 fn handle_pmall(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {

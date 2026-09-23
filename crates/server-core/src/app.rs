@@ -990,19 +990,21 @@ impl AppContext {
         use std::sync::atomic::Ordering;
 
         let name = user.name.read().clone();
-        if let Ok(Some(_)) = self.db.get_user_state(&name, "muzzle") {
+        // Ojo: el valor importa. `unmuzzle` guarda "0" (no borra la fila), así
+        // que hay que exigir un valor activo y no la mera existencia.
+        if matches!(self.db.get_user_state(&name, "muzzle"), Ok(Some(v)) if v != "0") {
             user.muzzled.store(true, Ordering::Relaxed);
         }
-        if let Ok(Some(_)) = self.db.get_user_state(&name, "lowered") {
+        if matches!(self.db.get_user_state(&name, "lowered"), Ok(Some(v)) if v != "0") {
             user.lowered.store(true, Ordering::Relaxed);
         }
-        if let Ok(Some(_)) = self.db.get_user_state(&name, "kiddy") {
+        if matches!(self.db.get_user_state(&name, "kiddy"), Ok(Some(v)) if v != "0") {
             user.kiddied.store(true, Ordering::Relaxed);
         }
         if let Ok(Some(text)) = self.db.get_user_state(&name, "echo") {
             *user.echo_text.write() = Some(text);
         }
-        if let Ok(Some(_)) = self.db.get_user_state(&name, "pmblock") {
+        if matches!(self.db.get_user_state(&name, "pmblock"), Ok(Some(v)) if v != "0") {
             user.pm_blocked.store(true, Ordering::Relaxed);
         }
     }
@@ -1575,6 +1577,26 @@ mod tests {
         ctx.restore_persisted_state(&bob);
         assert!(!bob.is_muzzled());
         assert!(!bob.pm_blocked.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Regresión: `unmuzzle` guardaba `"0"` en vez de borrar la fila y el
+    /// `restore` miraba solo la existencia, así que el usuario volvía muzzled
+    /// en cada login. Un valor `"0"` debe considerarse desactivado.
+    #[test]
+    fn restore_persisted_state_ignores_zero_values() {
+        let ctx = make_ctx();
+        let alice = add_user(&ctx, 3, "Alice");
+        ctx.db.set_user_state("Alice", "muzzle", "0").unwrap();
+        ctx.db.set_user_state("Alice", "lowered", "0").unwrap();
+        ctx.db.set_user_state("Alice", "kiddy", "0").unwrap();
+        ctx.db.set_user_state("Alice", "pmblock", "0").unwrap();
+
+        ctx.restore_persisted_state(&alice);
+
+        assert!(!alice.is_muzzled());
+        assert!(!alice.lowered.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!alice.kiddied.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!alice.pm_blocked.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     /// El custom name debe REEMPLAZAR al nick en el chat público: la sala
