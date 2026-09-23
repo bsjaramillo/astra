@@ -146,7 +146,7 @@ checksum = "b0f477b951e452a0b6b4a10b53ccd569042d1d01729b519e02074a9c0958a063"
 
 [[package]]
 name = "astra"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "astra-admission",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "astra-admission"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "astra-scripting",
  "rand 0.8.8",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "astra-bot"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "astra-commands",
  "astra-scripting",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "astra-captcha"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "image",
  "rand 0.8.8",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "astra-commands"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "astra-scripting",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "astra-link"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "aes",
  "anyhow",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "astra-scripting"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "astra-udp"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "astra-web"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "astra-admission",
@@ -1689,9 +1689,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-rustls"
-version = "0.27.9"
+version = "0.27.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33ca68d021ef39cf6463ab54c1d0f5daf03377b70561305bb89a8f83aab66e0f"
+checksum = "dfa8e654703247911e29c23fbeaa261834bd9bb74efba2f9acddc37bfb127f53"
 dependencies = [
  "http",
  "hyper",
@@ -2557,9 +2557,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pest"
-version = "2.9.1"
+version = "2.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d45aeb61b4bf818e12d4205f2466f8c4748f85f4fce0146d1c03d69d753f0ad"
+checksum = "45d3aca230fad2e6f6317ca0a72724338c4960cb97168a85cdee66df4a9a21a8"
 dependencies = [
  "memchr",
  "ucd-trie",
@@ -2567,9 +2567,9 @@ dependencies = [
 
 [[package]]
 name = "pest_derive"
-version = "2.9.1"
+version = "2.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89cc5a242e25ed4e7704d0be240f2cfbe20a8c27e7e252d94835be93d92dc39f"
+checksum = "284b60557f2c4a2e72ad3f2d34d42685a2fa4a6a61d0d2a10c0ae2a5e916c2cf"
 dependencies = [
  "pest",
  "pest_generator",
@@ -2577,9 +2577,9 @@ dependencies = [
 
 [[package]]
 name = "pest_generator"
-version = "2.9.1"
+version = "2.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7abf21475cc3820fe4b2ca2dc2142902f67a02189f3b5b3a229f4febc01a43e5"
+checksum = "1d9d1f08a115309ee99268cf85e5228e0e56aa9caf8841ec12866b6be07c3109"
 dependencies = [
  "pest",
  "pest_meta",
@@ -2590,9 +2590,9 @@ dependencies = [
 
 [[package]]
 name = "pest_meta"
-version = "2.9.1"
+version = "2.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adba4db388f687393c18c51348d44a41d870ca9df71a2c98172ea3035dc6936e"
+checksum = "ed93ba1a9ffcca32130a5188701c81c0c49cf00d4b7c5007d5148951d743adcb"
 dependencies = [
  "pest",
 ]
@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "proto-ares"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "aes",
  "byteorder",
@@ -2791,7 +2791,7 @@ dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
- "rand 0.10.2",
+ "rand 0.10.3",
  "rand_pcg",
  "ring",
  "rustc-hash",
@@ -2862,9 +2862,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -3455,7 +3455,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.2.8-beta.8"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "astra-captcha",
