@@ -1531,6 +1531,28 @@ impl Database {
         Ok(())
     }
 
+    /// Registra una detección SOLO si la IP no estaba registrada, sin tocar
+    /// `hits`. Se usa para el enforcement retroactivo sobre usuarios ya
+    /// conectados: no es un intento de conexión, así que no debe inflar el
+    /// contador de "Intentos". Si la IP ya existe, no hace nada.
+    pub fn add_vpn_detection_once(
+        &self,
+        ip: &str,
+        name: &str,
+        rule: &str,
+        action: &str,
+        detected_at: i64,
+    ) -> DbResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO vpn_detections (ip, name, rule, action, detected_at, hits) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 1) \
+             ON CONFLICT(ip) DO NOTHING",
+            params![ip, name, rule, action, detected_at],
+        )?;
+        Ok(())
+    }
+
     /// Lista las detecciones más recientes (máx `limit`), de más nueva a más
     /// vieja. Una fila por IP.
     pub fn list_vpn_detections(&self, limit: usize) -> DbResult<Vec<crate::vpn_filter::VpnDetection>> {
@@ -2248,6 +2270,19 @@ mod tests {
         let dets = db.list_vpn_detections(10).unwrap();
         assert_eq!(dets.len(), 2);
         assert_eq!(dets[0].ip, "8.8.8.8");
+
+        // `add_vpn_detection_once` (enforcement retroactivo): si la IP ya
+        // estaba, NO incrementa hits; si es nueva, la inserta con hits=1.
+        db.add_vpn_detection_once("9.9.9.9", "Alice", "1.2.3.0/24", "reject", 400)
+            .unwrap();
+        let dets = db.list_vpn_detections(10).unwrap();
+        let alice = dets.iter().find(|d| d.ip == "9.9.9.9").unwrap();
+        assert_eq!(alice.hits, 2, "el enforcement no debe sumar a Intentos");
+        db.add_vpn_detection_once("7.7.7.7", "Carol", "64501", "reject", 500)
+            .unwrap();
+        let dets = db.list_vpn_detections(10).unwrap();
+        assert_eq!(dets.len(), 3);
+        assert_eq!(dets.iter().find(|d| d.ip == "7.7.7.7").unwrap().hits, 1);
 
         // Poda: dejar solo la más reciente.
         db.prune_vpn_detections(1).unwrap();

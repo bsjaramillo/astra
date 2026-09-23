@@ -661,6 +661,17 @@ impl VpnFilterManager {
             .add_vpn_detection(&ip.to_string(), name, rule, action.as_str(), now);
     }
 
+    /// Registra una detección solo si la IP aún no estaba registrada, sin
+    /// incrementar `hits`. Para enforcement retroactivo (aplicar el filtro a
+    /// usuarios ya conectados): no es un intento de conexión, así que no debe
+    /// sumar al contador de "Intentos".
+    pub fn record_detection_once(&self, name: &str, ip: IpAddr, rule: &str, action: VpnAction) {
+        let now = crate::time::unix_time() as i64;
+        let _ = self
+            .db
+            .add_vpn_detection_once(&ip.to_string(), name, rule, action.as_str(), now);
+    }
+
     /// Poda el histórico de detecciones dejando las `keep` más recientes.
     /// Se llama desde el loop de mantenimiento.
     pub fn prune_detections(&self, keep: usize) {

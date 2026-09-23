@@ -450,7 +450,7 @@ async fn handle_admin_route(
                 .unwrap_or(0);
             let per: usize = query_param(&req.path, "per")
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(100);
+                .unwrap_or(crate::admin::VPN_ENTRIES_MAX_PER);
             let json = crate::admin::vpn_entries_json(ctx, &q, &kind, page, per);
             send_http_json(stream, 200, &json).await?;
         }

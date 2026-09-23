@@ -268,8 +268,10 @@ pub fn enforce_vpn_on_connected(ctx: &AppContext, scripting: &astra_scripting::S
             continue;
         };
         let name = user.name.read().clone();
+        // Enforcement retroactivo: registra la IP si no estaba (para poder
+        // eximirla), pero SIN incrementar "Intentos": no es una conexión nueva.
         ctx.vpn_filter
-            .record_detection(&name, user.external_ip, &hit.rule, action);
+            .record_detection_once(&name, user.external_ip, &hit.rule, action);
         match action {
             VpnAction::Reject => {
                 tracing::warn!(
@@ -649,6 +651,33 @@ mod tests {
         let (k2, _) = enforce_vpn_on_connected(&ctx, &sh);
         assert_eq!(k2, 0);
         assert!(!clean.is_killed());
+    }
+
+    /// El enforcement retroactivo no es un intento de conexión: registrar la
+    /// IP para poder eximirla sí, pero no debe inflar el contador "Intentos".
+    #[test]
+    fn enforce_does_not_inflate_attempt_counter() {
+        use server_core::user_pool::AresUser;
+        let ctx = test_ctx();
+        let sh = astra_scripting::ScriptHandle::dummy();
+        ctx.vpn_filter
+            .add(server_core::VpnBlockKind::Cidr, "198.51.100.0/24");
+        ctx.vpn_filter.set_enabled(true);
+        ctx.vpn_filter.set_action(server_core::VpnAction::Quarantine);
+
+        let mut u = AresUser::new(11, "198.51.100.11".parse().unwrap(), [0x55; 16]);
+        u.logged_in = true;
+        *u.name.write() = "VpnUser4".to_string();
+        ctx.user_pool.add(Arc::new(u));
+
+        // Aplicar varias veces (como al guardar la config) no acumula intentos.
+        enforce_vpn_on_connected(&ctx, &sh);
+        enforce_vpn_on_connected(&ctx, &sh);
+        enforce_vpn_on_connected(&ctx, &sh);
+
+        let dets = ctx.vpn_filter.detections(10);
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0].hits, 1, "el enforcement no debe sumar Intentos");
     }
 
     #[test]

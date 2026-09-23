@@ -412,7 +412,7 @@ const I18N = {
     vpn_allow_btn:"Permitir", vpn_allow_added:"Exención agregada", vpn_allow_exists:"Esa IP ya estaba permitida",
     vpn_det_h:"Detecciones recientes", vpn_det_sub:"Últimas conexiones bloqueadas o reportadas por el filtro. Si alguna es un falso positivo, tocá «Permitir» para eximirla.",
     vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Regla", vpn_det_th_action:"Acción", vpn_det_th_hits:"Intentos", vpn_det_clear:"Vaciar registro", vpn_det_cleared:"Registro vaciado",
-    vpn_search_ph:"Buscar IP o ASN…", vpn_filter_all:"Todas", vpn_prev:"Anterior", vpn_next:"Siguiente", vpn_page_info:"Página {0} de {1} ({2})",
+    vpn_search_ph:"Buscar IP o ASN…", vpn_filter_all:"Todas", vpn_prev:"Anterior", vpn_next:"Siguiente", vpn_page_info:"Página {0} de {1} ({2})", vpn_per_page:"Filas por página",
 
     perm_h:"Permisos de comandos", perm_sub:"Rango mínimo necesario para usar cada comando. Se aplica al instante.",
     perm_search:"🔎 Buscar comando…", th_command:"Comando", th_minrank:"Rango mínimo",
@@ -620,7 +620,7 @@ const I18N = {
     vpn_allow_btn:"Allow", vpn_allow_added:"Exemption added", vpn_allow_exists:"That IP was already allowed",
     vpn_det_h:"Recent detections", vpn_det_sub:"Latest connections blocked or reported by the filter. If one is a false positive, tap 'Allow' to exempt it.",
     vpn_det_th_ip:"IP", vpn_det_th_name:"Nick", vpn_det_th_rule:"Rule", vpn_det_th_action:"Action", vpn_det_th_hits:"Attempts", vpn_det_clear:"Clear log", vpn_det_cleared:"Log cleared",
-    vpn_search_ph:"Search IP or ASN…", vpn_filter_all:"All", vpn_prev:"Previous", vpn_next:"Next", vpn_page_info:"Page {0} of {1} ({2})",
+    vpn_search_ph:"Search IP or ASN…", vpn_filter_all:"All", vpn_prev:"Previous", vpn_next:"Next", vpn_page_info:"Page {0} of {1} ({2})", vpn_per_page:"Rows per page",
 
     perm_h:"Command permissions", perm_sub:"Minimum rank required to run each command. Applies instantly.",
     perm_search:"🔎 Search command…", th_command:"Command", th_minrank:"Minimum rank",
@@ -1264,6 +1264,12 @@ function renderVpn(){
       <div class="inline" style="margin-top:10px">
         <input id="vpnSearch" placeholder="${t("vpn_search_ph")}" style="flex:1">
         <select id="vpnFilterKind" class="sel sm"><option value="">${t("vpn_filter_all")}</option><option value="cidr">CIDR</option><option value="asn">ASN</option></select>
+        <select id="vpnPer" class="sel sm" title="${t("vpn_per_page")}">
+          <option value="10"${VPNPAGE.per===10?" selected":""}>10</option>
+          <option value="15"${VPNPAGE.per===15?" selected":""}>15</option>
+          <option value="20"${VPNPAGE.per===20?" selected":""}>20</option>
+          <option value="25"${VPNPAGE.per===25?" selected":""}>25</option>
+        </select>
       </div>
       <div class="scroll"><table class="tbl"><thead><tr><th>${t("vpn_th_kind")}</th><th>${t("vpn_th_value")}</th><th>${t("vpn_th_source")}</th><th></th></tr></thead>
       <tbody id="vpnEntriesBody"><tr><td colspan=4 class=mut>${t("common_loading")}</td></tr></tbody></table></div>
@@ -1291,7 +1297,7 @@ function renderVpn(){
     </div>`;
 }
 /* ---------------- Entries VPN: lista paginada con búsqueda ---------------- */
-const VPNPAGE = { page: 0, per: 100, q: "", kind: "", total: 0 };
+const VPNPAGE = { page: 0, per: 25, q: "", kind: "", total: 0 };
 function vpnEntriesRender(entries){
   const body = document.getElementById("vpnEntriesBody");
   if(!body) return;
@@ -1783,9 +1789,10 @@ function wire(){
   // en búsqueda/filtro/paginación (sin re-renderizar todo el panel).
   if(g("vpnEntriesBody")){
     loadVpnEntries();
-    const s=g("vpnSearch"), f=g("vpnFilterKind");
+    const s=g("vpnSearch"), f=g("vpnFilterKind"), pp=g("vpnPer");
     if(s) s.oninput=()=>{ clearTimeout(vpnSearchTimer); vpnSearchTimer=setTimeout(()=>{ VPNPAGE.q=s.value.trim(); VPNPAGE.page=0; loadVpnEntries(); }, 250); };
     if(f) f.onchange=()=>{ VPNPAGE.kind=f.value; VPNPAGE.page=0; loadVpnEntries(); };
+    if(pp) pp.onchange=()=>{ VPNPAGE.per=parseInt(pp.value,10)||25; VPNPAGE.page=0; loadVpnEntries(); };
     if(g("vpnPrev")) g("vpnPrev").onclick=()=>{ if(VPNPAGE.page>0){ VPNPAGE.page--; loadVpnEntries(); } };
     if(g("vpnNext")) g("vpnNext").onclick=()=>{ VPNPAGE.page++; loadVpnEntries(); };
   }
