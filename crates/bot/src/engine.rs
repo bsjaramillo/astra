@@ -357,8 +357,11 @@ impl BotEngine {
 const MAX_MSG_LEN: usize = 300;
 
 /// Divide `text` en trozos de hasta `max` caracteres, cortando de preferencia
-/// en el último espacio para no partir palabras. Devuelve un solo trozo si el
-/// texto ya cabe.
+/// en un espacio para no partir palabras. A diferencia de un corte voraz (que
+/// llena el primer trozo y deja las sobras en el último), reparte el texto en
+/// trozos de tamaño equilibrado: para un texto que necesita `n` mensajes, cada
+/// trozo apunta a `ceil(len/n)` caracteres. Devuelve un solo trozo si el texto
+/// ya cabe.
 fn split_chunks(text: &str, max: usize) -> Vec<String> {
     if max == 0 || text.is_empty() {
         return vec![text.to_string()];
@@ -370,17 +373,33 @@ fn split_chunks(text: &str, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
-        // Byte index del corte: los primeros `max` chars (o el final).
-        let limit = rest
-            .char_indices()
-            .nth(max)
-            .map(|(i, _)| i)
-            .unwrap_or(rest.len());
-        let window = &rest[..limit];
-        // Cortar en el último espacio dentro de la ventana (evita partir palabras).
-        let cut = window
-            .rfind(' ')
-            .filter(|&i| i > 0)
+        let len = rest.chars().count();
+        if len <= max {
+            out.push(rest.to_string());
+            break;
+        }
+        // Nº mínimo de trozos restantes y objetivo balanceado (siempre <= max).
+        let nchunks = len.div_ceil(max);
+        let target = len.div_ceil(nchunks);
+        // Byte index del límite duro (primeros `max` chars) y del objetivo.
+        let index_of = |chars: usize| {
+            rest.char_indices()
+                .nth(chars)
+                .map(|(i, _)| i)
+                .unwrap_or(rest.len())
+        };
+        let limit = index_of(max);
+        let target_byte = index_of(target);
+        // Último espacio que no supere el objetivo; así ningún trozo se come el
+        // presupuesto de los siguientes. Si la primera palabra ya es más larga
+        // que el objetivo, corta en el primer espacio disponible; sin espacios,
+        // corta duro en `max`.
+        let spaces = rest[..limit].match_indices(' ').map(|(i, _)| i);
+        let cut = spaces
+            .clone()
+            .filter(|&i| i <= target_byte)
+            .next_back()
+            .or_else(|| spaces.into_iter().next())
             .map(|i| i + 1)
             .unwrap_or(limit);
         out.push(rest[..cut].to_string());
@@ -986,6 +1005,25 @@ mod tests {
         assert_eq!(chunks.len(), 4);
         assert!(chunks.iter().all(|c| c.chars().count() <= 30));
         assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn split_chunks_balances_evenly() {
+        // Texto que necesita 4 trozos con max=20. El corte voraz daba
+        // 20/20/20/2; el balanceado debe dejar todos los trozos parecidos.
+        let text = "uno dos tres cuatro cinco seis siete ocho nueve diez once doce";
+        let chunks = split_chunks(text, 20);
+        assert_eq!(chunks.concat(), text);
+        assert!(chunks.len() >= 3);
+        let max_len = chunks.iter().map(|c| c.chars().count()).max().unwrap();
+        let min_len = chunks.iter().map(|c| c.chars().count()).min().unwrap();
+        // La diferencia máxima es el largo de la palabra más larga (6).
+        assert!(
+            max_len - min_len <= 8,
+            "trozos desbalanceados: {:?}",
+            chunks.iter().map(|c| c.chars().count()).collect::<Vec<_>>()
+        );
+        assert!(min_len >= 10, "último trozo demasiado corto: {min_len}");
     }
 
     #[test]
