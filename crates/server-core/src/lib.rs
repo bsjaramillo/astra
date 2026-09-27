@@ -125,7 +125,7 @@ pub mod vpn_filter;
 /// Re-exports comunes.
 pub use app::{
     admin_action, AppContext, KillScriptFn, LeafDirected, LinkEvent, LinkLeafInfo, LinkRequest,
-    LinkUserSnapshot, ListScriptsFn, LoadScriptFn, ScriptingHooks,
+    LinkUserSnapshot, ListScriptsFn, LoadScriptFn, ScriptDetailsFn, ScriptMeta, ScriptingHooks,
 };
 pub use bot::Bot;
 pub use command_levels::CommandLevelManager;

@@ -173,6 +173,11 @@ pub enum ScriptRequest {
         name: String,
         reply: std_mpsc::SyncSender<Result<(), String>>,
     },
+    /// Metadatos de todos los scripts cargados (panel admin).
+    ScriptDetails {
+        /// Canal de respuesta con la lista de metadatos.
+        reply: std_mpsc::SyncSender<Vec<server_core::ScriptMeta>>,
+    },
 }
 
 impl ScriptRequest {
@@ -199,7 +204,8 @@ impl ScriptRequest {
             | ScriptRequest::EvalRoom { .. }
             | ScriptRequest::ListScripts { .. }
             | ScriptRequest::LoadScript { .. }
-            | ScriptRequest::KillScript { .. } => unreachable!("resuelto antes en dispatch_request"),
+            | ScriptRequest::KillScript { .. }
+            | ScriptRequest::ScriptDetails { .. } => unreachable!("resuelto antes en dispatch_request"),
         }
     }
 
@@ -255,7 +261,8 @@ impl ScriptRequest {
             | ScriptRequest::EvalRoom { .. }
             | ScriptRequest::ListScripts { .. }
             | ScriptRequest::LoadScript { .. }
-            | ScriptRequest::KillScript { .. } => unreachable!("resuelto antes en dispatch_request"),
+            | ScriptRequest::KillScript { .. }
+            | ScriptRequest::ScriptDetails { .. } => unreachable!("resuelto antes en dispatch_request"),
         }
     }
 }
@@ -519,6 +526,15 @@ impl ScriptHandle {
         }
         rx.recv_timeout(Duration::from_millis(500))
             .unwrap_or_else(|_| Err("timeout esperando al script manager".to_string()))
+    }
+
+    /// Metadatos de todos los scripts cargados (panel admin).
+    pub fn script_details(&self) -> Vec<server_core::ScriptMeta> {
+        let (tx, rx) = std_mpsc::sync_channel::<Vec<server_core::ScriptMeta>>(1);
+        if self.tx_req.send(ScriptRequest::ScriptDetails { reply: tx }).is_err() {
+            return Vec::new();
+        }
+        rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default()
     }
 }
 
@@ -1007,11 +1023,35 @@ impl ScriptManager {
     /// si ALGÚN script retorna `false`, el reply es `false` (cancela).
     /// Si TODOS retornan `true` o no hay handler, el reply es `true`.
     pub fn dispatch_request(&self, request: ScriptRequest) {
-        // Las 3 variantes de gestión de scripts no llaman a ningún handler
+        // Las variantes de gestión de scripts no llaman a ningún handler
         // JS — se resuelven directo contra `self.scripts`/`self.scripts_dir`
         // y retornan temprano, antes de tocar `handler_name()`/`args()`
         // (que no las soportan).
         match request {
+            ScriptRequest::ScriptDetails { reply } => {
+                let metas: Vec<server_core::ScriptMeta> = self
+                    .scripts
+                    .lock()
+                    .values()
+                    .map(|s| {
+                        let state = match s.state() {
+                            ScriptLifecycle::Loaded => "loaded",
+                            ScriptLifecycle::Active => "active",
+                            ScriptLifecycle::Error => "error",
+                            ScriptLifecycle::Unloaded => "unloaded",
+                        };
+                        server_core::ScriptMeta {
+                            id: s.id.0,
+                            name: s.name().to_string(),
+                            state: state.to_string(),
+                            path: s.path.as_ref().map(|p| p.display().to_string()),
+                            error: s.last_error(),
+                        }
+                    })
+                    .collect();
+                let _ = reply.send(metas);
+                return;
+            }
             ScriptRequest::ListScripts { reply } => {
                 let names: Vec<String> = self
                     .scripts

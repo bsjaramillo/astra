@@ -131,6 +131,8 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
   .badge.voice{background:rgba(52,199,89,.16);color:var(--lvl-voice)}
   .chip{font-size:11.5px;padding:3px 9px;border-radius:20px;background:var(--surface3);color:var(--mut)}
   .chip.warn{background:rgba(255,176,32,.15);color:var(--warn)}
+  .chip.ok{background:rgba(52,199,89,.15);color:var(--ok)}
+  .chip.err{background:rgba(255,82,87,.15);color:var(--danger)}
   .pill{display:inline-flex;align-items:center;gap:8px;font-size:13px;padding:7px 12px;border-radius:20px;background:var(--surface2);border:1px solid var(--border);margin:0 7px 7px 0}
   .pill a{color:var(--mut);font-weight:700;font-size:15px;line-height:1}
   .pill a:hover{color:var(--danger)}
@@ -281,7 +283,7 @@ const I18N = {
     nav_filtros:"Filtros de palabras", nav_bienvenidas:"Bienvenidas", nav_sala:"Opciones de sala",
     nav_avatares:"Avatares", nav_servidor:"Servidor", nav_enlace:"Enlace de salas", nav_seguridad:"Seguridad",
     nav_proxies:"Proxies", nav_permisos:"Permisos de comandos", nav_config:"Config avanzada", nav_consola:"Consola",
-    nav_motd:"Mensaje de entrada", nav_plantillas:"Textos del sistema", nav_bot:"Bot agente",
+    nav_motd:"Mensaje de entrada", nav_plantillas:"Textos del sistema", nav_bot:"Bot agente", nav_scripts:"Scripts",
     common_save:"Guardar", common_save_changes:"Guardar cambios", common_add:"Agregar", common_remove:"Quitar",
     common_none:"Ninguno.", common_none_f:"Ninguna.", common_loading:"Cargando…", common_error:"Error", common_done:"Listo", common_close:"Cerrar",
     restart_note:"⚠️ Estos cambios se guardan en el archivo de configuración y se aplican al <b>reiniciar el servidor</b>.",
@@ -467,6 +469,23 @@ const I18N = {
     bot_select:"Bot a editar", bot_none:"Sin bots — creá uno abajo", bot_new:"Nuevo bot", bot_del:"Eliminar bot",
     bot_del_confirm:"¿Eliminar este bot?", bot_deleted:"Bot eliminado.", bot_identity:"Identidad",
 
+    sc_h:"Scripts de la sala", sc_sub:"Revisa, recarga e instala scripts (plugins JS) sin salir del panel.",
+    sc_note:"Los scripts se cargan desde la carpeta <code>scripts/</code> del servidor. <b>Recargar</b> relee el archivo desde disco; <b>Descargar</b> solo lo quita de memoria (el archivo queda).",
+    sc_installed_h:"📦 Instalados", sc_refresh:"Actualizar",
+    sc_empty:"No hay scripts. Instala uno desde la comunidad o coloca una carpeta en <code>scripts/</code>.",
+    sc_state_active:"Activo", sc_state_error:"Error", sc_state_loaded:"Cargado", sc_state_disk:"En disco", sc_state_unloaded:"Descargado",
+    sc_view:"Ver código", sc_reload:"Recargar", sc_unload:"Descargar", sc_load:"Cargar",
+    sc_folder:"carpeta", sc_file:"archivo", sc_files:"{0} archivo(s)",
+    sc_source_title:"Código de {0}",
+    sc_community_h:"🌐 Comunidad",
+    sc_community_note:"Scripts públicos de GitHub con el topic <code>areschatscript</code>. Se instalan en <code>scripts/&lt;repo&gt;/</code> y se cargan solos.",
+    sc_search_ph:"Buscar scripts (ej. trivia, moderación…)", sc_search_btn:"Buscar", sc_searching:"Buscando…",
+    sc_no_results:"Sin resultados.", sc_search_err:"no se pudo buscar",
+    sc_author:"por {0}", sc_stars:"★ {0}", sc_install:"Instalar", sc_installing:"Instalando…",
+    sc_installed_ok:"Script instalado y cargado.", sc_install_err:"no se pudo instalar",
+    sc_load_ok:"Script cargado.", sc_unload_ok:"Script descargado.",
+    sc_kill_confirm:"¿Descargar el script '{0}' de memoria?", sc_error_label:"Error",
+
     nav_soporte:"Soporte",
     sup_h:"Soporte", sup_sub:"Reportá un problema o sugerí una mejora para Astra.",
     sup_note:"El reporte va al repositorio oficial de Astra. Solo se envía el título y la descripción que escribas (ningún dato del servidor ni de los usuarios).",
@@ -490,7 +509,7 @@ const I18N = {
     nav_filtros:"Word filters", nav_bienvenidas:"Greetings", nav_sala:"Room options",
     nav_avatares:"Avatars", nav_servidor:"Server", nav_enlace:"Room linking", nav_seguridad:"Security",
     nav_proxies:"Proxies", nav_permisos:"Command permissions", nav_config:"Advanced config", nav_consola:"Console",
-    nav_motd:"Join message", nav_plantillas:"System texts", nav_bot:"Agent bot",
+    nav_motd:"Join message", nav_plantillas:"System texts", nav_bot:"Agent bot", nav_scripts:"Scripts",
     common_save:"Save", common_save_changes:"Save changes", common_add:"Add", common_remove:"Remove",
     common_none:"None.", common_none_f:"None.", common_loading:"Loading…", common_error:"Error", common_done:"Done", common_close:"Close",
     restart_note:"⚠️ These changes are written to the config file and take effect after <b>restarting the server</b>.",
@@ -676,6 +695,23 @@ const I18N = {
     bot_select:"Bot to edit", bot_none:"No bots — create one below", bot_new:"New bot", bot_del:"Delete bot",
     bot_del_confirm:"Delete this bot?", bot_deleted:"Bot deleted.", bot_identity:"Identity",
 
+    sc_h:"Room scripts", sc_sub:"Review, reload and install scripts (JS plugins) without leaving the panel.",
+    sc_note:"Scripts load from the server's <code>scripts/</code> folder. <b>Reload</b> re-reads the file from disk; <b>Unload</b> only removes it from memory (the file stays).",
+    sc_installed_h:"📦 Installed", sc_refresh:"Refresh",
+    sc_empty:"No scripts. Install one from the community or drop a folder in <code>scripts/</code>.",
+    sc_state_active:"Active", sc_state_error:"Error", sc_state_loaded:"Loaded", sc_state_disk:"On disk", sc_state_unloaded:"Unloaded",
+    sc_view:"View code", sc_reload:"Reload", sc_unload:"Unload", sc_load:"Load",
+    sc_folder:"folder", sc_file:"file", sc_files:"{0} file(s)",
+    sc_source_title:"Source of {0}",
+    sc_community_h:"🌐 Community",
+    sc_community_note:"Public GitHub scripts tagged with <code>areschatscript</code>. They install to <code>scripts/&lt;repo&gt;/</code> and load automatically.",
+    sc_search_ph:"Search scripts (e.g. trivia, moderation…)", sc_search_btn:"Search", sc_searching:"Searching…",
+    sc_no_results:"No results.", sc_search_err:"search failed",
+    sc_author:"by {0}", sc_stars:"★ {0}", sc_install:"Install", sc_installing:"Installing…",
+    sc_installed_ok:"Script installed and loaded.", sc_install_err:"could not install",
+    sc_load_ok:"Script loaded.", sc_unload_ok:"Script unloaded.",
+    sc_kill_confirm:"Unload script '{0}' from memory?", sc_error_label:"Error",
+
     nav_soporte:"Support",
     sup_h:"Support", sup_sub:"Report a problem or suggest an improvement for Astra.",
     sup_note:"The report goes to the official Astra repository. Only the title and description you write are sent (no server or user data).",
@@ -764,6 +800,7 @@ const TABS = [
     {id:"proxies", icon:"🌐", k:"nav_proxies"},
     {id:"vpn", icon:"🕵️", k:"nav_vpn"},
     {id:"permisos", icon:"🔑", k:"nav_permisos"},
+    {id:"scripts", icon:"📜", k:"nav_scripts"},
     {id:"plantillas", icon:"💬", k:"nav_plantillas"},
     {id:"config", icon:"📝", k:"nav_config"},
     {id:"consola", icon:"⌨️", k:"nav_consola"},
@@ -774,7 +811,7 @@ const TABS = [
 ];
 // Pestañas que NO se auto-refrescan (tienen formularios que se borrarían al
 // re-renderizar mientras el admin escribe).
-const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","vpn","avatares","motd","plantillas","bot","soporte"]);
+const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","vpn","avatares","motd","plantillas","bot","soporte","scripts"]);
 
 /* ============================ helpers ============================ */
 async function api(path, opts={}) {
@@ -889,7 +926,7 @@ function render(){
     sala:renderSala, motd:renderMotd, avatares:renderAvatares, servidor:renderServidor,
     enlace:renderEnlace, seguridad:renderSeguridad, proxies:renderProxies, vpn:renderVpn,
     permisos:renderPermisos, plantillas:renderPlantillas, config:renderConfig, consola:renderConsola,
-    bot:renderBot, soporte:renderSoporte
+    bot:renderBot, soporte:renderSoporte, scripts:renderScripts
   };
   document.getElementById("view").innerHTML = (map[TAB] || renderInicio)();
   wire();
@@ -1659,6 +1696,100 @@ async function delBot(){
   else{ const j=await r.json().catch(()=>({})); toast(t("err_prefix")+(j.error||t("err_save")),"err"); }
 }
 
+/* ---------------- Scripts ---------------- */
+let SCRIPTS={dir:"",scripts:[]};
+let SCRIPT_SEARCH=[];
+function scStateBadge(s){
+  const map={
+    active:["ok","sc_state_active"], loaded:["","sc_state_loaded"],
+    error:["err","sc_state_error"], on_disk:["","sc_state_disk"], unloaded:["warn","sc_state_unloaded"]
+  };
+  const m=map[s]||["",s];
+  return `<span class="chip ${m[0]}">${t(m[1])}</span>`;
+}
+function renderScripts(){
+  return `<div class="cardhead"><h2>${t("sc_h")}</h2><p class="sub">${t("sc_sub")}</p></div>
+    <div class="note">${t("sc_note")}</div>
+    <div class="card">
+      <div class="cardhead" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 12px">
+        <h3 style="margin:0">${t("sc_installed_h")}</h3>
+        <button class="btn sm" id="scRefresh">${t("sc_refresh")}</button>
+      </div>
+      <div class="ucards" id="scList">${t("common_loading")}</div>
+    </div>
+    <div class="card"><h3>${t("sc_community_h")}</h3>
+      <div class="note">${t("sc_community_note")}</div>
+      <div class="inline"><input id="scSearch" placeholder="${esc(t("sc_search_ph"))}"><button class="btn primary" id="scSearchBtn">${t("sc_search_btn")}</button></div>
+      <div class="ucards" id="scResults" style="margin-top:12px"></div>
+    </div>`;
+}
+async function loadScripts(){
+  const box=document.getElementById("scList"); if(!box) return;
+  const r=await api("/admin/scripts");
+  if(!r.ok){ box.innerHTML=`<div class="empty">${t("common_error")}</div>`; return; }
+  SCRIPTS=await r.json().catch(()=>({dir:"",scripts:[]}));
+  renderScriptsList();
+}
+function renderScriptsList(){
+  const box=document.getElementById("scList"); if(!box) return;
+  const list=SCRIPTS.scripts||[];
+  if(!list.length){ box.innerHTML=`<div class="empty">${t("sc_empty")}</div>`; return; }
+  box.innerHTML=list.map(s=>{
+    const kind=s.folder?t("sc_folder"):t("sc_file");
+    const meta=[kind];
+    if(s.fileCount) meta.push(t("sc_files",s.fileCount));
+    if(s.mainFile) meta.push(esc(s.mainFile));
+    const err=s.error?`<div class="warnbox" style="margin:9px 0 0">${t("sc_error_label")}: ${esc(s.error)}</div>`:"";
+    const actions=s.loaded
+      ? `<button class="btn sm" data-scview="${esc(s.name)}">${t("sc_view")}</button>
+         <button class="btn sm" data-scload="${esc(s.name)}">${t("sc_reload")}</button>
+         <button class="btn sm danger" data-sckill="${esc(s.name)}">${t("sc_unload")}</button>`
+      : `<button class="btn sm" data-scview="${esc(s.name)}">${t("sc_view")}</button>
+         <button class="btn sm primary" data-scload="${esc(s.name)}">${t("sc_load")}</button>`;
+    return `<div class="ucard"><div class="uhead"><span class="uname">${esc(s.name)}</span>${scStateBadge(s.state)}</div>
+      <div class="umeta">${meta.join(" · ")}</div>
+      <div class="uactions">${actions}</div>${err}</div>`;
+  }).join("");
+}
+async function viewScript(name, file){
+  const qs="name="+encodeURIComponent(name)+(file?"&file="+encodeURIComponent(file):"");
+  const r=await api("/admin/scripts/source?"+qs);
+  const j=await r.json().catch(()=>({error:"error"}));
+  if(!r.ok){ toast(t("err_prefix")+(j.error||t("common_error")),"err"); return; }
+  showOutput(t("sc_source_title",j.name||name)+(j.file?" — "+j.file:""), [j.source||""]);
+}
+async function setScriptLoaded(name, load){
+  const ep=load?"/admin/scripts/load":"/admin/scripts/kill";
+  const r=await api(ep,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})});
+  const j=await r.json().catch(()=>({error:"error"}));
+  if(r.ok){ toast(load?t("sc_load_ok"):t("sc_unload_ok"),"ok"); await loadScripts(); }
+  else{ toast(t("err_prefix")+(j.error||t("common_error")),"err"); }
+}
+async function searchCommunity(){
+  const box=document.getElementById("scResults"); if(!box) return;
+  const q=(document.getElementById("scSearch")||{}).value||"";
+  box.innerHTML=`<div class="empty">${t("sc_searching")}</div>`;
+  const r=await api("/admin/scripts/search?q="+encodeURIComponent(q.trim()));
+  const j=await r.json().catch(()=>({error:"error"}));
+  if(!r.ok){ box.innerHTML=`<div class="warnbox">${t("sc_search_err")}: ${esc(j.error||"")}</div>`; return; }
+  SCRIPT_SEARCH=Array.isArray(j)?j:[];
+  if(!SCRIPT_SEARCH.length){ box.innerHTML=`<div class="empty">${t("sc_no_results")}</div>`; return; }
+  box.innerHTML=SCRIPT_SEARCH.map(s=>`<div class="ucard">
+    <div class="uhead"><span class="uname">${esc(s.full_name)}</span>${s.stars?`<span class="chip">${t("sc_stars",s.stars)}</span>`:""}</div>
+    <div class="umeta">${esc(s.description||"")}</div>
+    <div class="uactions"><button class="btn sm primary" data-scinstall="${esc(s.full_name)}">${t("sc_install")}</button></div>
+  </div>`).join("");
+}
+async function installCommunity(path){
+  const b=document.querySelector(`[data-scinstall="${path}"]`);
+  if(b){ b.disabled=true; b.textContent=t("sc_installing"); }
+  const r=await api("/admin/scripts/install",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});
+  const j=await r.json().catch(()=>({error:"error"}));
+  if(b){ b.disabled=false; b.textContent=t("sc_install"); }
+  if(r.ok){ toast(t("sc_installed_ok"),"ok"); await loadScripts(); }
+  else{ toast(t("err_prefix")+(j.error||t("sc_install_err")),"err"); }
+}
+
 function renderConfig(){
   return `<div class="cardhead"><h2>${t("cfg_h")}</h2><p class="sub">${t("cfg_sub")}</p></div>
     <div class="warnbox">${t("cfg_warn")}</div>
@@ -1762,6 +1893,22 @@ function wire(){
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
   if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }
   if(g("botSave")){ loadBots(); g("botSave").onclick=saveBot; g("botSelect").onchange=()=>{ BOTID=parseInt(g("botSelect").value)||0; loadBot(); }; g("botNew").onclick=newBot; g("botDel").onclick=delBot; g("botProvider").onchange=()=>applyBotDefaults(true); }
+  if(g("scList")){
+    loadScripts();
+    g("scRefresh").onclick=loadScripts;
+    g("scSearchBtn").onclick=searchCommunity;
+    g("scSearch").onkeydown=e=>{ if(e.key==="Enter") searchCommunity(); };
+    g("scList").onclick=e=>{
+      const b=e.target.closest("button"); if(!b) return;
+      if(b.dataset.scview!==undefined) viewScript(b.dataset.scview);
+      else if(b.dataset.scload!==undefined) setScriptLoaded(b.dataset.scload,true);
+      else if(b.dataset.sckill!==undefined){ if(confirm(t("sc_kill_confirm",b.dataset.sckill))) setScriptLoaded(b.dataset.sckill,false); }
+    };
+    g("scResults").onclick=e=>{
+      const b=e.target.closest("button"); if(!b||b.dataset.scinstall===undefined) return;
+      installCommunity(b.dataset.scinstall);
+    };
+  }
   if(g("botAvatarFile")){ g("botAvatarFile").onchange=()=>{ const f=g("botAvatarFile").files[0]; if(!f) return; const rd=new FileReader(); rd.onload=()=>{ const url=rd.result||""; BOT_AVATAR=url.split(",")[1]||""; const img=g("botAvatarImg"); if(img) img.src=url; }; rd.readAsDataURL(f); }; }
   if(g("botAvatarClear")){ g("botAvatarClear").onclick=()=>{ BOT_AVATAR=""; const img=g("botAvatarImg"); if(img) img.removeAttribute("src"); }; }
   if(g("tplEd")){ loadPlantillas(); g("tplSave").onclick=savePlantillas; }

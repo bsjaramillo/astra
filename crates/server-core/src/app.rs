@@ -50,17 +50,37 @@ pub type LoadScriptFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync
 /// Descarga un script por nombre.
 pub type KillScriptFn = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
-/// Bundle de las 3 closures de gestión de scripts, seteado una sola vez en
+/// Metadatos de un script cargado, expuestos al panel de administración.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScriptMeta {
+    /// ID interno del script.
+    pub id: u64,
+    /// Nombre lógico (nombre de la carpeta o del `.js`).
+    pub name: String,
+    /// Estado: `loaded` | `active` | `error` | `unloaded`.
+    pub state: String,
+    /// Ruta al archivo principal, si el script vino de disco.
+    pub path: Option<String>,
+    /// Último error registrado, si lo hay.
+    pub error: Option<String>,
+}
+
+/// Devuelve los metadatos de todos los scripts cargados.
+pub type ScriptDetailsFn = Arc<dyn Fn() -> Vec<ScriptMeta> + Send + Sync>;
+
+/// Bundle de las closures de gestión de scripts, seteado una sola vez en
 /// `main.rs` tras arrancar el `ScriptManager`. `None` antes de ese punto
 /// (p.ej. en tests que construyen un `AppContext` sin scripting).
 #[derive(Clone)]
 pub struct ScriptingHooks {
-    /// Lista los scripts cargados.
+    /// Lista los nombres de los scripts cargados.
     pub list: ListScriptsFn,
     /// Carga un script por nombre.
     pub load: LoadScriptFn,
     /// Descarga un script por nombre.
     pub kill: KillScriptFn,
+    /// Metadatos detallados de los scripts cargados.
+    pub details: ScriptDetailsFn,
 }
 
 /// Snapshot serializable de un usuario para replicación Link.

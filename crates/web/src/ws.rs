@@ -597,6 +597,65 @@ async fn handle_admin_route(
                 }
             }
         }
+        ("GET", "/admin/scripts") => {
+            let json = crate::admin::scripts_json(ctx);
+            send_http_json(stream, 200, &json).await?;
+        }
+        ("GET", "/admin/scripts/source") => {
+            let name = query_param(&req.path, "name").unwrap_or_default();
+            let file = query_param(&req.path, "file").unwrap_or_default();
+            match crate::admin::script_source_json(ctx, &name, &file) {
+                Ok(json) => send_http_json(stream, 200, &json).await?,
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
+        ("GET", "/admin/scripts/search") => {
+            let q = query_param(&req.path, "q").unwrap_or_default();
+            match crate::admin::search_scripts(ctx, &q).await {
+                Ok(json) => send_http_json(stream, 200, &json).await?,
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
+        (m, "/admin/scripts/load") if m.eq_ignore_ascii_case("POST") => {
+            let name = json_field(&req.body, "name").unwrap_or_default();
+            match crate::admin::load_script(ctx, &name) {
+                Ok(()) => send_http_json(stream, 200, "{\"ok\":true}").await?,
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
+        (m, "/admin/scripts/kill") if m.eq_ignore_ascii_case("POST") => {
+            let name = json_field(&req.body, "name").unwrap_or_default();
+            match crate::admin::kill_script(ctx, &name) {
+                Ok(()) => send_http_json(stream, 200, "{\"ok\":true}").await?,
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
+        (m, "/admin/scripts/install") if m.eq_ignore_ascii_case("POST") => {
+            let path = json_field(&req.body, "path").unwrap_or_default();
+            match crate::admin::install_script(ctx, &path).await {
+                Ok(msg) => {
+                    let body =
+                        format!("{{\"ok\":true,\"message\":\"{}\"}}", json_escape(&msg));
+                    send_http_json(stream, 200, &body).await?;
+                }
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
         _ => {
             send_http_json(stream, 404, "{\"error\":\"not found\"}").await?;
         }

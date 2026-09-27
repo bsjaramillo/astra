@@ -5159,11 +5159,93 @@ struct GitHubRepository {
     is_private: bool,
     owner: GitHubOwner,
     description: Option<String>,
+    #[serde(default)]
+    stargazers_count: u64,
 }
 
 #[derive(serde::Deserialize)]
 struct GitHubOwner {
     login: String,
+}
+
+/// Resultado de una búsqueda de scripts de la comunidad en GitHub.
+///
+/// Se expone también al panel web (`/admin/scripts/search`), por eso deriva
+/// `Serialize`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommunityScript {
+    /// Nombre del repositorio (sin el owner).
+    pub name: String,
+    /// Ruta completa `owner/repo` (lo que consume la instalación).
+    pub full_name: String,
+    /// Login del autor.
+    pub owner: String,
+    /// Descripción del repositorio (puede venir vacía).
+    pub description: String,
+    /// Estrellas del repositorio (para ordenar/mostrar relevancia).
+    pub stars: u64,
+}
+
+/// Busca repositorios públicos con el topic `areschatscript` (paridad
+/// `LiveScript.LiveScripts` de sb0t).
+///
+/// `query` es un término libre opcional que se agrega a la búsqueda por topic.
+/// `endpoint` es la base de la API de GitHub (`[live_scripts_endpoint]`).
+pub async fn search_community_scripts(
+    endpoint: &str,
+    query: &str,
+) -> Result<Vec<CommunityScript>, String> {
+    let term = query.trim();
+    let mut q = String::from("topic:areschatscript is:public");
+    if !term.is_empty() {
+        q.push(' ');
+        q.push_str(term);
+    }
+    let client = reqwest::Client::new();
+    let url = format!("{}/search/repositories", endpoint.trim_end_matches('/'));
+    let req = github_headers(client.get(&url))
+        .query(&[("q", q.as_str()), ("per_page", "30")])
+        .timeout(std::time::Duration::from_secs(10));
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("github request failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("github returned {}", resp.status()));
+    }
+    let parsed: GitHubSearchResponse = resp
+        .json()
+        .await
+        .map_err(|_| "unexpected github response".to_string())?;
+    Ok(parsed
+        .items
+        .into_iter()
+        .filter(|r| !r.is_private)
+        .map(|r| CommunityScript {
+            name: r.name,
+            full_name: r.full_name,
+            owner: r.owner.login,
+            description: r.description.unwrap_or_default(),
+            stars: r.stargazers_count,
+        })
+        .collect())
+}
+
+/// ¿`path` tiene la forma segura `owner/repo`? (sin traversal ni segmentos
+/// vacíos; mismos caracteres que acepta GitHub en esos nombres).
+pub fn is_valid_repo_path(path: &str) -> bool {
+    let mut parts = path.trim().split('/');
+    let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    ok(owner) && ok(repo)
 }
 
 #[derive(serde::Deserialize)]
@@ -5182,50 +5264,38 @@ fn handle_livescripts(ctx: &AppContext, user: &Arc<AresUser>) {
     let endpoint = ctx.settings.live_scripts_endpoint.clone();
     let user = user.clone();
     spawn_lookup(user, bot, move || async move {
-        let client = reqwest::Client::new();
-        let url = format!("{}/search/repositories?q=topic:areschatscript+is:public", endpoint);
-        let req = github_headers(client.get(&url)).timeout(std::time::Duration::from_secs(10));
-        let resp = req.send().await.ok()?;
-        let parsed: GitHubSearchResponse = resp.json().await.ok()?;
-        let lines: Vec<String> = parsed
-            .items
-            .iter()
-            .filter(|r| !r.is_private)
-            .map(|r| {
-                format!(
-                    "Script: {}  Author: {}  Path: {}  Description: {}",
-                    r.name,
-                    r.owner.login,
-                    r.full_name,
-                    r.description.as_deref().unwrap_or("")
-                )
-            })
-            .collect();
-        if lines.is_empty() {
-            Some("No scripts available".to_string())
-        } else {
-            Some(lines.join("\n"))
+        match search_community_scripts(&endpoint, "").await {
+            Ok(scripts) => {
+                let lines: Vec<String> = scripts
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "Script: {}  Author: {}  Path: {}  Description: {}",
+                            r.name, r.owner, r.full_name, r.description
+                        )
+                    })
+                    .collect();
+                if lines.is_empty() {
+                    Some("No scripts available".to_string())
+                } else {
+                    Some(lines.join("\n"))
+                }
+            }
+            Err(_) => Some("No scripts available".to_string()),
         }
     });
 }
 
 /// `/downloadscript <owner/repo>` — descarga el último release de un repo
-/// de GitHub, extrae el primer `.js` que encuentra, y lo carga (paridad
-/// `LiveScript.GetDownload`/`Download` de sb0t). Simplificación deliberada:
-/// sb0t renombra el directorio raíz extraído a `<filename>.js` (su modelo
-/// permite que un "script" sea una carpeta); aquí se busca el primer
-/// archivo `.js` dentro del zip y se lo carga como script individual,
-/// consistente con el modelo de `ScriptManager` de Astra.
+/// de GitHub, extrae TODO su contenido a `<scripts_dir>/<repo>/` y lo carga
+/// (paridad `LiveScript.GetDownload`/`Download` de sb0t).
 fn handle_downloadscript(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     if !has_level(user, ILevel::Owner) {
         send_system_line(ctx, user, "Access denied. Owner required.");
         return;
     }
     let path = args.trim().to_string();
-    let valid = regex::Regex::new(r"^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$")
-        .map(|re| re.is_match(&path))
-        .unwrap_or(false);
-    if !valid {
+    if !is_valid_repo_path(&path) {
         send_system_line(ctx, user, &format!("{} is not a valid path. Path must be like user/repository", path));
         return;
     }
@@ -5236,55 +5306,83 @@ fn handle_downloadscript(ctx: &AppContext, user: &Arc<AresUser>, args: &str) {
     let hooks = ctx.scripting_hooks.read().clone();
     let user = user.clone();
     spawn_lookup(user, bot, move || async move {
-        download_and_load_script(endpoint, path, data_dir, hooks).await
+        Some(
+            install_community_script(&endpoint, &path, &data_dir, hooks)
+                .await
+                .unwrap_or_else(|e| e),
+        )
     });
 }
 
-async fn download_and_load_script(
-    endpoint: String,
-    path: String,
-    data_dir: String,
+/// Descarga e instala un script de la comunidad desde GitHub (`owner/repo`) y
+/// lo carga en el `ScriptManager`.
+///
+/// Baja el zipball del último release, extrae TODO el contenido a
+/// `<data_dir>/scripts/<repo>/` (aplanando la carpeta raíz que agrega GitHub) y
+/// carga el script por nombre de carpeta. Devuelve un mensaje legible tanto en
+/// éxito como en fallo. También lo usa el panel web
+/// (`POST /admin/scripts/install`).
+pub async fn install_community_script(
+    endpoint: &str,
+    path: &str,
+    data_dir: &str,
     hooks: Option<server_core::ScriptingHooks>,
-) -> Option<String> {
+) -> Result<String, String> {
+    let path = path.trim();
+    if !is_valid_repo_path(path) {
+        return Err(format!(
+            "{} is not a valid path. Path must be like user/repository",
+            path
+        ));
+    }
     let client = reqwest::Client::new();
+    let base = endpoint.trim_end_matches('/');
 
-    let release_url = format!("{}/repos/{}/releases/latest", endpoint, path);
+    let release_url = format!("{}/repos/{}/releases/latest", base, path);
     let req = github_headers(client.get(&release_url)).timeout(std::time::Duration::from_secs(10));
-    let Ok(resp) = req.send().await else {
-        return Some(format!("Unable to get the script with path: {}", path));
-    };
-    let Ok(release) = resp.json::<GitHubRelease>().await else {
-        return Some(format!("Unable to get the script with path: {}", path));
-    };
+    let resp = req
+        .send()
+        .await
+        .map_err(|_| format!("Unable to get the script with path: {}", path))?;
+    if !resp.status().is_success() {
+        return Err(format!("Unable to get the script with path: {}", path));
+    }
+    let release = resp
+        .json::<GitHubRelease>()
+        .await
+        .map_err(|_| format!("Unable to get the script with path: {}", path))?;
     if release.zipball_url.is_empty() {
-        return Some(format!("Unable to get the script with path: {}", path));
+        return Err(format!("Unable to get the script with path: {}", path));
     }
 
-    let req = github_headers(client.get(&release.zipball_url)).timeout(std::time::Duration::from_secs(30));
-    let Ok(zip_resp) = req.send().await else {
-        return Some(format!("Failed to download release zip for: {}", path));
-    };
-    let Ok(zip_bytes) = zip_resp.bytes().await else {
-        return Some(format!("Failed to download release zip for: {}", path));
-    };
+    let req = github_headers(client.get(&release.zipball_url))
+        .timeout(std::time::Duration::from_secs(30));
+    let zip_resp = req
+        .send()
+        .await
+        .map_err(|_| format!("Failed to download release zip for: {}", path))?;
+    if !zip_resp.status().is_success() {
+        return Err(format!("Failed to download release zip for: {}", path));
+    }
+    let zip_bytes = zip_resp
+        .bytes()
+        .await
+        .map_err(|_| format!("Failed to download release zip for: {}", path))?;
 
     let filename = path.split('/').nth(1).unwrap_or("script").to_string();
-    let scripts_dir = std::path::PathBuf::from(&data_dir).join("scripts");
+    let scripts_dir = std::path::PathBuf::from(data_dir).join("scripts");
     let zip_vec = zip_bytes.to_vec();
     let fname = filename.clone();
     let extract_result = tokio::task::spawn_blocking(move || {
         extract_script_folder(&zip_vec, &scripts_dir, &fname)
     })
     .await
-    .unwrap_or_else(|e| Err(format!("extraction task panicked: {}", e)));
+    .map_err(|e| format!("extraction task panicked: {}", e))?;
 
-    let n_files = match extract_result {
-        Ok(n) => n,
-        Err(e) => return Some(format!("Unable to extract script from {}: {}", path, e)),
-    };
+    let n_files = extract_result.map_err(|e| format!("Unable to extract script from {}: {}", path, e))?;
 
     let Some(hooks) = hooks else {
-        return Some(format!(
+        return Ok(format!(
             "Successfully downloaded live script '{}' ({} files) (scripting unavailable, not auto-loaded).",
             filename, n_files
         ));
@@ -5292,11 +5390,11 @@ async fn download_and_load_script(
     // Se carga por NOMBRE DE CARPETA (el modelo de carpetas resuelve el
     // archivo principal dentro de `<scripts_dir>/<filename>/`).
     match (hooks.load)(&filename) {
-        Ok(_) => Some(format!(
+        Ok(_) => Ok(format!(
             "Successfully downloaded and loaded live script '{}' ({} files).",
             filename, n_files
         )),
-        Err(e) => Some(format!(
+        Err(e) => Err(format!(
             "Downloaded '{}' ({} files) but failed to load: {}",
             filename, n_files, e
         )),
@@ -5754,6 +5852,18 @@ mod tests {
         // La carpeta raíz de GitHub NO debe aparecer.
         assert!(!base.join("owner-mygame-abc123").exists());
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn repo_path_validation_rejects_traversal() {
+        assert!(is_valid_repo_path("alice/trivia"));
+        assert!(is_valid_repo_path("alice/my.script_2"));
+        assert!(!is_valid_repo_path("alice"));
+        assert!(!is_valid_repo_path("alice/trivia/extra"));
+        assert!(!is_valid_repo_path("../etc"));
+        assert!(!is_valid_repo_path("alice/.."));
+        assert!(!is_valid_repo_path("a b/c"));
+        assert!(!is_valid_repo_path(""));
     }
     use server_core::settings::Settings;
     use tokio::sync::mpsc;

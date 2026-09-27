@@ -1262,6 +1262,264 @@ fn broadcast_bot_part(ctx: &AppContext, name: &str) {
     }
 }
 
+// ============================================================================
+// Scripting (panel Scripts)
+// ============================================================================
+
+/// Tope de tamaño del código fuente que el panel sirve en
+/// `GET /admin/scripts/source` (evita devolver archivos enormes al navegador).
+const MAX_SCRIPT_SOURCE: usize = 512 * 1024;
+
+/// ¿El nombre de script es seguro como componente de ruta? Sin separadores,
+/// sin `..` ni componentes especiales.
+fn is_safe_script_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+}
+
+/// Resuelve el archivo principal de una carpeta de script (paridad con
+/// `resolve_main_file` del `ScriptManager`): `<carpeta>.js`, `main.js`,
+/// `index.js`, o el primer `.js` en orden alfabético.
+fn resolve_script_main(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir_name = dir.file_name().and_then(|s| s.to_str())?;
+    for cand in [format!("{}.js", dir_name), "main.js".to_string(), "index.js".to_string()] {
+        let p = dir.join(&cand);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let mut js: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("js"))
+        .collect();
+    js.sort();
+    js.into_iter().next()
+}
+
+/// Lista recursiva de archivos bajo `dir`, con rutas relativas separadas por
+/// `/` (para mostrarlas igual en cualquier SO). Ignora errores de lectura.
+fn collect_script_files(
+    dir: &std::path::Path,
+    base: &std::path::Path,
+    out: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut items: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    items.sort();
+    for path in items {
+        if path.is_dir() {
+            collect_script_files(&path, base, out);
+        } else if let Ok(rel) = path.strip_prefix(base) {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+/// Serializa una entrada de script para el listado del panel.
+fn script_entry_json(
+    name: &str,
+    meta: Option<&server_core::ScriptMeta>,
+    folder: bool,
+    file_count: usize,
+    main_file: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "loaded": meta.is_some(),
+        "state": meta.map(|m| m.state.clone()).unwrap_or_else(|| "on_disk".to_string()),
+        "error": meta.and_then(|m| m.error.clone()),
+        "path": meta.and_then(|m| m.path.clone()),
+        "folder": folder,
+        "fileCount": file_count,
+        "mainFile": main_file,
+    })
+}
+
+/// `GET /admin/scripts` → JSON `{dir, scripts:[…]}`.
+///
+/// Combina los scripts cargados en memoria (vía `ScriptingHooks::details`,
+/// que incluye estado y error) con los scripts presentes en disco, para que
+/// el admin vea también los que todavía no cargó.
+pub fn scripts_json(ctx: &AppContext) -> String {
+    let scripts_dir = std::path::Path::new(&ctx.settings.data_dir).join("scripts");
+    let loaded: Vec<server_core::ScriptMeta> = ctx
+        .scripting_hooks
+        .read()
+        .as_ref()
+        .map(|h| (h.details)())
+        .unwrap_or_default();
+
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Ok(read) = std::fs::read_dir(&scripts_dir) {
+        let mut paths: Vec<std::path::PathBuf> =
+            read.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let mut files = Vec::new();
+                collect_script_files(&path, &path, &mut files);
+                let file_count = files.len();
+                let main = resolve_script_main(&path)
+                    .and_then(|p| p.strip_prefix(&path).ok().map(|r| r.to_string_lossy().replace('\\', "/")));
+                let meta = loaded.iter().find(|m| m.name == name);
+                seen.insert(name.to_string());
+                entries.push(script_entry_json(name, meta, true, file_count, main));
+            } else if path.extension().and_then(|s| s.to_str()) == Some("js") {
+                let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if !seen.insert(name.to_string()) {
+                    continue;
+                }
+                let file = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string());
+                let meta = loaded.iter().find(|m| m.name == name);
+                entries.push(script_entry_json(name, meta, false, 1, file));
+            }
+        }
+    }
+
+    // Scripts cargados que no están en disco (p.ej. el script "room").
+    for meta in &loaded {
+        if !seen.contains(&meta.name) {
+            entries.push(script_entry_json(&meta.name, Some(meta), false, 0, None));
+        }
+    }
+
+    entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    serde_json::json!({
+        "dir": scripts_dir.to_string_lossy(),
+        "scripts": entries,
+    })
+    .to_string()
+}
+
+/// `GET /admin/scripts/source?name=<name>&file=<rel>` → JSON
+/// `{name, file, source, files:[…]}`.
+///
+/// `file` es opcional: sin él se sirve el archivo principal. La ruta relativa
+/// se valida para que nunca escape de la carpeta del script.
+pub fn script_source_json(
+    ctx: &AppContext,
+    name: &str,
+    file: &str,
+) -> Result<String, String> {
+    let name = name.trim();
+    if !is_safe_script_name(name) {
+        return Err("invalid script name".to_string());
+    }
+    let scripts_dir = std::path::Path::new(&ctx.settings.data_dir).join("scripts");
+    let folder = scripts_dir.join(name);
+    let (base, files, default_file) = if folder.is_dir() {
+        let mut files = Vec::new();
+        collect_script_files(&folder, &folder, &mut files);
+        let main = resolve_script_main(&folder)
+            .and_then(|p| p.strip_prefix(&folder).ok().map(|r| r.to_string_lossy().replace('\\', "/")))
+            .ok_or_else(|| format!("script '{}' has no main .js file", name))?;
+        (folder, files, main)
+    } else {
+        let flat = scripts_dir.join(format!("{}.js", name));
+        if !flat.is_file() {
+            return Err(format!("script '{}' not found", name));
+        }
+        let fname = flat
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        (scripts_dir.clone(), vec![fname.clone()], fname)
+    };
+
+    let rel = if file.trim().is_empty() {
+        default_file.clone()
+    } else {
+        file.trim().replace('\\', "/")
+    };
+
+    // Validar la ruta relativa: cada componente debe ser normal (sin `..`,
+    // sin raíz, sin prefijos). Se compara además contra la lista real.
+    let safe_rel = std::path::Path::new(&rel);
+    let bad = safe_rel.is_absolute()
+        || safe_rel
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)));
+    if bad || !files.iter().any(|f| f == &rel) {
+        return Err("invalid file".to_string());
+    }
+
+    let target = base.join(&rel);
+    let meta = std::fs::metadata(&target).map_err(|_| "file not found".to_string())?;
+    if meta.len() as usize > MAX_SCRIPT_SOURCE {
+        return Err(format!(
+            "file too large ({} bytes, max {})",
+            meta.len(),
+            MAX_SCRIPT_SOURCE
+        ));
+    }
+    let source = std::fs::read_to_string(&target)
+        .map_err(|e| format!("could not read file: {}", e))?;
+
+    Ok(serde_json::json!({
+        "name": name,
+        "file": rel,
+        "source": source,
+        "files": files,
+    })
+    .to_string())
+}
+
+/// Carga (o recarga) un script por nombre desde el directorio de scripts.
+pub fn load_script(ctx: &AppContext, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if !is_safe_script_name(name) {
+        return Err("invalid script name".to_string());
+    }
+    let hooks = ctx.scripting_hooks.read().clone();
+    let hooks = hooks.ok_or_else(|| "scripting engine unavailable".to_string())?;
+    (hooks.load)(name).map(|_| ())
+}
+
+/// Descarga un script por nombre (lo quita de memoria, no del disco).
+pub fn kill_script(ctx: &AppContext, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if !is_safe_script_name(name) {
+        return Err("invalid script name".to_string());
+    }
+    let hooks = ctx.scripting_hooks.read().clone();
+    let hooks = hooks.ok_or_else(|| "scripting engine unavailable".to_string())?;
+    (hooks.kill)(name)
+}
+
+/// `GET /admin/scripts/search?q=<term>` — busca scripts de la comunidad en
+/// GitHub (mismo topic que `/livescripts`).
+pub async fn search_scripts(ctx: &AppContext, query: &str) -> Result<String, String> {
+    let endpoint = ctx.settings.live_scripts_endpoint.clone();
+    let scripts = astra_commands::search_community_scripts(&endpoint, query).await?;
+    serde_json::to_string(&scripts).map_err(|e| format!("could not encode results: {}", e))
+}
+
+/// `POST /admin/scripts/install` — descarga e instala un script de la
+/// comunidad (`owner/repo`).
+pub async fn install_script(ctx: &AppContext, path: &str) -> Result<String, String> {
+    let endpoint = ctx.settings.live_scripts_endpoint.clone();
+    let data_dir = ctx.settings.data_dir.clone();
+    let hooks = ctx.scripting_hooks.read().clone();
+    astra_commands::install_community_script(&endpoint, path, &data_dir, hooks).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1628,5 +1886,77 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&vpn_entries_json(&ctx, "", "", 999, 25)).unwrap();
         assert_eq!(v["entries"].as_array().unwrap().len(), 0);
+    }
+
+    fn ctx_with_data_dir(dir: &std::path::Path) -> Arc<AppContext> {
+        let mut settings = Settings::default();
+        settings.owner_password = "secret".to_string();
+        settings.data_dir = dir.to_string_lossy().to_string();
+        Arc::new(AppContext::new(settings, Database::in_memory().unwrap()))
+    }
+
+    #[test]
+    fn safe_script_name_rejects_traversal() {
+        assert!(is_safe_script_name("trivia"));
+        assert!(is_safe_script_name("my-script_2"));
+        assert!(!is_safe_script_name(""));
+        assert!(!is_safe_script_name(".."));
+        assert!(!is_safe_script_name("../etc"));
+        assert!(!is_safe_script_name("a/b"));
+    }
+
+    #[test]
+    fn scripts_json_lists_disk_scripts() {
+        let dir = std::env::temp_dir().join(format!("astra_scripts_{}", std::process::id()));
+        let scripts = dir.join("scripts");
+        std::fs::create_dir_all(scripts.join("trivia")).unwrap();
+        std::fs::write(scripts.join("trivia").join("trivia.js"), "function onLoad(){}").unwrap();
+        std::fs::write(scripts.join("flat.js"), "function onLoad(){}").unwrap();
+
+        let ctx = ctx_with_data_dir(&dir);
+        let v: serde_json::Value = serde_json::from_str(&scripts_json(&ctx)).unwrap();
+        let arr = v["scripts"].as_array().unwrap();
+        let names: Vec<&str> = arr.iter().filter_map(|e| e["name"].as_str()).collect();
+        assert!(names.contains(&"trivia"));
+        assert!(names.contains(&"flat"));
+        let trivia = arr.iter().find(|e| e["name"] == "trivia").unwrap();
+        assert_eq!(trivia["folder"], true);
+        assert_eq!(trivia["loaded"], false);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn script_source_reads_main_and_flat() {
+        let dir = std::env::temp_dir().join(format!("astra_src_{}", std::process::id()));
+        let scripts = dir.join("scripts");
+        std::fs::create_dir_all(scripts.join("game")).unwrap();
+        std::fs::write(scripts.join("game").join("game.js"), "// main").unwrap();
+        std::fs::write(scripts.join("game").join("util.js"), "// util").unwrap();
+
+        let ctx = ctx_with_data_dir(&dir);
+        let v: serde_json::Value =
+            serde_json::from_str(&script_source_json(&ctx, "game", "util.js").unwrap()).unwrap();
+        assert_eq!(v["file"], "util.js");
+        assert_eq!(v["source"], "// util");
+        assert_eq!(v["files"].as_array().unwrap().len(), 2);
+
+        // Sin `file` sirve el principal.
+        let v: serde_json::Value =
+            serde_json::from_str(&script_source_json(&ctx, "game", "").unwrap()).unwrap();
+        assert_eq!(v["file"], "game.js");
+
+        // Traversal y archivos inexistentes se rechazan.
+        assert!(script_source_json(&ctx, "game", "../x").is_err());
+        assert!(script_source_json(&ctx, "nope", "").is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_script_without_engine_errors() {
+        let ctx = ctx_with_owner("secret");
+        assert!(load_script(&ctx, "trivia").is_err());
+        assert!(load_script(&ctx, "../evil").is_err());
     }
 }

@@ -338,10 +338,12 @@ async fn main() -> anyhow::Result<()> {
         let h1 = scripting.clone();
         let h2 = scripting.clone();
         let h3 = scripting.clone();
+        let h4 = scripting.clone();
         *ctx.scripting_hooks.write() = Some(server_core::ScriptingHooks {
             list: std::sync::Arc::new(move || h1.list_scripts()),
             load: std::sync::Arc::new(move |name: &str| h2.load_script(name)),
             kill: std::sync::Arc::new(move |name: &str| h3.kill_script(name)),
+            details: std::sync::Arc::new(move || h4.script_details()),
         });
     }
 
