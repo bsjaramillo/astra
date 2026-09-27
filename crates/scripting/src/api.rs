@@ -1711,8 +1711,7 @@ fn kick_user_fn(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> Result<
             // Kick best-effort: enviar ServerError, remover del pool. El
             // TCP handler verá el cierre del socket y limpiará.
             let _ = u.send_server_error("You have been kicked from the room.");
-            let uid = u.id;
-            app.user_pool.remove(uid);
+            app.user_pool.remove(&u);
             Ok(JsValue::from(true))
         } else {
             Ok(JsValue::from(false))

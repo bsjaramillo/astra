@@ -7184,7 +7184,7 @@ mod tests {
         let _ = dispatch_builtin(&ctx, &dummy_scripting(), &owner, "addautologin", "Bob 2");
 
         // Bob se reconecta (mismo guid/IP, nueva sesión regular).
-        ctx.user_pool.remove(bob.id);
+        ctx.user_pool.remove(&bob);
         let (bob2, mut bob2_rx) = make_test_user(2, "Bob");
         assert!((*bob2.level.read() as u8) < ILevel::Moderator as u8);
         ctx.user_pool.add(bob2.clone());

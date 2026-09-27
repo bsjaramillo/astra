@@ -83,6 +83,10 @@ pub struct BotConfig {
     /// Nombre del bot. Debe ser DISTINTO de `settings.bot_name` (el "bot" del
     /// servidor) para que sea una identidad propia.
     pub name: String,
+    /// Avatar del bot: imagen JPEG 48×48 codificada en base64 (sin prefijo
+    /// `data:`), o vacío si no tiene. El panel admin la valida/reescala al
+    /// guardar; se muestra en la userlist junto al resto de usuarios.
+    pub avatar: String,
     /// Saludar a quien entra a la sala.
     pub greet_on_join: bool,
     /// Saludo por PM (true) o en público (false).
@@ -131,6 +135,7 @@ impl Default for BotConfig {
         Self {
             enabled: false,
             name: "Nova".into(),
+            avatar: String::new(),
             greet_on_join: true,
             greet_as_pm: true,
             greet_llm: true,
@@ -184,8 +189,21 @@ mod tests {
         let c = BotConfig::default();
         assert!(!c.enabled);
         assert!(!c.name.is_empty());
+        assert!(c.avatar.is_empty());
         assert!(c.memory_turns > 0);
         assert!(c.llm.timeout_secs > 0);
+    }
+
+    #[test]
+    fn avatar_roundtrips_and_defaults_empty() {
+        let mut c = BotConfig::default();
+        c.avatar = "aGVsbG8=".into();
+        let raw = serde_json::to_string(&c).unwrap();
+        let back: BotConfig = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.avatar, "aGVsbG8=");
+        // Configs viejas sin el campo quedan con avatar vacío (serde default).
+        let old: BotConfig = serde_json::from_str(r#"{"enabled":true,"name":"X"}"#).unwrap();
+        assert!(old.avatar.is_empty());
     }
 
     #[test]

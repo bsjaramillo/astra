@@ -472,6 +472,10 @@ impl Bot for BotEngine {
         self.config.read().name.clone()
     }
 
+    fn bot_avatar_b64(&self) -> String {
+        self.config.read().avatar.clone()
+    }
+
     fn config_json(&self) -> String {
         serde_json::to_string(&self.config.read().clone()).unwrap_or_default()
     }

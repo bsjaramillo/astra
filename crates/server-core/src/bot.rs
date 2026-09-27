@@ -29,6 +29,12 @@ pub trait Bot: Send + Sync {
     fn is_enabled(&self) -> bool;
     /// Nombre actual del bot (para la userlist fantasma).
     fn bot_name(&self) -> String;
+    /// Avatar actual del bot en base64 (JPEG 48×48, sin prefijo `data:`), o
+    /// vacío si no tiene. `server-core`/`astra-web` lo decodifican para el
+    /// canal Ares nativo con [`crate::avatars::decode_bot_avatar`].
+    fn bot_avatar_b64(&self) -> String {
+        String::new()
+    }
     /// Config actual serializada como JSON (para el panel admin).
     fn config_json(&self) -> String;
     /// Reemplaza la config desde JSON (aplica en vivo).

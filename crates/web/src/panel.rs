@@ -440,6 +440,7 @@ const I18N = {
     bot_h:"Bot agente", bot_sub:"Asistente inteligente con identidad propia (LLM).",
     bot_note:"Se aplica en vivo. El bot aparece en la lista de usuarios solo cuando está activo.",
     bot_enabled:"Activar bot", bot_name_l:"Nombre", bot_name_ph:"ej. Nova",
+    bot_avatar_l:"Avatar (foto)", bot_avatar_clear:"Quitar avatar",
     bot_greet_h:"👋 Saludos al entrar", bot_greet_on:"Saludar a quien entra", bot_greet_pm:"Saludo por PM (si no, en sala)",
     bot_greet_llm:"Generar el saludo con el LLM",
     bot_greet_msg:"Mensaje de saludo (fallback si el LLM falla)", bot_greet_ph:"¡Hola +n! Bienvenido a +rn.",
@@ -648,6 +649,7 @@ const I18N = {
     bot_h:"Agent bot", bot_sub:"Intelligent assistant with its own identity (LLM).",
     bot_note:"Applied live. The bot shows in the user list only while active.",
     bot_enabled:"Enable bot", bot_name_l:"Name", bot_name_ph:"e.g. Nova",
+    bot_avatar_l:"Avatar (photo)", bot_avatar_clear:"Remove avatar",
     bot_greet_h:"👋 Join greetings", bot_greet_on:"Greet users on join", bot_greet_pm:"Greet by PM (otherwise in room)",
     bot_greet_llm:"Generate the greeting with the LLM",
     bot_greet_msg:"Greeting message (fallback if the LLM fails)", bot_greet_ph:"Welcome +n to +rn!",
@@ -1455,7 +1457,7 @@ async function savePlantillas(){
 }
 
 /* ---------------- Bot agente (múltiples) ---------------- */
-let BOTCFG = null, BOTLIST = [], BOTID = 0;
+let BOTCFG = null, BOTLIST = [], BOTID = 0, BOT_AVATAR = "";
 function renderBot(){
   return `<div class="cardhead"><h2>${t("bot_h")}</h2><p class="sub">${t("bot_sub")}</p></div>
     <div class="note">${t("bot_note")}</div>
@@ -1470,6 +1472,9 @@ function renderBot(){
     <div class="card"><h3>${t("bot_identity")}</h3>
       <label class="fld"><span class="switch"><input type="checkbox" id="botEnabled"><span class="slider"></span></span>${t("bot_enabled")}</label>
       <label class="fld"><span>${t("bot_name_l")}</span><input id="botName" placeholder="${esc(t("bot_name_ph"))}"></label>
+      <label class="fld"><span>${t("bot_avatar_l")}</span><input type="file" id="botAvatarFile" accept="image/*"></label>
+      <div class="avbox"><img id="botAvatarImg" class="avimg" alt="">
+        <div class="avside"><button class="btn" id="botAvatarClear">${t("bot_avatar_clear")}</button></div></div>
     </div>
     <div class="card"><h3>${t("bot_greet_h")}</h3>
       <label class="fld"><span class="switch"><input type="checkbox" id="botGreetOn"><span class="slider"></span></span>${t("bot_greet_on")}</label>
@@ -1566,6 +1571,9 @@ async function loadBot(){
   set("botProvider",llm.provider); set("botApiKey",llm.api_key);
   set("botModel",llm.model); set("botTemp",llm.temperature); set("botMaxTokens",llm.max_tokens);
   set("botPrompt",llm.system_prompt); set("botFallback",c.fallback_response);
+  BOT_AVATAR=c.avatar||"";
+  const aimg=document.getElementById("botAvatarImg");
+  if(aimg){ if(BOT_AVATAR) aimg.src="data:image/jpeg;base64,"+BOT_AVATAR; else aimg.removeAttribute("src"); }
   applyBotDefaults();
 }
 // Modelos por defecto por proveedor. Al cambiar el proveedor, si el modelo
@@ -1592,6 +1600,7 @@ async function saveBot(){
   const c={
     enabled:g("botEnabled").checked,
     name:g("botName").value.trim()||base.name||"",
+    avatar:BOT_AVATAR,
     greet_on_join:g("botGreetOn").checked,
     greet_as_pm:g("botGreetPm").checked,
     greet_llm:g("botGreetLlm").checked,
@@ -1628,6 +1637,7 @@ async function newBot(){
   while(taken.has(name.toLowerCase())){ name="Nova"+n; n++; }
   const c={
     enabled:false, name,
+    avatar:"",
     greet_on_join:true, greet_as_pm:true, greet_llm:true,
     greet_message:"¡Hola +n! Bienvenido a +rn. 🙂",
     reply_in_room:true, reply_by_pm:true,
@@ -1752,6 +1762,8 @@ function wire(){
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
   if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }
   if(g("botSave")){ loadBots(); g("botSave").onclick=saveBot; g("botSelect").onchange=()=>{ BOTID=parseInt(g("botSelect").value)||0; loadBot(); }; g("botNew").onclick=newBot; g("botDel").onclick=delBot; g("botProvider").onchange=()=>applyBotDefaults(true); }
+  if(g("botAvatarFile")){ g("botAvatarFile").onchange=()=>{ const f=g("botAvatarFile").files[0]; if(!f) return; const rd=new FileReader(); rd.onload=()=>{ const url=rd.result||""; BOT_AVATAR=url.split(",")[1]||""; const img=g("botAvatarImg"); if(img) img.src=url; }; rd.readAsDataURL(f); }; }
+  if(g("botAvatarClear")){ g("botAvatarClear").onclick=()=>{ BOT_AVATAR=""; const img=g("botAvatarImg"); if(img) img.removeAttribute("src"); }; }
   if(g("tplEd")){ loadPlantillas(); g("tplSave").onclick=savePlantillas; }
   if(g("cfgSrvSave")){ fillServerCfg(); g("cfgSrvSave").onclick=saveServerCfg; }
   if(g("cfgDirSave")){ g("cfgDirSave").onclick=saveDirectoryCfg; }

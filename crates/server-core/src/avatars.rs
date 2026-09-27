@@ -77,6 +77,23 @@ pub fn scale_room_avatar(bytes: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Decodifica el avatar base64 de un bot (campo `avatar` de la config) a bytes
+/// para el canal Ares nativo. Devuelve `None` si está vacío, es base64
+/// inválido, o iguala/supera [`MAX_ARES_AVATAR`]: en ese caso NO se debe mandar
+/// (desbordaría el buffer del cliente nativo y le desincronizaría el stream).
+pub fn decode_bot_avatar(b64: &str) -> Option<Vec<u8>> {
+    let s = b64.trim();
+    if s.is_empty() {
+        return None;
+    }
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(s).ok()?;
+    if bytes.is_empty() || bytes.len() >= MAX_ARES_AVATAR {
+        return None;
+    }
+    Some(bytes)
+}
+
 /// Manager de avatares.
 pub struct AvatarManager {
     /// Avatares cacheados por user ID.
@@ -175,5 +192,21 @@ mod tests {
     #[test]
     fn room_avatar_rejects_garbage() {
         assert!(scale_room_avatar(&[0x00, 0x01, 0x02]).is_empty());
+    }
+
+    #[test]
+    fn decode_bot_avatar_handles_valid_empty_and_junk() {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode([0xFF, 0xD8, 0xFF, 0x00]);
+        assert_eq!(
+            decode_bot_avatar(&encoded),
+            Some(vec![0xFF, 0xD8, 0xFF, 0x00])
+        );
+        assert!(decode_bot_avatar("").is_none());
+        assert!(decode_bot_avatar("   ").is_none());
+        assert!(decode_bot_avatar("no soy base64!!").is_none());
+        // Un blob igual o mayor al tope Ares se rechaza (rompería el stream).
+        let too_big = base64::engine::general_purpose::STANDARD.encode(vec![0u8; MAX_ARES_AVATAR]);
+        assert!(decode_bot_avatar(&too_big).is_none());
     }
 }

@@ -1265,7 +1265,7 @@ impl AppContext {
     /// la sesión nueva lo reemplaza sin parpadeo. El cleanup del socket viejo
     /// tampoco va a anunciar nada (detecta que ya no está en el pool).
     pub fn ghost_part_user(&self, target: &std::sync::Arc<crate::user_pool::AresUser>) {
-        self.user_pool.remove(target.id);
+        self.user_pool.remove(target);
         self.stats.on_user_part();
         // La sesión vieja debe morir ya: si el socket zombie sigue vivo, el
         // cliente reemplazado podría seguir hablando desde fuera del pool.
@@ -1277,21 +1277,29 @@ impl AppContext {
     /// cuando OTRA sesión viva usa el mismo nick (el usuario ya reconectó —
     /// p.ej. cambió de red — y difundir el PART borraría de las userlists a
     /// la sesión nueva, que los clientes indexan por nombre).
-    pub fn is_ghost_departure(&self, id: u16, name: &str) -> bool {
-        if self.user_pool.get(id).is_none() {
+    pub fn is_ghost_departure(&self, user: &std::sync::Arc<crate::user_pool::AresUser>) -> bool {
+        let id = user.id;
+        // Si el pool ya no tiene esta MISMA sesión (un hijack la sacó, o su ID
+        // fue reutilizado por otra sesión nueva), la salida debe ser silenciosa.
+        if self
+            .user_pool
+            .get(id)
+            .is_none_or(|u| !std::sync::Arc::ptr_eq(&u, user))
+        {
             return true;
         }
+        let name = user.name.read().clone();
         self.user_pool
             .users()
             .iter()
-            .any(|u| u.id != id && u.logged_in && u.name.read().eq_ignore_ascii_case(name))
+            .any(|u| u.id != id && u.logged_in && u.name.read().eq_ignore_ascii_case(&name))
     }
 
     pub fn force_part_user(&self, target: &std::sync::Arc<crate::user_pool::AresUser>) {
         let tname = target.name.read().clone();
         let ws_part = format!("PART:{}:{}", tname.encode_utf16().count(), tname);
 
-        self.user_pool.remove(target.id);
+        self.user_pool.remove(target);
         self.stats.on_user_part();
         // Cerrar la sesión de verdad. Antes solo se lo sacaba del pool y se
         // confiaba en que el socket se autolimpiara al fallar su lectura: un
@@ -1316,7 +1324,7 @@ impl AppContext {
     fn remove_and_broadcast_part(&self, user: &std::sync::Arc<crate::user_pool::AresUser>) {
         let part = crate::outbound::build_part(user);
         self.record_departure(user);
-        self.user_pool.remove(user.id);
+        self.user_pool.remove(user);
         self.stats.on_user_part();
         user.request_kill();
         for u in self.user_pool.users() {
@@ -1709,31 +1717,28 @@ mod tests {
         let old = add_user(&ctx, 1, "Nomada");
 
         // Salida normal (única sesión con el nick): NO es ghost.
-        assert!(!ctx.is_ghost_departure(1, "Nomada"));
+        assert!(!ctx.is_ghost_departure(&old));
 
         // El usuario reconectó (cambio de red): sesión nueva, mismo nick.
-        let _new = add_user(&ctx, 2, "Nomada");
+        let new = add_user(&ctx, 2, "Nomada");
         assert!(
-            ctx.is_ghost_departure(1, "Nomada"),
+            ctx.is_ghost_departure(&old),
             "con una sesión nueva viva del mismo nick, la vieja debe salir en silencio"
         );
-        // La sesión nueva, en cambio, saldría anunciando (la vieja no cuenta
-        // dos veces: sigue en el pool pero es OTRA id).
-        // (nota: en la práctica la vieja se va primero; esto documenta la simetría)
-        assert!(ctx.is_ghost_departure(2, "Nomada")); // la vieja aún está → silencio
+        assert!(ctx.is_ghost_departure(&new)); // la vieja aún está → silencio
 
         // Hijack: ghost_part_user saca a la vieja SIN anunciar; su cleanup
         // posterior la ve fuera del pool → ghost.
         ctx.ghost_part_user(&old);
         assert!(ctx.user_pool.get(1).is_none());
-        assert!(ctx.is_ghost_departure(1, "Nomada"));
+        assert!(ctx.is_ghost_departure(&old));
 
         // Ahora solo queda la nueva: su salida es normal.
-        assert!(!ctx.is_ghost_departure(2, "Nomada"));
+        assert!(!ctx.is_ghost_departure(&new));
 
         // Case-insensitive (los nicks de Ares no distinguen mayúsculas).
         let _third = add_user(&ctx, 3, "NOMADA");
-        assert!(ctx.is_ghost_departure(2, "Nomada"));
+        assert!(ctx.is_ghost_departure(&new));
     }
 }
 

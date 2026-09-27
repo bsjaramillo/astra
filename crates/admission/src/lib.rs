@@ -642,7 +642,7 @@ mod tests {
 
         // Sacamos al expulsado (en producción el loop lo limpia) y probamos
         // que un usuario limpio no se toca.
-        ctx.user_pool.remove(7);
+        ctx.user_pool.remove(&u);
         let mut clean = AresUser::new(8, "8.8.8.8".parse().unwrap(), [0x22; 16]);
         clean.logged_in = true;
         *clean.name.write() = "Clean".to_string();

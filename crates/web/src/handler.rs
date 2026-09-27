@@ -146,7 +146,7 @@ pub async fn handle_connection(
             info!("ws join de '{}' rechazado por script (onJoinCheck)", jname);
             let _ = user.print(&ctx.settings.bot_name, "You have been rejected from this room.");
             astra_admission::dispatch_rejected(&scripting, &jname, user.external_ip, "script");
-            ctx.user_pool.remove(user_id);
+            ctx.user_pool.remove(&user);
             ctx.stats.on_user_part();
             drop(ws_text_tx);
             let _ = write_task.await;
@@ -352,9 +352,9 @@ pub async fn handle_connection(
     // otra sesión viva con el mismo nick (reconexión por cambio de red) →
     // salida SILENCIOSA, sin PART (mataría la entrada del usuario NUEVO en
     // las userlists, que los clientes indexan por nombre).
-    let ghost = ctx.is_ghost_departure(user_id, &part_name);
+    let ghost = ctx.is_ghost_departure(&user);
     ctx.record_departure(&user);
-    ctx.user_pool.remove(user_id);
+    ctx.user_pool.remove(&user);
     ctx.stats.on_user_part();
     ctx.idle.forget(user_id);
 
@@ -813,7 +813,15 @@ async fn send_initial_state_ws(
     // están activos.
     for bot in ctx.bots.read().iter() {
         if bot.is_enabled() && !bot.bot_name().is_empty() {
-            let _ = tx.send(emit(&bot.bot_name(), "", "", 0, ILevel::Owner as u8, false, false));
+            let _ = tx.send(emit(
+                &bot.bot_name(),
+                "",
+                &bot.bot_avatar_b64(),
+                0,
+                ILevel::Owner as u8,
+                false,
+                false,
+            ));
         }
     }
     let vroom = *user.vroom.read();
@@ -1756,7 +1764,7 @@ fn broadcast_announce_lines_ws(
 fn filter_remove_user_ws(ctx: &AppContext, user: &Arc<AresUser>) {
     let part_pkt = outbound::build_part(user);
     ctx.record_departure(user);
-    ctx.user_pool.remove(user.id);
+    ctx.user_pool.remove(user);
     ctx.stats.on_user_part();
     for u in ctx.user_pool.users() {
         if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {

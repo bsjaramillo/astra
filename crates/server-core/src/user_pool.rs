@@ -1,11 +1,12 @@
 //! Pool de usuarios conectados.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::mpsc;
 
 use crate::types::{IFont, ILevel, ILink};
@@ -477,6 +478,8 @@ fn ws_len(s: &str) -> usize {
 pub struct UserPool {
     /// Generador de IDs de sesión.
     next_id: AtomicU16,
+    /// IDs liberados pendientes de reutilizar (el menor primero).
+    free_ids: Mutex<BinaryHeap<Reverse<u16>>>,
     /// Mapa de usuarios por ID.
     users: RwLock<HashMap<u16, Arc<AresUser>>>,
     /// Mapa de usuarios por nick (case-insensitive).
@@ -505,14 +508,25 @@ impl UserPool {
     pub fn new() -> Self {
         Self {
             next_id: AtomicU16::new(1),
+            free_ids: Mutex::new(BinaryHeap::new()),
             users: RwLock::new(HashMap::new()),
             by_name: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Genera un nuevo ID de sesión.
+    /// Genera un nuevo ID de sesión, reutilizando los IDs liberados para que
+    /// no crezcan indefinidamente. Si no hay IDs libres, avanza el contador
+    /// saltando los que ya estén en uso (por si el `u16` da la vuelta).
     pub fn next_id(&self) -> u16 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
+        if let Some(Reverse(id)) = self.free_ids.lock().pop() {
+            return id;
+        }
+        loop {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            if id != 0 && !self.users.read().contains_key(&id) {
+                return id;
+            }
+        }
     }
 
     /// Registra un nuevo usuario en el pool.
@@ -524,14 +538,25 @@ impl UserPool {
         users.insert(user.id, user);
     }
 
-    /// Elimina un usuario del pool.
-    pub fn remove(&self, id: u16) {
+    /// Elimina una sesión del pool y devuelve su ID al conjunto de
+    /// reutilizables.
+    ///
+    /// Solo la elimina si es la misma sesión (`Arc`) que está registrada en ese
+    /// ID. Como los IDs ahora se reutilizan, un cleanup rezagado de una sesión
+    /// ya expulsada no puede borrar por accidente a un usuario nuevo que haya
+    /// tomado el mismo ID.
+    pub fn remove(&self, user: &Arc<AresUser>) {
+        let id = user.id;
         let mut users = self.users.write();
         let mut by_name = self.by_name.write();
-        if let Some(user) = users.remove(&id) {
-            let name = user.name.read().clone();
-            by_name.remove(&normalize_name(&name));
+        let same_session = users.get(&id).is_some_and(|u| Arc::ptr_eq(u, user));
+        if !same_session {
+            return;
         }
+        users.remove(&id);
+        let name = user.name.read().clone();
+        by_name.remove(&normalize_name(&name));
+        self.free_ids.lock().push(Reverse(id));
     }
 
     /// Devuelve un usuario por ID.
@@ -654,5 +679,59 @@ mod tests {
         pool.rename(id, "John", "\x05Jane");
         assert!(pool.get_by_name("John").is_none());
         assert!(pool.get_by_name("Jane").is_some());
+    }
+
+    #[test]
+    fn reutiliza_ids_liberados() {
+        let pool = UserPool::new();
+        let id_a = pool.next_id();
+        let id_b = pool.next_id();
+        assert_eq!((id_a, id_b), (1, 2));
+
+        let a = Arc::new(AresUser::new(
+            id_a,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            [0u8; 16],
+        ));
+        let b = Arc::new(AresUser::new(
+            id_b,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            [0u8; 16],
+        ));
+        pool.add(a.clone());
+        pool.add(b);
+
+        // El ID liberado se reutiliza antes de avanzar el contador.
+        pool.remove(&a);
+        assert_eq!(pool.next_id(), id_a);
+        assert_eq!(pool.next_id(), 3);
+        // Un remove de una sesión que ya no está en el pool no reencola su ID.
+        pool.remove(&a);
+        assert_eq!(pool.next_id(), 4);
+    }
+
+    #[test]
+    fn remove_no_borra_una_sesion_nueva_con_el_mismo_id() {
+        let pool = UserPool::new();
+        let old = Arc::new(AresUser::new(
+            1,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            [0u8; 16],
+        ));
+        pool.add(old.clone());
+        pool.remove(&old);
+
+        // Una sesión nueva reutiliza el ID liberado.
+        let new = Arc::new(AresUser::new(
+            pool.next_id(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            [0u8; 16],
+        ));
+        assert_eq!(new.id, 1);
+        pool.add(new.clone());
+
+        // El cleanup rezagado de la vieja no debe borrar a la nueva.
+        pool.remove(&old);
+        assert!(pool.get(1).is_some());
     }
 }

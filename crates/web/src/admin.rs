@@ -973,6 +973,56 @@ fn find_bot(ctx: &AppContext, id: i64) -> Option<Arc<dyn server_core::bot::Bot>>
     ctx.bots.read().iter().find(|b| b.bot_id() == id).cloned()
 }
 
+/// Valida y reescala el avatar embebido en la config JSON de un bot (campo
+/// `avatar`, base64; acepta también `data:...;base64,`). Se normaliza a 48×48
+/// JPEG (paridad `Avatars.Scale`) y se deja en base64. Sin avatar o vacío, no
+/// toca la imagen. Devuelve error si la imagen no es válida.
+fn normalize_bot_avatar(json: &str) -> Result<String, String> {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
+        // Sin JSON válido, que el registro dé el error específico.
+        return Ok(json.to_string());
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return Ok(json.to_string());
+    };
+    let raw = obj
+        .get("avatar")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if raw.is_empty() {
+        obj.insert("avatar".into(), serde_json::Value::String(String::new()));
+        return Ok(value.to_string());
+    }
+    // Aceptar `data:image/png;base64,<datos>` por robustez; el panel ya manda
+    // solo la parte base64.
+    let b64 = raw.rsplit(',').next().unwrap_or(&raw).trim();
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|_| "avatar: base64 inválido".to_string())?;
+    if bytes.len() > MAX_AVATAR_BYTES {
+        return Err(format!(
+            "avatar: imagen demasiado grande ({} bytes, máx {})",
+            bytes.len(),
+            MAX_AVATAR_BYTES
+        ));
+    }
+    if !is_supported_image(&bytes) {
+        return Err("avatar: formato no soportado (PNG, JPEG o GIF)".to_string());
+    }
+    let scaled = server_core::avatars::scale_room_avatar(&bytes);
+    if scaled.is_empty() {
+        return Err("avatar: no se pudo decodificar la imagen".to_string());
+    }
+    obj.insert(
+        "avatar".into(),
+        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(&scaled)),
+    );
+    Ok(value.to_string())
+}
+
 /// GET /admin/bots → lista de bots como JSON array `[{id,name,enabled,config}]`.
 pub fn list_bots(ctx: &AppContext) -> String {
     let arr: Vec<serde_json::Value> =
@@ -988,7 +1038,8 @@ pub fn create_bot(ctx: &Arc<AppContext>, json: &str) -> Result<String, String> {
         .read()
         .clone()
         .ok_or("gestor de bots no disponible")?;
-    let id = reg.create(ctx, json)?;
+    let json = normalize_bot_avatar(json)?;
+    let id = reg.create(ctx, &json)?;
     let bot = find_bot(ctx, id).ok_or("el bot creado no está disponible")?;
     let cfg: astra_bot::BotConfig =
         serde_json::from_str(&bot.config_json()).unwrap_or_default();
@@ -1018,7 +1069,8 @@ pub fn update_bot(ctx: &Arc<AppContext>, id: i64, json: &str) -> Result<String, 
         .read()
         .clone()
         .ok_or("gestor de bots no disponible")?;
-    reg.update(ctx, id, json)?;
+    let json = normalize_bot_avatar(json)?;
+    reg.update(ctx, id, &json)?;
     let bot = find_bot(ctx, id).ok_or("bot no disponible")?;
     let (new_enabled, new_name, new_config) = (
         bot.is_enabled(),
@@ -1033,6 +1085,25 @@ pub fn update_bot(ctx: &Arc<AppContext>, id: i64, json: &str) -> Result<String, 
         if let Some(config) = new_config.as_ref() {
             broadcast_trigger_change(ctx, &new_name, config);
         }
+    }
+    // Si solo cambió el avatar (bot ya activo y con el mismo nombre), empujarlo
+    // en vivo. Cuando se acaba de activar o renombrar, `update_bot_presence` ya
+    // mandó el JOIN (que incluye el avatar).
+    let old_avatar = old_config
+        .as_ref()
+        .map(|c| c.avatar.clone())
+        .unwrap_or_default();
+    let new_avatar = new_config
+        .as_ref()
+        .map(|c| c.avatar.clone())
+        .unwrap_or_default();
+    if new_enabled
+        && !new_name.is_empty()
+        && old_enabled
+        && old_name == new_name
+        && old_avatar != new_avatar
+    {
+        broadcast_bot_avatar(ctx, &new_name, &new_avatar);
     }
     Ok(serde_json::to_string(&bot_json(bot.as_ref())).unwrap_or_default())
 }
@@ -1108,7 +1179,7 @@ fn bot_dummy_user(name: &str) -> AresUser {
     u
 }
 
-/// JOIN del bot a toda la sala (nativos + web).
+/// JOIN del bot a toda la sala (nativos + web), seguido de su avatar si tiene.
 fn broadcast_bot_join(ctx: &AppContext, name: &str) {
     use bytes::Bytes;
     let plain: Bytes = server_core::outbound::build_join_bot_c(name, None);
@@ -1127,6 +1198,43 @@ fn broadcast_bot_join(ctx: &AppContext, name: &str) {
             let _ = u.send(server_core::outbound::build_join_bot_c(name, Some(crypto)));
         } else {
             let _ = u.send(plain.clone());
+        }
+    }
+    // Avatar del bot (bloque aparte, igual que el avatar de sala).
+    let avatar_b64 = ctx
+        .bots
+        .read()
+        .iter()
+        .find(|b| b.bot_name() == name)
+        .map(|b| b.bot_avatar_b64())
+        .unwrap_or_default();
+    if !avatar_b64.is_empty() {
+        broadcast_bot_avatar(ctx, name, &avatar_b64);
+    }
+}
+
+/// Difunde el avatar de un bot a toda la sala: paquete binario `Avatar` para
+/// clientes Ares nativos, ident `AVATAR:` de texto para clientes web/inbizier.
+fn broadcast_bot_avatar(ctx: &AppContext, name: &str, b64: &str) {
+    let Some(bytes) = server_core::avatars::decode_bot_avatar(b64) else {
+        return;
+    };
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    for u in ctx.user_pool.users() {
+        if !u.logged_in {
+            continue;
+        }
+        if let Some(tx) = &u.ws_text_sender {
+            if u.inbizier_web || u.inbizier_mobile {
+                let _ = tx.send(crate::protocol::build_avatar(name, &b64));
+            }
+        } else {
+            let _ = u.send(server_core::outbound::build_avatar_c(
+                name,
+                &bytes,
+                u.ares_crypto,
+            ));
         }
     }
 }
@@ -1250,6 +1358,33 @@ mod tests {
         assert!(is_supported_image(b"GIF89a...."));
         assert!(!is_supported_image(b"<html>"));
         assert!(!is_supported_image(b""));
+    }
+
+    #[test]
+    fn normalize_bot_avatar_scales_and_validates() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(server_core::app::DEFAULT_USER_AVATAR);
+        let out = normalize_bot_avatar(&format!(r#"{{"name":"Nova","avatar":"{}"}}"#, b64)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(v.get("avatar").and_then(|a| a.as_str()).unwrap())
+            .unwrap();
+        assert!(bytes.starts_with(&[0xFF, 0xD8]), "debe quedar en JPEG");
+        assert!(bytes.len() < server_core::avatars::MAX_ARES_AVATAR);
+
+        // Acepta el prefijo `data:` y sin avatar deja la cadena vacía.
+        let data_url = format!("data:image/png;base64,{}", b64);
+        let out = normalize_bot_avatar(&format!(r#"{{"avatar":"{}"}}"#, data_url)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(!v.get("avatar").and_then(|a| a.as_str()).unwrap().is_empty());
+        let out = normalize_bot_avatar(r#"{"name":"Nova"}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v.get("avatar").and_then(|a| a.as_str()), Some(""));
+
+        // Imagen inválida (firma desconocida) → error.
+        let bad = base64::engine::general_purpose::STANDARD.encode(b"not an image");
+        let err = normalize_bot_avatar(&format!(r#"{{"avatar":"{}"}}"#, bad)).unwrap_err();
+        assert!(err.contains("formato no soportado"), "err: {err}");
     }
 
     #[test]

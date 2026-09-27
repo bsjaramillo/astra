@@ -146,7 +146,7 @@ pub async fn handle_tcp_client(
             w.write_string_nt("You have been rejected from this room.").ok();
             let _ = user.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
             astra_admission::dispatch_rejected(&scripting, &jname, user.external_ip, "script");
-            ctx.user_pool.remove(user_id);
+            ctx.user_pool.remove(&user);
             ctx.stats.on_user_part();
             return Ok(());
         }
@@ -308,9 +308,9 @@ pub async fn handle_tcp_client(
     // la sesión NUEVA, que los clientes indexan por nombre) y sin Part al
     // link. Los eventos de scripting se disparan igual (sb0t también los
     // dispara en el ghost).
-    let ghost = ctx.is_ghost_departure(user_id, &user_name);
+    let ghost = ctx.is_ghost_departure(&user_arc);
     ctx.record_departure(&user_arc);
-    ctx.user_pool.remove(user_id);
+    ctx.user_pool.remove(&user_arc);
     ctx.stats.on_user_part();
     // Forget idle tracking
     ctx.idle.forget(user_id);
@@ -642,7 +642,7 @@ async fn process_handshake(
                             id,
                             e
                         );
-                        ctx.user_pool.remove(id);
+                        ctx.user_pool.remove(&user_arc);
                         ctx.stats.on_user_part();
                         return Ok(None);
                     }
@@ -722,7 +722,13 @@ async fn send_initial_state(
     // están activos.
     for bot in ctx.bots.read().iter() {
         if bot.is_enabled() && !bot.bot_name().is_empty() {
-            let _ = user.send(outbound::build_userlist_bot_c(&bot.bot_name(), crypto));
+            let name = bot.bot_name();
+            let _ = user.send(outbound::build_userlist_bot_c(&name, crypto));
+            // Avatar del bot (paridad con el avatar de sala): bloque binario
+            // aparte, siempre escalado bajo el tope del canal Ares.
+            if let Some(avatar) = server_core::avatars::decode_bot_avatar(&bot.bot_avatar_b64()) {
+                let _ = user.send(outbound::build_avatar_c(&name, &avatar, crypto));
+            }
         }
     }
 
@@ -2225,7 +2231,7 @@ fn broadcast_announce_lines(
 /// Remueve un usuario del pool y difunde su PART (mismo patrón que `/kick`).
 fn filter_remove_user(ctx: &AppContext, user: &Arc<server_core::user_pool::AresUser>) {
     ctx.record_departure(user);
-    ctx.user_pool.remove(user.id);
+    ctx.user_pool.remove(user);
     ctx.stats.on_user_part();
     for u in ctx.user_pool.users() {
         if u.logged_in && !u.quarantined.load(std::sync::atomic::Ordering::Relaxed) {
