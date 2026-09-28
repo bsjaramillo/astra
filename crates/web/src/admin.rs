@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -474,9 +475,11 @@ pub fn state_json(ctx: &AppContext) -> String {
         }
         first = false;
         let level = *u.level.read() as u8;
+        // Flags de efectos por-usuario: el panel los usa para mostrar la
+        // dirección correcta de cada toggle (Silenciar/Reactivar, etc.).
         write!(
             s,
-            "{{\"id\":{},\"name\":\"{}\",\"level\":{},\"levelName\":\"{}\",\"ip\":\"{}\",\"vroom\":{},\"files\":{},\"version\":\"{}\",\"muzzled\":{}}}",
+            "{{\"id\":{},\"name\":\"{}\",\"level\":{},\"levelName\":\"{}\",\"ip\":\"{}\",\"vroom\":{},\"files\":{},\"version\":\"{}\",\"muzzled\":{},\"kiddied\":{},\"lowered\":{},\"kewl\":{},\"painted\":{},\"echo\":{},\"custom\":{}}}",
             u.id,
             esc(&u.name.read()),
             level,
@@ -486,6 +489,32 @@ pub fn state_json(ctx: &AppContext) -> String {
             u.file_count,
             esc(&u.version),
             u.is_muzzled(),
+            u.kiddied.load(Ordering::Relaxed),
+            u.lowered.load(Ordering::Relaxed),
+            u.kewl.load(Ordering::Relaxed),
+            u.paint_text.read().is_some(),
+            u.echo_text.read().is_some(),
+            u.custom_name.read().is_some(),
+        )
+        .ok();
+    }
+    s.push(']');
+
+    // Autologins por IP (`/addautologin`): el panel los lista con opción de
+    // quitar (`/remautologin <id>`).
+    s.push_str(",\"autologins\":[");
+    for (i, (id, name, ip, level)) in ctx.ip_autologins.list().iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        write!(
+            s,
+            "{{\"id\":{},\"name\":\"{}\",\"ip\":\"{}\",\"level\":{},\"levelName\":\"{}\"}}",
+            id,
+            esc(name),
+            esc(&ip.to_string()),
+            *level as u8,
+            level_name(*level as u8),
         )
         .ok();
     }
@@ -1725,6 +1754,23 @@ mod tests {
         assert!(v.get("users").is_some());
         assert!(v.get("flags").is_some());
         assert!(v.get("bans").is_some());
+        assert!(v.get("autologins").is_some());
+    }
+
+    #[test]
+    fn state_json_exposes_autologins() {
+        let ctx = ctx_with_owner("secret");
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        ctx.ip_autologins
+            .add(&[7u8; 16], "Bob", ILevel::Admin, ip)
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&state_json(&ctx)).expect("valid json");
+        let al = v["autologins"].as_array().expect("array");
+        assert_eq!(al.len(), 1);
+        assert_eq!(al[0]["name"], "Bob");
+        assert_eq!(al[0]["ip"], "203.0.113.9");
+        assert_eq!(al[0]["levelName"], "admin");
     }
 
     #[test]

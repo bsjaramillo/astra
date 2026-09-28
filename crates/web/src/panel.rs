@@ -123,6 +123,14 @@ pub const ADMIN_HTML: &str = r####"<!DOCTYPE html>
   .uname{font-size:15.5px;word-break:break-word}
   .umeta{color:var(--mut);font-size:12.5px;margin-bottom:11px;word-break:break-all}
   .uactions{display:flex;flex-wrap:wrap;gap:7px}
+  details.umore{margin-top:9px;border-top:1px solid var(--border);padding-top:9px}
+  details.umore summary{cursor:pointer;font-weight:600;color:var(--acc);font-size:12.5px;outline:none;list-style:none}
+  details.umore summary::-webkit-details-marker{display:none}
+  details.umore summary::before{content:"▸ ";color:var(--mut)}
+  details.umore[open] summary::before{content:"▾ "}
+  details.umore .uactions{margin-top:9px}
+  details.umore .uflow{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:7px}
+  .uflow label{color:var(--mut);font-size:12px}
 
   .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;background:var(--surface3);color:var(--mut);white-space:nowrap}
   .badge.owner{background:rgba(255,180,84,.16);color:var(--lvl-owner)}
@@ -304,7 +312,23 @@ const I18N = {
     u_muted:"silenciado", u_room:"sala", u_files:"archivos",
     u_info:"ℹ️ Info", u_kick:"👢 Expulsar", u_ban:"🚫 Banear", u_mute:"🔇 Silenciar", u_unmute:"🔊 Reactivar",
     u_changerank:"Cambiar rango…", u_to_voice:"→ Voz", u_to_mod:"→ Moderador", u_to_admin:"→ Administrador", u_remrank:"→ Quitar rango",
+    u_more:"Más acciones",
+    u_ban10:"🚫 Banear 10 min", u_ban60:"🚫 Banear 60 min", u_disableavatar:"🖼️ Quitar avatar",
+    u_kiddie:"Kiddie", u_unkiddie:"Quitar kiddie",
+    u_lower:"Minúsculas", u_unlower:"Quitar minúsculas",
+    u_kewl:"Leetspeak", u_unkewl:"Quitar leetspeak",
+    u_paint:"Pintar", u_unpaint:"Quitar pintura",
+    u_echo_off:"Quitar heckle",
+    u_id:"ID", u_oldname:"Nombre original", u_locate:"Ubicación", u_trace:"Rastrear",
+    u_customname:"Nombre custom…", u_uncustomname:"Quitar nombre custom",
+    u_autologin:"Auto-login…", u_autologin_mod:"→ Moderador", u_autologin_admin:"→ Admin", u_autologin_host:"→ Host",
+    autologins_h:"🔑 Auto-login por IP", autologins_sub:"Restauran el rango automáticamente al reconocer la IP (sin contraseña).",
+    autologins_empty:"No hay entradas de auto-login.",
+    toast_autologin_added:"Auto-login otorgado: {0}", toast_autologin_rem:"Auto-login quitado",
+    toast_customname:"Nombre custom actualizado", toast_echo_off:"Heckle quitado",
+    prompt_customname:"Nombre custom para {0}:",
     cf_ban:"¿Seguro que quieres banear a {0}?",
+    cf_ban10:"¿Banear a {0} por 10 minutos?", cf_ban60:"¿Banear a {0} por 60 minutos?", cf_kick:"¿Expulsar a {0}?",
     toast_kicked:"Expulsado: {0}", toast_banned:"Baneado: {0}", toast_muted:"Silenciado: {0}", toast_unmuted:"Reactivado: {0}",
     toast_rank_rem:"Rango quitado a {0}", toast_rank_upd:"Rango actualizado: {0}",
 
@@ -530,7 +554,23 @@ const I18N = {
     u_muted:"muted", u_room:"room", u_files:"files",
     u_info:"ℹ️ Info", u_kick:"👢 Kick", u_ban:"🚫 Ban", u_mute:"🔇 Mute", u_unmute:"🔊 Unmute",
     u_changerank:"Change rank…", u_to_voice:"→ Voice", u_to_mod:"→ Moderator", u_to_admin:"→ Administrator", u_remrank:"→ Remove rank",
+    u_more:"More actions",
+    u_ban10:"🚫 Ban 10 min", u_ban60:"🚫 Ban 60 min", u_disableavatar:"🖼️ Remove avatar",
+    u_kiddie:"Kiddie", u_unkiddie:"Un-kiddie",
+    u_lower:"Lowercase", u_unlower:"Un-lowercase",
+    u_kewl:"Leetspeak", u_unkewl:"Remove leetspeak",
+    u_paint:"Paint", u_unpaint:"Remove paint",
+    u_echo_off:"Stop heckle",
+    u_id:"ID", u_oldname:"Original name", u_locate:"Location", u_trace:"Trace",
+    u_customname:"Custom name…", u_uncustomname:"Clear custom name",
+    u_autologin:"Auto-login…", u_autologin_mod:"→ Moderator", u_autologin_admin:"→ Admin", u_autologin_host:"→ Host",
+    autologins_h:"🔑 IP auto-login", autologins_sub:"Restore the rank automatically when the IP is recognized (no password).",
+    autologins_empty:"No auto-login entries.",
+    toast_autologin_added:"Auto-login granted: {0}", toast_autologin_rem:"Auto-login removed",
+    toast_customname:"Custom name set", toast_echo_off:"Heckle cleared",
+    prompt_customname:"Custom name for {0}:",
     cf_ban:"Ban {0}?",
+    cf_ban10:"Ban {0} for 10 minutes?", cf_ban60:"Ban {0} for 60 minutes?", cf_kick:"Kick {0}?",
     toast_kicked:"Kicked: {0}", toast_banned:"Banned: {0}", toast_muted:"Muted: {0}", toast_unmuted:"Unmuted: {0}",
     toast_rank_rem:"Rank removed from {0}", toast_rank_upd:"Rank updated: {0}",
 
@@ -955,29 +995,73 @@ function renderInicio(){
 function renderUsuarios(){
   const us = STATE.users||[];
   const cards = us.map(u=>{
+    const n = esc(u.name);
     const muzAct = u.muzzled ? "unmuzzle" : "muzzle";
     const muzLbl = u.muzzled ? t("u_unmute") : t("u_mute");
+    const kidAct = u.kiddied ? "unkiddy" : "kiddy";
+    const lowAct = u.lowered ? "unlower" : "lower";
+    const kewlAct = u.kewl ? "remkewltext" : "kewltext";
+    const paintAct = u.painted ? "unpaint" : "paint";
+    const more = [
+      `<button class="btn sm danger" data-act="ban10" data-n="${n}">${t("u_ban10")}</button>`,
+      `<button class="btn sm danger" data-act="ban60" data-n="${n}">${t("u_ban60")}</button>`,
+      `<button class="btn sm" data-act="disableavatar" data-n="${n}">${t("u_disableavatar")}</button>`,
+      `<button class="btn sm" data-act="${kidAct}" data-n="${n}">${u.kiddied?t("u_unkiddie"):t("u_kiddie")}</button>`,
+      `<button class="btn sm" data-act="${lowAct}" data-n="${n}">${u.lowered?t("u_unlower"):t("u_lower")}</button>`,
+      `<button class="btn sm" data-act="${kewlAct}" data-n="${n}">${u.kewl?t("u_unkewl"):t("u_kewl")}</button>`,
+      `<button class="btn sm" data-act="${paintAct}" data-n="${n}">${u.painted?t("u_unpaint"):t("u_paint")}</button>`,
+      u.echo?`<button class="btn sm" data-act="unecho" data-n="${n}">${t("u_echo_off")}</button>`:'',
+      `<button class="btn sm" data-act="id" data-n="${n}">${t("u_id")}</button>`,
+      `<button class="btn sm" data-act="oldname" data-n="${n}">${t("u_oldname")}</button>`,
+      `<button class="btn sm" data-act="locate" data-n="${n}">${t("u_locate")}</button>`,
+      `<button class="btn sm" data-act="trace" data-n="${n}">${t("u_trace")}</button>`,
+      `<button class="btn sm" data-act="customname" data-n="${n}">${t("u_customname")}</button>`,
+      u.custom?`<button class="btn sm" data-act="uncustomname" data-n="${n}">${t("u_uncustomname")}</button>`:'',
+    ].join("");
     return `<div class="ucard">
       <div class="uhead"><span class="badge ${lvlClass(u.level)}">${esc(lvlName(u.levelName))}</span>
-        <b class="uname">${esc(u.name)}</b>
+        <b class="uname">${n}</b>
         ${u.muzzled?`<span class="chip warn">${t("u_muted")}</span>`:''}</div>
       <div class="umeta">${esc(u.ip)} · ${t("u_room")} ${u.vroom} · ${u.files||0} ${t("u_files")}${u.version?` · <span class="mut">${esc(u.version)}</span>`:''}</div>
       <div class="uactions">
-        <button class="btn sm" data-act="whois" data-n="${esc(u.name)}">${t("u_info")}</button>
-        <button class="btn sm" data-act="kick" data-n="${esc(u.name)}">${t("u_kick")}</button>
-        <button class="btn sm danger" data-act="ban" data-n="${esc(u.name)}">${t("u_ban")}</button>
-        <button class="btn sm" data-act="${muzAct}" data-n="${esc(u.name)}">${muzLbl}</button>
-        <select class="sel sm" data-grant="${esc(u.name)}">
+        <button class="btn sm" data-act="whois" data-n="${n}">${t("u_info")}</button>
+        <button class="btn sm" data-act="kick" data-n="${n}">${t("u_kick")}</button>
+        <button class="btn sm danger" data-act="ban" data-n="${n}">${t("u_ban")}</button>
+        <button class="btn sm" data-act="${muzAct}" data-n="${n}">${muzLbl}</button>
+        <select class="sel sm" data-grant="${n}">
           <option value="">${t("u_changerank")}</option>
           <option value="voice">${t("u_to_voice")}</option>
           <option value="moderator">${t("u_to_mod")}</option>
           <option value="admin">${t("u_to_admin")}</option>
           <option value="revoke">${t("u_remrank")}</option>
         </select>
-      </div></div>`;
+      </div>
+      <details class="umore"><summary>${t("u_more")}</summary>
+        <div class="uactions">${more}</div>
+        <div class="uflow"><label>${t("u_autologin")}</label>
+          <select class="sel sm" data-autologin="${n}">
+            <option value="">${t("u_autologin")}</option>
+            <option value="1">${t("u_autologin_mod")}</option>
+            <option value="2">${t("u_autologin_admin")}</option>
+            <option value="3">${t("u_autologin_host")}</option>
+          </select>
+        </div>
+      </details></div>`;
   }).join("");
   return `<div class="cardhead"><h2>${t("users_h")}</h2><p class="sub">${t("users_sub", us.length)}</p></div>
-    <div class="ucards">${cards||`<div class="empty">${t("users_empty")}</div>`}</div>`;
+    <div class="ucards">${cards||`<div class="empty">${t("users_empty")}</div>`}</div>
+    ${renderAutologins()}`;
+}
+
+function renderAutologins(){
+  const al = STATE.autologins||[];
+  const rows = al.map(a=>`<tr><td>${esc(a.name)}</td><td class="mut">${esc(a.ip)}</td>
+    <td><span class="chip">${esc(lvlName(a.levelName))}</span></td>
+    <td style="text-align:right"><button class="btn sm danger" data-remautologin="${a.id}">${t("common_remove")}</button></td></tr>`).join("");
+  return `<div class="card"><h3>${t("autologins_h")}</h3>
+    <p class="sub" style="margin-bottom:10px">${t("autologins_sub")}</p>
+    <div class="scroll"><table class="tbl"><thead><tr><th>${t("th_name")}</th><th>IP</th><th>${t("th_rank")}</th><th></th></tr></thead>
+    <tbody>${rows||`<tr><td colspan=4 class=mut>${t("autologins_empty")}</td></tr>`}</tbody></table></div></div>`;
 }
 
 function renderCuentas(){
@@ -1863,11 +1947,25 @@ function wire(){
   const g=(id)=>document.getElementById(id);
   document.querySelectorAll("[data-act]").forEach(b=>b.onclick=async()=>{
     const n=b.dataset.n, a=b.dataset.act;
+    if(a==="whois"||a==="id"||a==="oldname"||a==="locate"||a==="trace"){ showOutput(n, await cmd(`/${a} ${n}`)); return; }
+    if(a==="customname"){
+      const v=prompt(t("prompt_customname",n));
+      if(v==null||!v.trim())return;
+      run(`/customname ${n} ${v}`, t("toast_customname")); return;
+    }
     if(a==="ban"&&!confirm(t("cf_ban",n)))return;
-    if(a==="whois"){ showOutput(n, await cmd(`/whois ${n}`)); return; }
-    const msg={kick:t("toast_kicked",n),ban:t("toast_banned",n),muzzle:t("toast_muted",n),unmuzzle:t("toast_unmuted",n)}[a];
-    run(`/${a} ${n}`, msg);
+    if(a==="ban10"&&!confirm(t("cf_ban10",n)))return;
+    if(a==="ban60"&&!confirm(t("cf_ban60",n)))return;
+    if(a==="kick"&&!confirm(t("cf_kick",n)))return;
+    const msg={kick:t("toast_kicked",n),ban:t("toast_banned",n),muzzle:t("toast_muted",n),unmuzzle:t("toast_unmuted",n),
+      ban10:t("toast_banned",n),ban60:t("toast_banned",n),unecho:t("toast_echo_off"),uncustomname:t("toast_customname")}[a];
+    run(`/${a} ${n}`, msg || t("toast_toggled"));
   });
+  document.querySelectorAll("[data-autologin]").forEach(s=>s.onchange=()=>{
+    const n=s.dataset.autologin, v=s.value; if(!v) return;
+    run(`/addautologin ${n} ${v}`, t("toast_autologin_added",n)); s.value="";
+  });
+  document.querySelectorAll("[data-remautologin]").forEach(b=>b.onclick=()=>run(`/remautologin ${b.dataset.remautologin}`,t("toast_autologin_rem")));
   document.querySelectorAll("[data-act2]").forEach(b=>b.onclick=()=>run(`/${b.dataset.act2} ${b.dataset.n}`,t("toast_ban_rem")));
   document.querySelectorAll("[data-grant]").forEach(s=>s.onchange=()=>{
     const n=s.dataset.grant, v=s.value; if(!v) return;
