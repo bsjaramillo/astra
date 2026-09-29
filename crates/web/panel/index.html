@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Astra · Administración</title>
+<link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="astramark" viewBox="0 0 512 512">
+  <g stroke="currentColor" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M164 392 L256 200 L348 392"/><path d="M198 330 L314 330" stroke-width="40"/></g>
+  <path d="M256 114 Q260.7 135.3 282 140 Q260.7 144.7 256 166 Q251.3 144.7 230 140 Q251.3 135.3 256 114 Z" fill="currentColor"/>
+</symbol></svg>
+
+<div id="login">
+  <div class="logincard">
+    <div class="logo"><svg viewBox="0 0 512 512"><use href="#astramark"/></svg></div>
+    <h2 id="loginTitle">Panel de Astra</h2>
+    <p class="sub" id="loginSub">Ingresa la contraseña de dueño para administrar tu sala.</p>
+    <input id="pw" type="password" placeholder="Contraseña de dueño" autofocus>
+    <div class="rowend" style="justify-content:center">
+      <button class="btn primary" id="loginBtn" style="width:100%">Entrar</button>
+    </div>
+    <div id="loginErr" class="sub" style="color:var(--danger)"></div>
+    <div style="margin-top:14px"><a href="#" id="langLink" class="sub">English</a></div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+<header>
+  <button id="menuBtn" class="iconbtn only-mobile" aria-label="Menu">☰</button>
+  <div class="brand"><span class="logo"><svg viewBox="0 0 512 512"><use href="#astramark"/></svg></span><span class="only-desktop">Astra</span></div>
+  <div class="hstats" id="hdrStat">…</div>
+  <div class="spacer"></div>
+  <button id="langBtn" class="btn ghost sm" title="Idioma / Language">ES</button>
+  <button id="refreshBtn" class="iconbtn" title="Refresh" aria-label="Refresh">↻</button>
+  <button id="logoutBtn" class="btn ghost sm">Salir</button>
+</header>
+<div class="layout">
+  <aside id="side"><nav id="nav"></nav></aside>
+  <div id="backdrop" class="backdrop"></div>
+  <main id="view"></main>
+</div>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modalbox">
+    <div class="modalhead"><b id="modalTitle"></b><button class="iconbtn" id="modalClose" aria-label="Close">✕</button></div>
+    <pre id="modalBody"></pre>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script src="/admin/app.js"></script>
+</body>
+</html>

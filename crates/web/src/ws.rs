@@ -296,6 +296,22 @@ async fn handle_admin_route(
         return Ok(());
     }
 
+    // Assets del panel (CSS/JS). Tampoco requieren token.
+    if path == "/admin/style.css" {
+        send_http_asset(stream, "text/css; charset=utf-8", crate::panel::ADMIN_CSS.as_bytes())
+            .await?;
+        return Ok(());
+    }
+    if path == "/admin/app.js" {
+        send_http_asset(
+            stream,
+            "application/javascript; charset=utf-8",
+            crate::panel::ADMIN_JS.as_bytes(),
+        )
+        .await?;
+        return Ok(());
+    }
+
     if !crate::admin::is_enabled(ctx) {
         send_http_json(stream, 403, "{\"error\":\"admin panel disabled (no owner password set)\"}").await?;
         return Ok(());
@@ -817,6 +833,7 @@ async fn send_http_html(stream: &mut TcpStream, html: &str) -> anyhow::Result<()
         "HTTP/1.1 200 OK\r\n\
          Content-Type: text/html; charset=utf-8\r\n\
          Content-Length: {}\r\n\
+         Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n\
          {}",
@@ -824,6 +841,29 @@ async fn send_http_html(stream: &mut TcpStream, html: &str) -> anyhow::Result<()
         html
     );
     stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Responde 200 OK con un asset (CSS/JS) y cierra la conexión.
+async fn send_http_asset(
+    stream: &mut TcpStream,
+    content_type: &str,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    let header = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: {}\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-cache\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Connection: close\r\n\
+         \r\n",
+        content_type,
+        bytes.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(bytes).await?;
     stream.flush().await?;
     Ok(())
 }
