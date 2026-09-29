@@ -146,7 +146,7 @@ checksum = "b0f477b951e452a0b6b4a10b53ccd569042d1d01729b519e02074a9c0958a063"
 
 [[package]]
 name = "astra"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "anyhow",
  "astra-admission",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "astra-admission"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "astra-scripting",
  "rand 0.8.8",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "astra-bot"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "astra-commands",
  "astra-scripting",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "astra-captcha"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "image",
  "rand 0.8.8",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "astra-commands"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "anyhow",
  "astra-scripting",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "astra-link"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "astra-scripting"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "astra-udp"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "astra-web"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "anyhow",
  "astra-admission",
@@ -339,9 +339,9 @@ dependencies = [
 
 [[package]]
 name = "async-compression"
-version = "0.4.48"
+version = "0.4.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb61aea1a7def73ee7c350a184f0e70b32c182344e2e75bf70c9b621b83417fd"
+checksum = "a3789ca2cd1c4e8ce71fe9bd6312566014e20ff3016fc87bc71c59ff93b5fa61"
 dependencies = [
  "compression-codecs",
  "compression-core",
@@ -893,9 +893,9 @@ dependencies = [
 
 [[package]]
 name = "compression-codecs"
-version = "0.4.43"
+version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef16c47ba2797aa6a909cc37d39911f3a6743811fe7408ac0b0cc0276b656e9"
+checksum = "5f018b36ac50598f7bfb0aa6094281e253e6b3cbc507a69652d2fb963a326d8d"
 dependencies = [
  "compression-core",
  "flate2",
@@ -2719,7 +2719,7 @@ dependencies = [
 
 [[package]]
 name = "proto-ares"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "aes",
  "byteorder",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.2.9"
+version = "0.2.10-beta.1"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -3844,9 +3844,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
