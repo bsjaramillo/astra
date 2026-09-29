@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use proto_ares::{PacketReader, PacketWriter, TcpMsg};
-use server_core::flood_control::FloodKind;
+use server_core::flood_control::{FloodKind, SpamOutcome};
 use server_core::login::parse_login;
 use server_core::outbound;
 use server_core::{AppContext, LinkEvent, LinkUserSnapshot};
@@ -781,42 +781,12 @@ fn read_crypto_text(
     r.read_string_nt().ok()
 }
 
-/// Chequea el flood de texto de sb0t (rate-limit + duplicados). Si el usuario
-/// está flooding, le manda un ServerError y devuelve `true` (el caller debe
-/// desconectarlo). Niveles > Regular están exentos.
-fn is_text_flooding(
-    ctx: &AppContext,
-    user: &Arc<server_core::user_pool::AresUser>,
-    scripting: &ScriptHandle,
-    kind: server_core::flood_control::FloodKind,
-    text: &str,
-) -> bool {
-    let level = *user.level.read();
-    let now = server_core::time::unix_time();
-    if user.flood.is_flooding(kind, text, level, now) {
-        // Gate de scripts (onFloodBefore, paridad sb0t `Flooding`): si algún
-        // script retorna false, se perdona el flood (no se castiga).
-        let fname = user.name.read().clone();
-        if !scripting.check_flood(&fname, text) {
-            debug!("flood de '{}' perdonado por script (onFloodBefore)", fname);
-            return false;
-        }
-        ctx.stats.on_flood();
-        let mut w = proto_ares::PacketWriter::with_msg_crypto(
-            proto_ares::TcpMsg::ServerError,
-            user.ares_crypto,
-        );
-        w.write_string_nt("You are flooding the room and have been disconnected.")
-            .ok();
-        let _ = user.send(bytes::Bytes::copy_from_slice(w.as_bytes()));
-        info!(
-            "flood de texto de '{}' (id={}) → desconectando",
-            user.name.read(),
-            user.id
-        );
-        return true;
-    }
-    false
+/// Extrae el cuerpo (segundo string) de un paquete PM para alimentar el
+/// anti-spam sin decodificar dos veces.
+fn read_pm_body(user: &Arc<server_core::user_pool::AresUser>, data: &[u8]) -> String {
+    let mut r = PacketReader::new_crypto(data, user.ares_crypto);
+    let _target = r.read_string_nt();
+    r.read_string_nt().unwrap_or_default()
 }
 
 /// Procesa un paquete del cliente. Devuelve `Ok(true)` si el cliente debe
@@ -904,32 +874,48 @@ async fn dispatch_message(
             });
         }
         TcpMsg::Public => {
-            // Control de flood de texto (rate-limit + duplicados) antes de
-            // procesar. Los comandos se eximen (no son chat). Nivel >
-            // Regular está exento (lo maneja is_flooding).
-            //
-            // Por este canal el prefijo de comando es `#`, no `/` (ver
-            // `handle_public`): una barra es texto normal y sí cuenta para
-            // el flood.
+            // Anti-spam de texto antes de procesar. Los comandos se eximen
+            // (no son chat). Niveles > Regular están exentos (lo maneja
+            // `check_spam`). Por este canal el prefijo de comando es `#`, no
+            // `/` (ver `handle_public`): una barra es texto normal y sí cuenta.
             let text = read_crypto_text(user, &pkt.data[1..]);
             let is_cmd = text.as_deref().map(|t| t.trim_start().starts_with('#')).unwrap_or(false);
-            if !is_cmd
-                && is_text_flooding(ctx, user, scripting, FloodKind::Public, text.as_deref().unwrap_or(""))
-            {
-                return Ok(true);
+            if !is_cmd {
+                match astra_commands::check_spam(
+                    ctx,
+                    scripting,
+                    user,
+                    FloodKind::Public,
+                    text.as_deref().unwrap_or(""),
+                ) {
+                    SpamOutcome::Clean => {}
+                    SpamOutcome::Dropped => return Ok(false),
+                    SpamOutcome::Disconnected => return Ok(true),
+                }
             }
             handle_public(ctx, user, &pkt.data[1..], &scripting).await;
         }
         TcpMsg::Emote => {
             let text = read_crypto_text(user, &pkt.data[1..]);
-            if is_text_flooding(ctx, user, scripting, FloodKind::Emote, text.as_deref().unwrap_or("")) {
-                return Ok(true);
+            match astra_commands::check_spam(
+                ctx,
+                scripting,
+                user,
+                FloodKind::Emote,
+                text.as_deref().unwrap_or(""),
+            ) {
+                SpamOutcome::Clean => {}
+                SpamOutcome::Dropped => return Ok(false),
+                SpamOutcome::Disconnected => return Ok(true),
             }
             handle_emote(ctx, user, &pkt.data[1..], scripting).await;
         }
         TcpMsg::Pmt => {
-            if is_text_flooding(ctx, user, scripting, FloodKind::Pm, "") {
-                return Ok(true);
+            let body = read_pm_body(user, &pkt.data[1..]);
+            match astra_commands::check_spam(ctx, scripting, user, FloodKind::Pm, &body) {
+                SpamOutcome::Clean => {}
+                SpamOutcome::Dropped => return Ok(false),
+                SpamOutcome::Disconnected => return Ok(true),
             }
             handle_pvt(ctx, user, &pkt.data[1..], scripting).await;
         }

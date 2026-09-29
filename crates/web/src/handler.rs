@@ -870,49 +870,15 @@ pub(crate) fn avatar_b64_of(user: &AresUser) -> String {
 }
 
 /// Despacha un mensaje entrante del cliente WS.
-/// Chequea el flood de texto de sb0t (idéntico al path TCP nativo). Si el
-/// usuario está flooding, le manda un ERROR por el canal WS y devuelve `true`
-/// (el caller lo desconecta). Niveles > Regular exentos.
-fn ws_is_text_flooding(
-    ctx: &AppContext,
-    user: &Arc<AresUser>,
-    scripting: &astra_scripting::ScriptHandle,
-    kind: server_core::flood_control::FloodKind,
-    text: &str,
-) -> bool {
-    let level = *user.level.read();
-    let now = server_core::time::unix_time();
-    if user.flood.is_flooding(kind, text, level, now) {
-        // Gate de scripts (onFloodBefore): false → perdonar el flood.
-        let fname = user.name.read().clone();
-        if !scripting.check_flood(&fname, text) {
-            return false;
-        }
-        ctx.stats.on_flood();
-        if let Some(tx) = &user.ws_text_sender {
-            let _ = tx.send(
-                "ERROR:You are flooding the room and have been disconnected.".to_string(),
-            );
-        }
-        info!(
-            "ws flood de texto de '{}' (id={}) → desconectando",
-            user.name.read(),
-            user.id
-        );
-        return true;
-    }
-    false
-}
-
 /// Procesa un mensaje WS del cliente. Devuelve `Ok(true)` si el cliente debe
-/// desconectarse (p.ej. por flood de texto).
+/// desconectarse (p.ej. por spam).
 async fn dispatch_ws_message(
     ctx: &Arc<AppContext>,
     user: &Arc<AresUser>,
     text: &str,
     scripting: &astra_scripting::ScriptHandle,
 ) -> anyhow::Result<bool> {
-    use server_core::flood_control::FloodKind;
+    use server_core::flood_control::{FloodKind, SpamOutcome};
     let (ident, args) = match protocol::parse_incoming(text) {
         Some(p) => p,
         None => return Ok(false),
@@ -920,18 +886,24 @@ async fn dispatch_ws_message(
 
     match ident {
         "PUBLIC" => {
-            // Control de flood (rate-limit + duplicados). Comandos exentos
-            // (por este canal el prefijo es `#`, ver `handle_ws_public`).
-            // Nivel > Regular exento (lo maneja is_flooding).
+            // Anti-spam (rate-limit + casi-duplicados). Comandos exentos (por
+            // este canal el prefijo es `#`, ver `handle_ws_public`). Nivel >
+            // Regular exento (lo maneja `check_spam`).
             let is_cmd = args.trim_start().starts_with('#');
-            if !is_cmd && ws_is_text_flooding(ctx, user, scripting, FloodKind::Public, args) {
-                return Ok(true);
+            if !is_cmd {
+                match astra_commands::check_spam(ctx, scripting, user, FloodKind::Public, args) {
+                    SpamOutcome::Clean => {}
+                    SpamOutcome::Dropped => return Ok(false),
+                    SpamOutcome::Disconnected => return Ok(true),
+                }
             }
             handle_ws_public(ctx, user, args.to_string(), scripting);
         }
         "EMOTE" => {
-            if ws_is_text_flooding(ctx, user, scripting, FloodKind::Emote, args) {
-                return Ok(true);
+            match astra_commands::check_spam(ctx, scripting, user, FloodKind::Emote, args) {
+                SpamOutcome::Clean => {}
+                SpamOutcome::Dropped => return Ok(false),
+                SpamOutcome::Disconnected => return Ok(true),
             }
             handle_ws_emote(ctx, user, args, scripting);
         }
@@ -940,8 +912,10 @@ async fn dispatch_ws_message(
         }
         "COMMAND" => handle_ws_command(ctx, user, args, scripting),
         "PM" => {
-            if ws_is_text_flooding(ctx, user, scripting, FloodKind::Pm, "") {
-                return Ok(true);
+            match astra_commands::check_spam(ctx, scripting, user, FloodKind::Pm, args) {
+                SpamOutcome::Clean => {}
+                SpamOutcome::Dropped => return Ok(false),
+                SpamOutcome::Disconnected => return Ok(true),
             }
             handle_ws_pm(ctx, user, args, scripting);
         }

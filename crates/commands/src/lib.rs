@@ -5728,6 +5728,117 @@ fn guid_to_hex(guid: &[u8; 16]) -> String {
     guid.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Chequea el anti-spam de texto y aplica la acción configurada.
+///
+/// Devuelve qué debe hacer el caller con el mensaje que disparó la detección:
+/// [`SpamOutcome::Clean`] (entregarlo), [`SpamOutcome::Dropped`] (descartarlo
+/// pero mantener la conexión) o [`SpamOutcome::Disconnected`] (descartarlo y
+/// desconectar). Reutiliza el veto `onFloodBefore` de los scripts y dispara
+/// `onFlood` (paridad sb0t). Niveles > Regular están exentos.
+pub fn check_spam(
+    ctx: &AppContext,
+    scripting: &ScriptHandle,
+    user: &Arc<AresUser>,
+    kind: server_core::flood_control::FloodKind,
+    text: &str,
+) -> server_core::flood_control::SpamOutcome {
+    use server_core::flood_control::{SpamOutcome, SpamVerdict};
+
+    let cfg = &ctx.settings.security.anti_spam;
+    if !cfg.enabled {
+        return SpamOutcome::Clean;
+    }
+    let level = *user.level.read();
+    if level > ILevel::Regular {
+        return SpamOutcome::Clean;
+    }
+    let now = server_core::time::unix_time();
+    let verdict = user.flood.check(kind, text, level, now, cfg);
+    if verdict == SpamVerdict::Clean {
+        return SpamOutcome::Clean;
+    }
+
+    let name = user.name.read().clone();
+    // Gate de scripts (onFloodBefore): `false` → perdonar el spam.
+    if !scripting.check_flood(&name, text) {
+        tracing::debug!("anti-spam de '{}' perdonado por script (onFloodBefore)", name);
+        return SpamOutcome::Clean;
+    }
+    ctx.stats.on_flood();
+    scripting.dispatch(ScriptEvent::Flood { name: name.clone() });
+    tracing::info!(
+        "anti-spam: '{}' (id={}) {:?} kind={:?} → acción {:?}",
+        name,
+        user.id,
+        verdict,
+        kind,
+        cfg.action
+    );
+
+    apply_spam_action(ctx, user, cfg)
+}
+
+/// Aplica la acción configurada al usuario marcado como spam.
+fn apply_spam_action(
+    ctx: &AppContext,
+    user: &Arc<AresUser>,
+    cfg: &server_core::settings::AntiSpamConfig,
+) -> server_core::flood_control::SpamOutcome {
+    use server_core::flood_control::SpamOutcome;
+    use server_core::settings::SpamAction;
+    use std::sync::atomic::Ordering;
+
+    match cfg.action {
+        SpamAction::Warn => {
+            send_system_line(ctx, user, &ctx.templates.get("spam.warn"));
+            SpamOutcome::Dropped
+        }
+        SpamAction::Mute => {
+            // Runtime-only: NO se persiste, así al reconectar vuelve normal.
+            let until = if cfg.mute_secs > 0 {
+                server_core::time::unix_time() + cfg.mute_secs * 1000
+            } else {
+                0
+            };
+            user.muzzled.store(true, Ordering::Relaxed);
+            user.muzzle_until.store(until, Ordering::Relaxed);
+            ctx.publish_link_event(server_core::LinkEvent::UserUpdated {
+                origin: None,
+                user: server_core::LinkUserSnapshot::from_user(user),
+            });
+            send_system_line(ctx, user, &ctx.templates.get("spam.mute"));
+            SpamOutcome::Dropped
+        }
+        SpamAction::Kick => {
+            send_system_line(ctx, user, &ctx.templates.get("spam.kick"));
+            force_part_user(ctx, user);
+            SpamOutcome::Disconnected
+        }
+        SpamAction::Ban => {
+            let name = user.name.read().clone();
+            let ident = ctx.bans.ban_with_expiry(
+                &name,
+                &user.version,
+                &user.guid,
+                user.external_ip,
+                user.local_ip,
+                user.data_port,
+                cfg.ban_secs as i64,
+            );
+            send_system_line(ctx, user, &ctx.templates.get("spam.ban"));
+            if ident != 0 {
+                ctx.record_ban(
+                    &ctx.settings.bot_name,
+                    &name,
+                    &user.external_ip.to_string(),
+                );
+            }
+            force_part_user(ctx, user);
+            SpamOutcome::Disconnected
+        }
+    }
+}
+
 /// Saca a `target` de la sala: lo quita del pool y difunde su PART a todo
 /// el mundo (paridad `AresClient.Disconnect`/`SendDepart` de sb0t). No
 /// cierra el socket subyacente (la sesión vieja, si sigue viva, se

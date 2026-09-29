@@ -411,6 +411,14 @@ const I18N = {
     sec_rejectspam:"Rechazar bots de spam automáticamente",
     sec_captcha_h:"🤖 Captcha", sec_captcha_on:"Pedir captcha a las IP nuevas",
     sec_captcha_exp:"Expiración del captcha (seg)", sec_captcha_att:"Intentos permitidos",
+    sec_spam_h:"🛡️ Anti-spam de mensajes", sec_spam_on:"Activar anti-spam",
+    sec_spam_rate:"Limitar velocidad de mensajes", sec_spam_dup:"Detectar mensajes repetidos",
+    sec_spam_maxmsgs:"Máx. mensajes de sala por ventana", sec_spam_maxpm:"Máx. mensajes privados por ventana",
+    sec_spam_window:"Ventana (seg)", sec_spam_dupcount:"Repeticiones para marcar", sec_spam_minchars:"Largo mínimo a analizar",
+    sec_spam_sim:"Similitud para duplicado (%)", sec_spam_action:"Acción",
+    sec_spam_act_warn:"Solo avisar", sec_spam_act_mute:"Silenciar", sec_spam_act_kick:"Expulsar", sec_spam_act_ban:"Banear",
+    sec_spam_mutesec:"Duración del silencio (seg)", sec_spam_bansesec:"Duración del ban (seg)",
+    sec_spam_note:"Se aplica al instante (sin reiniciar). Exentos: Voz o superior.",
 
     proxy_h:"Proxies de confianza", proxy_sub:"Para cuando tu servidor está detrás de un proxy (Cloudflare, nginx, etc.).",
     proxy_note:"Solo las IP de esta lista pueden decir cuál es la IP real del visitante (vía cabeceras <code>X-Forwarded-For</code>/<code>X-Real-IP</code>). Aplica solo a clientes web. La IP local (127.0.0.1) siempre es de confianza. Los cambios se aplican al instante.",
@@ -653,6 +661,14 @@ const I18N = {
     sec_rejectspam:"Reject spam bots automatically",
     sec_captcha_h:"🤖 Captcha", sec_captcha_on:"Ask new IPs for a captcha",
     sec_captcha_exp:"Captcha expiration (sec)", sec_captcha_att:"Allowed attempts",
+    sec_spam_h:"🛡️ Message anti-spam", sec_spam_on:"Enable anti-spam",
+    sec_spam_rate:"Rate-limit messages", sec_spam_dup:"Detect repeated messages",
+    sec_spam_maxmsgs:"Max room messages per window", sec_spam_maxpm:"Max PMs per window",
+    sec_spam_window:"Window (sec)", sec_spam_dupcount:"Repeats to flag", sec_spam_minchars:"Min length to analyze",
+    sec_spam_sim:"Duplicate similarity (%)", sec_spam_action:"Action",
+    sec_spam_act_warn:"Warn only", sec_spam_act_mute:"Mute", sec_spam_act_kick:"Kick", sec_spam_act_ban:"Ban",
+    sec_spam_mutesec:"Mute duration (sec)", sec_spam_bansesec:"Ban duration (sec)",
+    sec_spam_note:"Applies instantly (no restart). Exempt: Voice or higher.",
 
     proxy_h:"Trusted proxies", proxy_sub:"For when your server sits behind a proxy (Cloudflare, nginx, etc.).",
     proxy_note:"Only IPs on this list may report the visitor's real IP (via <code>X-Forwarded-For</code>/<code>X-Real-IP</code> headers). Applies to web clients only. Localhost (127.0.0.1) is always trusted. Changes apply instantly.",
@@ -1301,6 +1317,28 @@ function renderSeguridad(){
       ${fld("secFailedBan",t("sec_failban"))}
     </div>
     <label class="check"><input type="checkbox" id="secRejectSpam"> ${t("sec_rejectspam")}</label></div>
+    <div class="card"><h3>${t("sec_spam_h")}</h3>
+      <p class="sub" style="margin-bottom:10px">${t("sec_spam_note")}</p>
+      <label class="check"><input type="checkbox" id="secSpamEnabled"> ${t("sec_spam_on")}</label>
+      <label class="check"><input type="checkbox" id="secSpamRate"> ${t("sec_spam_rate")}</label>
+      <label class="check"><input type="checkbox" id="secSpamDup"> ${t("sec_spam_dup")}</label>
+      <div class="grid2">
+        ${fld("secSpamMaxMsgs",t("sec_spam_maxmsgs"))}
+        ${fld("secSpamMaxPm",t("sec_spam_maxpm"))}
+        ${fld("secSpamWindow",t("sec_spam_window"))}
+        ${fld("secSpamDupCount",t("sec_spam_dupcount"))}
+        ${fld("secSpamMinChars",t("sec_spam_minchars"))}
+        ${fld("secSpamSim",t("sec_spam_sim"))}
+        ${fld("secSpamMute",t("sec_spam_mutesec"))}
+        ${fld("secSpamBan",t("sec_spam_bansesec"))}
+      </div>
+      <label class="fld"><span>${t("sec_spam_action")}</span>
+        <select class="sel" id="secSpamAction">
+          <option value="warn">${t("sec_spam_act_warn")}</option>
+          <option value="mute">${t("sec_spam_act_mute")}</option>
+          <option value="kick">${t("sec_spam_act_kick")}</option>
+          <option value="ban">${t("sec_spam_act_ban")}</option>
+        </select></label></div>
     <div class="card"><h3>${t("sec_captcha_h")}</h3>
       <label class="check"><input type="checkbox" id="secCaptchaEnabled"> ${t("sec_captcha_on")}</label>
       <div class="grid2">${fld("secCaptchaExp",t("sec_captcha_exp"))}${fld("secCaptchaAttempts",t("sec_captcha_att"))}</div>
@@ -1315,6 +1353,11 @@ async function fillAdvanced(){
   g("secMaxFailed").value=s.max_failed_logins??5; g("secFailedWindow").value=s.failed_login_window_secs??3600;
   g("secFailedBan").value=s.failed_login_ban_secs??3600; g("secRejectSpam").checked=!!s.reject_spam_bots;
   g("secCaptchaEnabled").checked=!!s.captcha_enabled; g("secCaptchaExp").value=s.captcha_expiration_secs??300; g("secCaptchaAttempts").value=s.captcha_max_attempts??3;
+  const sp=s.anti_spam||{};
+  g("secSpamEnabled").checked=sp.enabled!==false; g("secSpamRate").checked=sp.rate_enabled!==false; g("secSpamDup").checked=sp.duplicates_enabled!==false;
+  g("secSpamMaxMsgs").value=sp.max_messages??4; g("secSpamMaxPm").value=sp.max_pm??6; g("secSpamWindow").value=sp.window_secs??3;
+  g("secSpamDupCount").value=sp.duplicate_count??4; g("secSpamMinChars").value=sp.min_chars??4; g("secSpamSim").value=sp.similarity_percent??90;
+  g("secSpamAction").value=sp.action||"mute"; g("secSpamMute").value=sp.mute_secs??600; g("secSpamBan").value=sp.ban_secs??900;
 }
 async function saveAdvanced(){
   const c=await loadConfig(); c.security=c.security||{}; const s=c.security; const g=(id)=>parseInt(document.getElementById(id).value)||0;
@@ -1326,6 +1369,14 @@ async function saveAdvanced(){
   s.reject_spam_bots=document.getElementById("secRejectSpam").checked;
   s.captcha_enabled=document.getElementById("secCaptchaEnabled").checked;
   s.captcha_expiration_secs=g("secCaptchaExp"); s.captcha_max_attempts=g("secCaptchaAttempts");
+  s.anti_spam=s.anti_spam||{};
+  s.anti_spam.enabled=document.getElementById("secSpamEnabled").checked;
+  s.anti_spam.rate_enabled=document.getElementById("secSpamRate").checked;
+  s.anti_spam.duplicates_enabled=document.getElementById("secSpamDup").checked;
+  s.anti_spam.max_messages=g("secSpamMaxMsgs"); s.anti_spam.max_pm=g("secSpamMaxPm"); s.anti_spam.window_secs=g("secSpamWindow");
+  s.anti_spam.duplicate_count=g("secSpamDupCount"); s.anti_spam.min_chars=g("secSpamMinChars"); s.anti_spam.similarity_percent=g("secSpamSim");
+  s.anti_spam.action=document.getElementById("secSpamAction").value;
+  s.anti_spam.mute_secs=g("secSpamMute"); s.anti_spam.ban_secs=g("secSpamBan");
   await postConfig(c);
 }
 

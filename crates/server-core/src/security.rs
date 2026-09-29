@@ -588,6 +588,7 @@ mod tests {
             captcha_enabled: false,
             captcha_expiration_secs: 300,
             captcha_max_attempts: 3,
+            ..SecurityConfig::default()
         }
     }
 
@@ -650,6 +651,7 @@ mod tests {
             captcha_enabled: false,
             captcha_expiration_secs: 300,
             captcha_max_attempts: 3,
+            ..SecurityConfig::default()
         }
     }
 

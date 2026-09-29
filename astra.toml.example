@@ -222,6 +222,26 @@ captcha_enabled = false                # default: deshabilitado (opt-in)
 captcha_expiration_secs = 300          # tiempo para resolver (5 min)
 captcha_max_attempts = 3               # intentos antes de kickear
 
+# --- Anti-spam de mensajes -------------------------------------------------
+# Detecta spam por velocidad (rate) y por mensajes repetidos o "casi
+# duplicados" (mismo texto con cambios mínimos: mayúsculas, puntuación,
+# letras repetidas, una letra distinta...). Se aplica a mensajes de sala,
+# emotes y PM. Los niveles Voz o superior están exentos.
+# Se aplica AL INSTANTE (no requiere reiniciar el servidor).
+[security.anti_spam]
+enabled = true                         # interruptor maestro (todo el anti-spam)
+rate_enabled = true                    # limitar velocidad de mensajes
+duplicates_enabled = true              # detectar repetidos / casi-duplicados
+max_messages = 4                       # máx. mensajes de sala+emote por ventana
+max_pm = 6                             # máx. PM por ventana
+window_secs = 3                        # tamaño de la ventana de rate (seg)
+duplicate_count = 4                    # repeticiones para marcar duplicado
+min_chars = 4                          # no analiza duplicados más cortos que esto
+similarity_percent = 90                # umbral 50-100 (100 = idéntico normalizado)
+action = "mute"                        # warn | mute | kick | ban
+mute_secs = 600                        # duración del mute automático (seg)
+ban_secs = 900                         # duración del ban automático (seg)
+
 # --- Filtro anti-VPN / proxy ----------------------------------------------
 # Se configura EN VIVO desde el panel (/admin → Anti-VPN), no desde este
 # archivo: la config vive en SQLite para que los cambios rijan sin reiniciar

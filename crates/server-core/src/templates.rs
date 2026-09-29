@@ -205,6 +205,11 @@ pub const TEMPLATE_DEFAULTS: &[(&str, &str)] = &[
     // Autologin (AdminLogin #4/#5 de sb0t)
     ("autologin.added", "+n has been added to auto login as a level +l admin"),
     ("autologin.removed", "+n has been removed from auto login"),
+    // Anti-spam de texto (aviso al usuario marcado)
+    ("spam.warn", "Please slow down: you are sending messages too fast."),
+    ("spam.mute", "You have been muted for spamming."),
+    ("spam.kick", "You have been kicked for spamming."),
+    ("spam.ban", "You have been banned for spamming."),
     // Locate (Category.Locate de sb0t: quién está en qué vroom)
     ("locate.header", "vroom location list"),
     ("locate.entry", "+n is currently in vroom +v"),

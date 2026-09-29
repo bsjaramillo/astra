@@ -161,6 +161,74 @@ pub struct TrustedLeaf {
     pub guid: String,
 }
 
+/// Acción que el servidor aplica cuando el anti-spam marca un mensaje.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SpamAction {
+    /// Solo descarta el mensaje y avisa al usuario.
+    Warn,
+    /// Silencia al usuario por `mute_secs` (0 = permanente).
+    #[default]
+    Mute,
+    /// Expulsa al usuario de la sala.
+    Kick,
+    /// Banea al usuario por `ban_secs` y lo expulsa.
+    Ban,
+}
+
+/// Anti-spam de texto: rate-limit (demasiados mensajes por ventana) y
+/// detección de mensajes repetidos / casi-duplicados, en público, emote y PM.
+///
+/// `enabled` es el interruptor maestro; `rate_enabled` y `duplicates_enabled`
+/// permiten apagar cada técnica por separado sin desactivar todo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AntiSpamConfig {
+    /// Interruptor maestro: `false` apaga TODO el anti-spam.
+    pub enabled: bool,
+    /// Detección de rate (demasiados mensajes por `window_secs`).
+    pub rate_enabled: bool,
+    /// Detección de mensajes repetidos / casi-duplicados.
+    pub duplicates_enabled: bool,
+    /// Máx. mensajes públicos+emote por ventana (0 = sin límite).
+    pub max_messages: u32,
+    /// Máx. PM por ventana (0 = sin límite).
+    pub max_pm: u32,
+    /// Tamaño de la ventana de rate (segundos).
+    pub window_secs: u64,
+    /// Repeticiones (similares) necesarias para marcar duplicado (mín. 2).
+    pub duplicate_count: u32,
+    /// Longitud mínima normalizada para evaluar duplicados.
+    pub min_chars: usize,
+    /// Umbral de similitud 50-100 (100 = idéntico tras normalizar).
+    pub similarity_percent: u8,
+    /// Acción ante una detección.
+    pub action: SpamAction,
+    /// Duración del mute automático (segundos; 0 = permanente).
+    pub mute_secs: u64,
+    /// Duración del ban automático (segundos).
+    pub ban_secs: u64,
+}
+
+impl Default for AntiSpamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rate_enabled: true,
+            duplicates_enabled: true,
+            max_messages: 4,
+            max_pm: 6,
+            window_secs: 3,
+            duplicate_count: 4,
+            min_chars: 4,
+            similarity_percent: 90,
+            action: SpamAction::Mute,
+            mute_secs: 600,
+            ban_secs: 900,
+        }
+    }
+}
+
 /// Configuración de seguridad (defensa en capas).
 ///
 /// Todos los valores son ajustables via `astra.toml`. Los defaults son
@@ -225,6 +293,10 @@ pub struct SecurityConfig {
     pub captcha_expiration_secs: u64,
     /// Captcha: máx intentos fallidos antes de kickear al user.
     pub captcha_max_attempts: u32,
+
+    /// Anti-spam de texto (rate + casi-duplicados) en público/emote/PM.
+    #[serde(default)]
+    pub anti_spam: AntiSpamConfig,
 }
 
 fn default_max_raw_connections_per_ip() -> u32 {
@@ -262,6 +334,9 @@ impl Default for SecurityConfig {
             captcha_enabled: false,
             captcha_expiration_secs: 300, // 5 min
             captcha_max_attempts: 3,
+
+            // Anti-spam de texto
+            anti_spam: AntiSpamConfig::default(),
         }
     }
 }
