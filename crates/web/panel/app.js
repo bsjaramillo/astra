@@ -250,6 +250,23 @@ const I18N = {
     ed_discard_confirm:"Hay cambios sin guardar. ¿Descartar?",
     ed_load_err:"no se pudo cargar", ed_no_editor:"El editor no está disponible.",
 
+    nav_configsala:"Config de sala",
+    rc_h:"Configuración de sala", rc_sub:"Exportá o importá la personalización de tu sala (textos, MOTD, filtros, greetings, bots y más) como un archivo.",
+    rc_export_h:"⬇️ Exportar configuración",
+    rc_export_sub:"Descarga un archivo JSON con la configuración actual. Incluye secretos de los bots (API keys); guardalo en un lugar seguro.",
+    rc_export_btn:"Descargar configuración",
+    rc_import_h:"⬆️ Importar configuración",
+    rc_import_sub:"Reemplaza la configuración de la sala con la del archivo. Las secciones incluidas se limpian y vuelven a aplicarse; las que no estén, no se tocan.",
+    rc_import_warn:"⚠️ Esto reemplaza la configuración actual de la sala. No se puede deshacer.",
+    rc_import_file:"Archivo de configuración (.json)",
+    rc_import_btn:"Importar y reemplazar",
+    rc_import_confirm:"¿Reemplazar la configuración actual de la sala con la del archivo? No se puede deshacer.",
+    rc_exported:"Configuración exportada.",
+    rc_imported:"Configuración importada: {0} secciones aplicadas.",
+    rc_import_err:"no se pudo importar",
+    rc_import_errors:"Con avisos: {0}",
+    rc_pick:"Elegí un archivo .json.",
+
     nav_soporte:"Soporte",
     sup_h:"Soporte", sup_sub:"Reportá un problema o sugerí una mejora para Astra.",
     sup_note:"El reporte va al repositorio oficial de Astra. Solo se envía el título y la descripción que escribas (ningún dato del servidor ni de los usuarios).",
@@ -507,6 +524,23 @@ const I18N = {
     ed_discard_confirm:"There are unsaved changes. Discard?",
     ed_load_err:"could not load", ed_no_editor:"The editor is not available.",
 
+    nav_configsala:"Room config",
+    rc_h:"Room configuration", rc_sub:"Export or import your room's customization (texts, MOTD, filters, greetings, bots and more) as a file.",
+    rc_export_h:"⬇️ Export configuration",
+    rc_export_sub:"Downloads a JSON file with the current configuration. It includes bot secrets (API keys), so store it somewhere safe.",
+    rc_export_btn:"Download configuration",
+    rc_import_h:"⬆️ Import configuration",
+    rc_import_sub:"Replaces the room configuration with the file's. Included sections are cleared and re-applied; sections not present are left untouched.",
+    rc_import_warn:"⚠️ This replaces the current room configuration. It cannot be undone.",
+    rc_import_file:"Configuration file (.json)",
+    rc_import_btn:"Import and replace",
+    rc_import_confirm:"Replace the current room configuration with the file's? This cannot be undone.",
+    rc_exported:"Configuration exported.",
+    rc_imported:"Configuration imported: {0} sections applied.",
+    rc_import_err:"couldn't import",
+    rc_import_errors:"With warnings: {0}",
+    rc_pick:"Pick a .json file.",
+
     nav_soporte:"Support",
     sup_h:"Support", sup_sub:"Report a problem or suggest an improvement for Astra.",
     sup_note:"The report goes to the official Astra repository. Only the title and description you write are sent (no server or user data).",
@@ -597,6 +631,7 @@ const TABS = [
     {id:"permisos", icon:"🔑", k:"nav_permisos"},
     {id:"scripts", icon:"📜", k:"nav_scripts"},
     {id:"plantillas", icon:"💬", k:"nav_plantillas"},
+    {id:"configsala", icon:"📦", k:"nav_configsala"},
     {id:"config", icon:"📝", k:"nav_config"},
     {id:"consola", icon:"⌨️", k:"nav_consola"},
     // Reporte a GitHub: OCULTO por ahora (el módulo sigue en el código).
@@ -606,7 +641,7 @@ const TABS = [
 ];
 // Pestañas que NO se auto-refrescan (tienen formularios que se borrarían al
 // re-renderizar mientras el admin escribe).
-const STATIC = new Set(["consola","config","servidor","enlace","seguridad","permisos","proxies","vpn","avatares","motd","plantillas","bot","soporte","scripts"]);
+const STATIC = new Set(["consola","config","configsala","servidor","enlace","seguridad","permisos","proxies","vpn","avatares","motd","plantillas","bot","soporte","scripts"]);
 
 /* ============================ helpers ============================ */
 async function api(path, opts={}) {
@@ -721,7 +756,7 @@ function render(){
     sala:renderSala, motd:renderMotd, avatares:renderAvatares, servidor:renderServidor,
     enlace:renderEnlace, seguridad:renderSeguridad, proxies:renderProxies, vpn:renderVpn,
     permisos:renderPermisos, plantillas:renderPlantillas, config:renderConfig, consola:renderConsola,
-    bot:renderBot, soporte:renderSoporte, scripts:renderScripts
+    bot:renderBot, soporte:renderSoporte, scripts:renderScripts, configsala:renderConfigSala
   };
   // El auto-refresh re-renderiza el DOM y los <details> perderían su estado
   // abierto. Guardamos cuáles estaban abiertos y lo restauramos tras render.
@@ -1801,6 +1836,49 @@ async function saveSettings(){
   else { const j=await r.json().catch(()=>({error:"error"})); toast(t("err_prefix")+(j.error||t("err_save")),"err"); }
 }
 
+/* ---------------- Config de sala (export/import del perfil) ---------------- */
+function renderConfigSala(){
+  return `<div class="cardhead"><h2>${t("rc_h")}</h2><p class="sub">${t("rc_sub")}</p></div>
+    <div class="card"><h3>${t("rc_export_h")}</h3>
+      <p class="sub">${t("rc_export_sub")}</p>
+      <div class="rowend"><button class="btn primary" id="rcExport">${t("rc_export_btn")}</button></div></div>
+    <div class="card"><h3>${t("rc_import_h")}</h3>
+      <p class="sub">${t("rc_import_sub")}</p>
+      <div class="warnbox">${t("rc_import_warn")}</div>
+      <label class="fld"><span>${t("rc_import_file")}</span><input type="file" id="rcFile" accept=".json,application/json"></label>
+      <div class="rowend"><button class="btn danger" id="rcImport">${t("rc_import_btn")}</button></div></div>`;
+}
+async function exportRoomConfig(){
+  const r=await api("/admin/roomconfig");
+  if(!r.ok){ const j=await r.json().catch(()=>({error:"error"})); toast(t("err_prefix")+(j.error||t("common_error")),"err"); return; }
+  const j=await r.json();
+  const blob=new Blob([JSON.stringify(j.config||{}, null, 2)],{type:"application/json"});
+  const room=((STATE.server&&STATE.server.room)||"sala").toString().toLowerCase()
+    .replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"")||"sala";
+  const stamp=new Date().toISOString().slice(0,10);
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`astra-room-${room}-${stamp}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  toast(t("rc_exported"),"ok");
+}
+async function importRoomConfig(){
+  const input=document.getElementById("rcFile");
+  if(!input || !input.files[0]){ toast(t("rc_pick"),"err"); return; }
+  if(!confirm(t("rc_import_confirm"))) return;
+  let cfg;
+  try{ cfg=JSON.parse(await input.files[0].text()); }
+  catch(e){ toast(t("err_prefix")+t("rc_import_err"),"err"); return; }
+  const r=await api("/admin/roomconfig",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({config:cfg})});
+  const j=await r.json().catch(()=>({error:"error"}));
+  if(!r.ok){ toast(t("err_prefix")+(j.error||t("rc_import_err")),"err"); return; }
+  toast(t("rc_imported", Object.keys(j.applied||{}).length),"ok");
+  if(j.errors && j.errors.length) toast(t("rc_import_errors", j.errors.length),"err");
+  input.value="";
+  await refresh();
+}
+
 /* ---------------- Soporte (reportes a GitHub) ---------------- */
 function renderSoporte(){
   const gh = STATE.github||{};
@@ -1899,6 +1977,8 @@ function wire(){
   if(g("fToggleBtn"))g("fToggleBtn").onclick=()=>run(`/filter ${STATE.filtersEnabled===false?"on":"off"}`,t("toast_toggled"));
   if(g("cmdRun")){const rc=()=>{const l=g("cmdIn").value.trim(); if(l){run(l); g("cmdIn").value="";}}; g("cmdRun").onclick=rc; g("cmdIn").onkeydown=e=>{if(e.key==="Enter")rc();};}
   if(g("tomlEd")){ loadSettings(); g("tomlSave").onclick=saveSettings; g("tomlReload").onclick=loadSettings; }
+  if(g("rcExport")) g("rcExport").onclick=exportRoomConfig;
+  if(g("rcImport")) g("rcImport").onclick=importRoomConfig;
   if(g("motdEd")){ loadMotd(); g("motdSave").onclick=saveMotd; }
   if(g("botSave")){ loadBots(); g("botSave").onclick=saveBot; g("botSelect").onchange=()=>{ BOTID=parseInt(g("botSelect").value)||0; loadBot(); }; g("botNew").onclick=newBot; g("botDel").onclick=delBot; g("botProvider").onchange=()=>applyBotDefaults(true); }
   if(g("scList")){

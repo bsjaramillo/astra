@@ -432,6 +432,43 @@ async fn handle_admin_route(
                 }
             }
         }
+        // ── Perfil de configuración de sala (export/import JSON) ────────
+        ("GET", "/admin/roomconfig") => {
+            let json = crate::roomconfig::export_json(ctx);
+            let body = format!("{{\"config\":{}}}", json);
+            send_http_json(stream, 200, &body).await?;
+        }
+        (m, "/admin/roomconfig") if m.eq_ignore_ascii_case("POST") => {
+            let v: serde_json::Value = match serde_json::from_str(&req.body) {
+                Ok(v) => v,
+                Err(e) => {
+                    let body = format!(
+                        "{{\"error\":\"invalid JSON: {}\"}}",
+                        json_escape(&e.to_string())
+                    );
+                    send_http_json(stream, 400, &body).await?;
+                    return Ok(());
+                }
+            };
+            let Some(config) = v.get("config") else {
+                send_http_json(stream, 400, "{\"error\":\"missing 'config'\"}").await?;
+                return Ok(());
+            };
+            match crate::roomconfig::import_json(ctx, &config.to_string()) {
+                Ok(report) => {
+                    let out = serde_json::json!({
+                        "ok": true,
+                        "applied": report.applied,
+                        "errors": report.errors,
+                    });
+                    send_http_json(stream, 200, &out.to_string()).await?;
+                }
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
         (m, "/admin/issue") if m.eq_ignore_ascii_case("POST") => {
             let title = json_field(&req.body, "title").unwrap_or_default();
             let body = json_field(&req.body, "body").unwrap_or_default();

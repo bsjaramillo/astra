@@ -28,6 +28,7 @@ pub mod admin;
 pub mod handler;
 pub mod panel;
 pub mod protocol;
+pub mod roomconfig;
 pub mod ws;
 pub mod ws_outbound;
 
