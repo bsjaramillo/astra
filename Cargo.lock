@@ -146,7 +146,7 @@ checksum = "b0f477b951e452a0b6b4a10b53ccd569042d1d01729b519e02074a9c0958a063"
 
 [[package]]
 name = "astra"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "anyhow",
  "astra-admission",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "astra-admission"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "astra-scripting",
  "rand 0.8.8",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "astra-bot"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "astra-commands",
  "astra-scripting",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "astra-captcha"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "image",
  "rand 0.8.8",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "astra-commands"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "anyhow",
  "astra-scripting",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "astra-link"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "aes",
  "anyhow",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "astra-scripting"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "astra-udp"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "astra-web"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "anyhow",
  "astra-admission",
@@ -2719,7 +2719,7 @@ dependencies = [
 
 [[package]]
 name = "proto-ares"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "aes",
  "byteorder",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.2.11-beta.1"
+version = "0.2.11-beta.2"
 dependencies = [
  "anyhow",
  "astra-captcha",
@@ -4679,18 +4679,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.60"
+version = "0.8.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6400fc4bb7426f6faac3fb07566122bb18622e3022bd2c36426a92ed489b1dbe"
+checksum = "879fb705ce98c32e41ebdb970fbe1204f8492423b314c6ab0354c3e7b5542866"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.60"
+version = "0.8.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99c27cc7525bad4df59a45e073c45b2c2aa820efb588234cc23a547ec69a34db"
+checksum = "708882a28301d604fa039cc7727607a98d04c4b86dc76ec9cc683f805d709759"
 dependencies = [
  "proc-macro2",
  "quote",
