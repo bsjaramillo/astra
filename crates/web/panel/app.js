@@ -233,7 +233,6 @@ const I18N = {
     sc_state_active:"Activo", sc_state_error:"Error", sc_state_loaded:"Cargado", sc_state_disk:"En disco", sc_state_unloaded:"Descargado",
     sc_view:"Ver código", sc_reload:"Recargar", sc_unload:"Descargar", sc_load:"Cargar",
     sc_folder:"carpeta", sc_file:"archivo", sc_files:"{0} archivo(s)",
-    sc_source_title:"Código de {0}",
     sc_community_h:"🌐 Comunidad",
     sc_community_note:"Scripts públicos de GitHub con el topic <code>areschatscript</code>. Se instalan en <code>scripts/&lt;repo&gt;/</code> y se cargan solos.",
     sc_search_ph:"Buscar scripts (ej. trivia, moderación…)", sc_search_btn:"Buscar", sc_searching:"Buscando…",
@@ -242,6 +241,14 @@ const I18N = {
     sc_installed_ok:"Script instalado y cargado.", sc_install_err:"no se pudo instalar",
     sc_load_ok:"Script cargado.", sc_unload_ok:"Script descargado.",
     sc_kill_confirm:"¿Descargar el script '{0}' de memoria?", sc_error_label:"Error",
+    sc_edit:"✏️ Editar", sc_edit_file:"Archivo",
+    ed_title:"Editar {0}", ed_unsaved:"sin guardar",
+    ed_save:"Guardar", ed_save_reload:"Guardar y recargar", ed_revert:"Revertir",
+    ed_saved:"Guardado.", ed_saved_reloaded:"Guardado y recargado.",
+    ed_saved_no_reload:"Guardado, pero no se pudo recargar: {0}",
+    ed_revert_confirm:"¿Descartar los cambios sin guardar?",
+    ed_discard_confirm:"Hay cambios sin guardar. ¿Descartar?",
+    ed_load_err:"no se pudo cargar", ed_no_editor:"El editor no está disponible.",
 
     nav_soporte:"Soporte",
     sup_h:"Soporte", sup_sub:"Reportá un problema o sugerí una mejora para Astra.",
@@ -483,7 +490,6 @@ const I18N = {
     sc_state_active:"Active", sc_state_error:"Error", sc_state_loaded:"Loaded", sc_state_disk:"On disk", sc_state_unloaded:"Unloaded",
     sc_view:"View code", sc_reload:"Reload", sc_unload:"Unload", sc_load:"Load",
     sc_folder:"folder", sc_file:"file", sc_files:"{0} file(s)",
-    sc_source_title:"Source of {0}",
     sc_community_h:"🌐 Community",
     sc_community_note:"Public GitHub scripts tagged with <code>areschatscript</code>. They install to <code>scripts/&lt;repo&gt;/</code> and load automatically.",
     sc_search_ph:"Search scripts (e.g. trivia, moderation…)", sc_search_btn:"Search", sc_searching:"Searching…",
@@ -492,6 +498,14 @@ const I18N = {
     sc_installed_ok:"Script installed and loaded.", sc_install_err:"could not install",
     sc_load_ok:"Script loaded.", sc_unload_ok:"Script unloaded.",
     sc_kill_confirm:"Unload script '{0}' from memory?", sc_error_label:"Error",
+    sc_edit:"✏️ Edit", sc_edit_file:"File",
+    ed_title:"Edit {0}", ed_unsaved:"unsaved",
+    ed_save:"Save", ed_save_reload:"Save & reload", ed_revert:"Revert",
+    ed_saved:"Saved.", ed_saved_reloaded:"Saved and reloaded.",
+    ed_saved_no_reload:"Saved, but reload failed: {0}",
+    ed_revert_confirm:"Discard unsaved changes?",
+    ed_discard_confirm:"There are unsaved changes. Discard?",
+    ed_load_err:"could not load", ed_no_editor:"The editor is not available.",
 
     nav_soporte:"Support",
     sup_h:"Support", sup_sub:"Report a problem or suggest an improvement for Astra.",
@@ -1607,23 +1621,137 @@ function renderScriptsList(){
     if(s.mainFile) meta.push(esc(s.mainFile));
     const err=s.error?`<div class="warnbox" style="margin:9px 0 0">${t("sc_error_label")}: ${esc(s.error)}</div>`:"";
     const actions=s.loaded
-      ? `<button class="btn sm" data-scview="${esc(s.name)}">${t("sc_view")}</button>
+      ? `<button class="btn sm" data-scedit="${esc(s.name)}" data-scfile="${esc(s.mainFile||"")}">${t("sc_edit")}</button>
          <button class="btn sm" data-scload="${esc(s.name)}">${t("sc_reload")}</button>
          <button class="btn sm danger" data-sckill="${esc(s.name)}">${t("sc_unload")}</button>`
-      : `<button class="btn sm" data-scview="${esc(s.name)}">${t("sc_view")}</button>
+      : `<button class="btn sm" data-scedit="${esc(s.name)}" data-scfile="${esc(s.mainFile||"")}">${t("sc_edit")}</button>
          <button class="btn sm primary" data-scload="${esc(s.name)}">${t("sc_load")}</button>`;
     return `<div class="ucard"><div class="uhead"><span class="uname">${esc(s.name)}</span>${scStateBadge(s.state)}</div>
       <div class="umeta">${meta.join(" · ")}</div>
       <div class="uactions">${actions}</div>${err}</div>`;
   }).join("");
 }
-async function viewScript(name, file){
+/* Editor de scripts (CodeMirror 5). */
+let EDIT=null; // {name, file, files, original, cm, suppress}
+function edAvailable(){ return typeof CodeMirror!=="undefined"; }
+function editorMode(file){
+  const ext=(""+(file||"")).split(".").pop().toLowerCase();
+  if(ext==="js") return "javascript";
+  if(ext==="json") return {name:"javascript", json:true};
+  if(ext==="html"||ext==="xml") return "xml";
+  if(ext==="css") return "css";
+  if(ext==="md") return "markdown";
+  return null; // texto plano
+}
+function edSetDirty(d){
+  const el=document.getElementById("edDirty");
+  if(el){ el.classList.toggle("hidden", !d); el.textContent=t("ed_unsaved"); }
+}
+function edIsDirty(){
+  return !!(EDIT && EDIT.cm && EDIT.cm.getValue() !== EDIT.original);
+}
+function edConfirmDiscard(){
+  return !edIsDirty() || confirm(t("ed_discard_confirm"));
+}
+function edClose(){
+  if(!edConfirmDiscard()) return;
+  const modal=document.getElementById("editor");
+  if(modal) modal.classList.add("hidden");
+  // Restaurar el textarea (CodeMirror lo reemplaza al abrir de nuevo).
+  if(EDIT && EDIT.cm){ try{ EDIT.cm.toTextArea(); }catch(e){} }
+  EDIT=null;
+}
+function edFillFileSelect(files, current){
+  const sel=document.getElementById("edFile"); if(!sel) return;
+  sel.innerHTML=(files||[]).map(f=>`<option value="${esc(f)}"${f===current?" selected":""}>${esc(f)}</option>`).join("");
+}
+async function edFetch(name, file){
   const qs="name="+encodeURIComponent(name)+(file?"&file="+encodeURIComponent(file):"");
   const r=await api("/admin/scripts/source?"+qs);
   const j=await r.json().catch(()=>({error:"error"}));
-  if(!r.ok){ toast(t("err_prefix")+(j.error||t("common_error")),"err"); return; }
-  showOutput(t("sc_source_title",j.name||name)+(j.file?" — "+j.file:""), [j.source||""]);
+  if(!r.ok) throw new Error(j.error||t("ed_load_err"));
+  return j;
 }
+function edNewCm(){
+  const ta=document.getElementById("edArea");
+  const cm=CodeMirror.fromTextArea(ta,{
+    lineNumbers:true, theme:"astra", indentUnit:2, tabSize:2, smartIndent:true,
+    lineWrapping:true, matchBrackets:true, autoCloseBrackets:true,
+    extraKeys:{
+      "Ctrl-S":()=>saveScript(false), "Cmd-S":()=>saveScript(false),
+      "Shift-Ctrl-S":()=>saveScript(true), "Shift-Cmd-S":()=>saveScript(true),
+      "Tab":(c)=>{ c.replaceSelection("  "); }
+    }
+  });
+  cm.on("change", ()=>{ if(EDIT && !EDIT.suppress) edSetDirty(edIsDirty()); });
+  return cm;
+}
+async function openEditor(name, file){
+  if(!edAvailable()){ toast(t("ed_no_editor"),"err"); return; }
+  let j;
+  try{ j=await edFetch(name, file||""); }
+  catch(e){ toast(t("err_prefix")+(e.message||t("ed_load_err")),"err"); return; }
+
+  document.getElementById("edTitle").textContent=t("ed_title", j.name||name);
+  edFillFileSelect(j.files, j.file);
+  const cm=(EDIT && EDIT.cm) ? EDIT.cm : edNewCm();
+  EDIT={name:j.name||name, file:j.file, files:j.files||[], original:"", cm, suppress:true};
+  cm.setOption("mode", editorMode(j.file));
+  cm.setValue(j.source||"");
+  EDIT.original=j.source||"";
+  EDIT.suppress=false;
+  cm.clearHistory();
+  edSetDirty(false);
+  document.getElementById("editor").classList.remove("hidden");
+  setTimeout(()=>cm.refresh(),0);
+  cm.focus();
+}
+async function edSwitchFile(file){
+  if(!EDIT || file===EDIT.file) return;
+  if(!edConfirmDiscard()){
+    const sel=document.getElementById("edFile"); if(sel) sel.value=EDIT.file;
+    return;
+  }
+  let j;
+  try{ j=await edFetch(EDIT.name, file); }
+  catch(e){ toast(t("err_prefix")+(e.message||t("ed_load_err")),"err"); return; }
+  EDIT.file=j.file; EDIT.original=j.source||"";
+  EDIT.suppress=true;
+  EDIT.cm.setOption("mode", editorMode(j.file));
+  EDIT.cm.setValue(j.source||"");
+  EDIT.suppress=false;
+  EDIT.cm.clearHistory();
+  edSetDirty(false);
+  setTimeout(()=>EDIT.cm.refresh(),0);
+}
+async function saveScript(reload){
+  if(!EDIT) return;
+  const body={name:EDIT.name, file:EDIT.file, source:EDIT.cm.getValue(), reload:!!reload};
+  const st=document.getElementById("edStatus"); if(st) st.textContent=reload?t("ed_reloading"):"";
+  const r=await api("/admin/scripts/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({error:"error"}));
+  if(st) st.textContent="";
+  if(!r.ok){ toast(t("err_prefix")+(j.error||t("err_save")),"err"); return; }
+  EDIT.original=body.source;
+  edSetDirty(false);
+  if(reload && j.reloadError){ toast(t("ed_saved_no_reload",j.reloadError),"err"); }
+  else if(reload){ toast(t("ed_saved_reloaded"),"ok"); }
+  else{ toast(t("ed_saved"),"ok"); }
+  if(reload) await loadScripts();
+}
+async function edRevert(){
+  if(!EDIT) return;
+  if(edIsDirty() && !confirm(t("ed_revert_confirm"))) return;
+  try{
+    const j=await edFetch(EDIT.name, EDIT.file);
+    EDIT.original=j.source||"";
+    EDIT.suppress=true;
+    EDIT.cm.setValue(j.source||"");
+    EDIT.suppress=false;
+    edSetDirty(false);
+  }catch(e){ toast(t("err_prefix")+(e.message||t("ed_load_err")),"err"); }
+}
+
 async function setScriptLoaded(name, load){
   const ep=load?"/admin/scripts/load":"/admin/scripts/kill";
   const r=await api(ep,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})});
@@ -1780,7 +1908,7 @@ function wire(){
     g("scSearch").onkeydown=e=>{ if(e.key==="Enter") searchCommunity(); };
     g("scList").onclick=e=>{
       const b=e.target.closest("button"); if(!b) return;
-      if(b.dataset.scview!==undefined) viewScript(b.dataset.scview);
+      if(b.dataset.scedit!==undefined) openEditor(b.dataset.scedit, b.dataset.scfile||"");
       else if(b.dataset.scload!==undefined) setScriptLoaded(b.dataset.scload,true);
       else if(b.dataset.sckill!==undefined){ if(confirm(t("sc_kill_confirm",b.dataset.sckill))) setScriptLoaded(b.dataset.sckill,false); }
     };
@@ -1788,6 +1916,18 @@ function wire(){
       const b=e.target.closest("button"); if(!b||b.dataset.scinstall===undefined) return;
       installCommunity(b.dataset.scinstall);
     };
+  }
+  if(g("editor")){
+    g("edClose").onclick=edClose;
+    g("editor").onclick=e=>{ if(e.target.id==="editor") edClose(); };
+    if(g("edFile")) g("edFile").onchange=()=>edSwitchFile(g("edFile").value);
+    g("edSave").onclick=()=>saveScript(false);
+    g("edSaveReload").onclick=()=>saveScript(true);
+    g("edRevert").onclick=edRevert;
+    // Textos que dependen del idioma (el modal vive fuera del re-render de #view).
+    g("edRevert").textContent=t("ed_revert");
+    g("edSave").textContent=t("ed_save");
+    g("edSaveReload").textContent=t("ed_save_reload");
   }
   if(g("botAvatarFile")){ g("botAvatarFile").onchange=()=>{ const f=g("botAvatarFile").files[0]; if(!f) return; const rd=new FileReader(); rd.onload=()=>{ const url=rd.result||""; BOT_AVATAR=url.split(",")[1]||""; const img=g("botAvatarImg"); if(img) img.src=url; }; rd.readAsDataURL(f); }; }
   if(g("botAvatarClear")){ g("botAvatarClear").onclick=()=>{ BOT_AVATAR=""; const img=g("botAvatarImg"); if(img) img.removeAttribute("src"); }; }

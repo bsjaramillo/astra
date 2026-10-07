@@ -26,3 +26,25 @@ pub const ADMIN_HTML: &str = include_str!("../panel/index.html");
 pub const ADMIN_CSS: &str = include_str!("../panel/style.css");
 /// JavaScript del panel (`GET /admin/app.js`).
 pub const ADMIN_JS: &str = include_str!("../panel/app.js");
+
+// ── CodeMirror 5 (editor de scripts) ──────────────────────────────────────
+// Vendorizado en `crates/web/panel/vendor/` (MIT, ver LICENSE.txt) y servido
+// como assets estáticos sin token, igual que `style.css`/`app.js`.
+/// Núcleo de CodeMirror (`GET /admin/vendor/codemirror.js`).
+pub const ADMIN_CM_JS: &str = include_str!("../panel/vendor/codemirror.min.js");
+/// Estilos base de CodeMirror (`GET /admin/vendor/codemirror.css`).
+pub const ADMIN_CM_CSS: &str = include_str!("../panel/vendor/codemirror.min.css");
+/// Modo JavaScript/JSON (`GET /admin/vendor/mode/javascript.js`).
+pub const ADMIN_CM_MODE_JS: &str = include_str!("../panel/vendor/javascript.min.js");
+/// Modo XML/HTML (`GET /admin/vendor/mode/xml.js`).
+pub const ADMIN_CM_MODE_XML: &str = include_str!("../panel/vendor/xml.min.js");
+/// Modo CSS (`GET /admin/vendor/mode/css.js`).
+pub const ADMIN_CM_MODE_CSS: &str = include_str!("../panel/vendor/css.min.js");
+/// Modo Markdown (`GET /admin/vendor/mode/markdown.js`).
+pub const ADMIN_CM_MODE_MD: &str = include_str!("../panel/vendor/markdown.min.js");
+/// Addon de cierre automático de paréntesis (`GET /admin/vendor/addon/closebrackets.js`).
+pub const ADMIN_CM_ADDON_CLOSEBRACKETS: &str =
+    include_str!("../panel/vendor/closebrackets.min.js");
+/// Addon de resaltado de paréntesis (`GET /admin/vendor/addon/matchbrackets.js`).
+pub const ADMIN_CM_ADDON_MATCHBRACKETS: &str =
+    include_str!("../panel/vendor/matchbrackets.min.js");

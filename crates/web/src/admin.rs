@@ -1436,16 +1436,35 @@ pub fn scripts_json(ctx: &AppContext) -> String {
     .to_string()
 }
 
-/// `GET /admin/scripts/source?name=<name>&file=<rel>` → JSON
-/// `{name, file, source, files:[…]}`.
+/// Extensiones editables desde el panel (solo texto; evita corromper assets
+/// binarios que un script pueda traer en su carpeta).
+const EDITABLE_EXTENSIONS: &[&str] = &[
+    "js", "json", "txt", "md", "html", "css", "csv", "ini", "toml", "xml", "yml", "yaml",
+];
+
+/// ¿El archivo (ruta relativa) tiene una extensión editable?
+fn is_editable_file(rel: &str) -> bool {
+    std::path::Path::new(rel)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| EDITABLE_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+        .unwrap_or(false)
+}
+
+/// Resuelve el archivo objetivo de un script para leer/guardar.
 ///
-/// `file` es opcional: sin él se sirve el archivo principal. La ruta relativa
-/// se valida para que nunca escape de la carpeta del script.
-pub fn script_source_json(
+/// Devuelve `(target, rel, files)`:
+/// - `target`: ruta absoluta del archivo.
+/// - `rel`: ruta relativa normalizada (la que se muestra/edita).
+/// - `files`: todos los archivos del script (relativos), para el selector.
+///
+/// `file` vacío = archivo principal. Valida el nombre y que `file` exista
+/// dentro de la carpeta del script, sin traversal.
+fn resolve_script_file(
     ctx: &AppContext,
     name: &str,
     file: &str,
-) -> Result<String, String> {
+) -> Result<(std::path::PathBuf, String, Vec<String>), String> {
     let name = name.trim();
     if !is_safe_script_name(name) {
         return Err("invalid script name".to_string());
@@ -1489,7 +1508,38 @@ pub fn script_source_json(
         return Err("invalid file".to_string());
     }
 
-    let target = base.join(&rel);
+    Ok((base.join(&rel), rel, files))
+}
+
+/// Traduce un error de escritura de un archivo de script a un mensaje
+/// accionable (mismo estilo que [`config_write_error`]).
+fn script_write_error(path: &std::path::Path, e: &std::io::Error) -> String {
+    let p = path.display();
+    if e.raw_os_error() == Some(30) {
+        return format!(
+            "no se puede guardar en {p}: el sistema de archivos es de SOLO LECTURA."
+        );
+    }
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        return format!(
+            "no se puede guardar en {p}: permiso denegado (revisa el dueño/permisos \
+             de la carpeta scripts del servidor)."
+        );
+    }
+    format!("no se pudo guardar {p}: {e}")
+}
+
+/// `GET /admin/scripts/source?name=<name>&file=<rel>` → JSON
+/// `{name, file, source, files:[…]}`.
+///
+/// `file` es opcional: sin él se sirve el archivo principal. La ruta relativa
+/// se valida para que nunca escape de la carpeta del script.
+pub fn script_source_json(
+    ctx: &AppContext,
+    name: &str,
+    file: &str,
+) -> Result<String, String> {
+    let (target, rel, files) = resolve_script_file(ctx, name, file)?;
     let meta = std::fs::metadata(&target).map_err(|_| "file not found".to_string())?;
     if meta.len() as usize > MAX_SCRIPT_SOURCE {
         return Err(format!(
@@ -1502,10 +1552,68 @@ pub fn script_source_json(
         .map_err(|e| format!("could not read file: {}", e))?;
 
     Ok(serde_json::json!({
-        "name": name,
+        "name": name.trim(),
         "file": rel,
         "source": source,
         "files": files,
+    })
+    .to_string())
+}
+
+/// `POST /admin/scripts/save` `{name, file, source, reload}` — escribe el
+/// archivo editado en disco (atómico) y, si `reload`, recarga el script para
+/// que el engine aplique el cambio en vivo.
+///
+/// Devuelve JSON `{ok, file, reloaded, reloadError}`. Un fallo al recargar no
+/// invalida el guardado: se informa en `reloadError`.
+pub fn script_save(
+    ctx: &AppContext,
+    name: &str,
+    file: &str,
+    source: &str,
+    reload: bool,
+) -> Result<String, String> {
+    let (target, rel, _files) = resolve_script_file(ctx, name, file)?;
+    if !is_editable_file(&rel) {
+        return Err(format!("file type not editable: {}", rel));
+    }
+    if source.len() > MAX_SCRIPT_SOURCE {
+        return Err(format!(
+            "file too large ({} bytes, max {})",
+            source.len(),
+            MAX_SCRIPT_SOURCE
+        ));
+    }
+
+    // Escritura atómica: `.tmp` + rename en el mismo directorio, para no dejar
+    // el archivo a medias si el proceso muere a mitad de la escritura.
+    let mut tmp_os = target.clone().into_os_string();
+    tmp_os.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_os);
+    std::fs::write(&tmp, source).map_err(|e| script_write_error(&target, &e))?;
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(script_write_error(&target, &e));
+    }
+
+    let mut reloaded = false;
+    let mut reload_error: Option<String> = None;
+    if reload {
+        let hooks = ctx.scripting_hooks.read().clone();
+        match hooks {
+            Some(h) => match (h.load)(name.trim()) {
+                Ok(_) => reloaded = true,
+                Err(e) => reload_error = Some(e),
+            },
+            None => reload_error = Some("scripting engine unavailable".to_string()),
+        }
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "file": rel,
+        "reloaded": reloaded,
+        "reloadError": reload_error,
     })
     .to_string())
 }
@@ -2004,5 +2112,69 @@ mod tests {
         let ctx = ctx_with_owner("secret");
         assert!(load_script(&ctx, "trivia").is_err());
         assert!(load_script(&ctx, "../evil").is_err());
+    }
+
+    #[test]
+    fn script_save_writes_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("astra_save_{}", std::process::id()));
+        let scripts = dir.join("scripts");
+        std::fs::create_dir_all(scripts.join("game")).unwrap();
+        std::fs::write(scripts.join("game").join("game.js"), "// old").unwrap();
+
+        let ctx = ctx_with_data_dir(&dir);
+        // Guardar el archivo principal sin recargar (no hay engine → Ok).
+        let v: serde_json::Value =
+            serde_json::from_str(&script_save(&ctx, "game", "", "// new main", false).unwrap())
+                .unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["file"], "game.js");
+        assert_eq!(
+            std::fs::read_to_string(scripts.join("game").join("game.js")).unwrap(),
+            "// new main"
+        );
+        // No debe quedar el temporal atrás.
+        assert!(!scripts.join("game").join("game.js.tmp").exists());
+
+        // Con reload=true pero sin engine: guarda igual y reporta reloadError.
+        let v: serde_json::Value = serde_json::from_str(
+            &script_save(&ctx, "game", "game.js", "// newer", true).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["reloaded"], false);
+        assert!(v["reloadError"].as_str().is_some());
+        assert_eq!(
+            std::fs::read_to_string(scripts.join("game").join("game.js")).unwrap(),
+            "// newer"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn script_save_rejects_bad_inputs() {
+        let dir = std::env::temp_dir().join(format!("astra_save_bad_{}", std::process::id()));
+        let scripts = dir.join("scripts");
+        std::fs::create_dir_all(scripts.join("game")).unwrap();
+        std::fs::write(scripts.join("game").join("game.js"), "// main").unwrap();
+        std::fs::write(scripts.join("game").join("logo.png"), "not really a png").unwrap();
+
+        let ctx = ctx_with_data_dir(&dir);
+        // Traversal en nombre y en archivo.
+        assert!(script_save(&ctx, "../evil", "", "x", false).is_err());
+        assert!(script_save(&ctx, "game", "../x", "x", false).is_err());
+        // Extensión no editable.
+        assert!(script_save(&ctx, "game", "logo.png", "x", false).is_err());
+        // Script inexistente.
+        assert!(script_save(&ctx, "nope", "", "x", false).is_err());
+        // Demasiado grande.
+        let big = "a".repeat(MAX_SCRIPT_SOURCE + 1);
+        assert!(script_save(&ctx, "game", "", &big, false).is_err());
+        // El archivo original no se tocó.
+        assert_eq!(
+            std::fs::read_to_string(scripts.join("game").join("game.js")).unwrap(),
+            "// main"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

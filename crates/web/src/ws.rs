@@ -311,6 +311,47 @@ async fn handle_admin_route(
         .await?;
         return Ok(());
     }
+    // CodeMirror 5 vendorizado (editor de scripts del panel). Assets públicos
+    // igual que style.css/app.js: sin token (la página de login también los
+    // referencia y no exponen datos del servidor).
+    let vendor: Option<(&str, &str)> = match path {
+        "/admin/vendor/codemirror.js" => Some((
+            "application/javascript; charset=utf-8",
+            crate::panel::ADMIN_CM_JS,
+        )),
+        "/admin/vendor/codemirror.css" => {
+            Some(("text/css; charset=utf-8", crate::panel::ADMIN_CM_CSS))
+        }
+        "/admin/vendor/mode/javascript.js" => Some((
+            "application/javascript; charset=utf-8",
+            crate::panel::ADMIN_CM_MODE_JS,
+        )),
+        "/admin/vendor/mode/xml.js" => Some((
+            "application/javascript; charset=utf-8",
+            crate::panel::ADMIN_CM_MODE_XML,
+        )),
+        "/admin/vendor/mode/css.js" => Some((
+            "application/javascript; charset=utf-8",
+            crate::panel::ADMIN_CM_MODE_CSS,
+        )),
+        "/admin/vendor/mode/markdown.js" => Some((
+            "application/javascript; charset=utf-8",
+            crate::panel::ADMIN_CM_MODE_MD,
+        )),
+        "/admin/vendor/addon/closebrackets.js" => Some((
+            "application/javascript; charset=utf-8",
+            crate::panel::ADMIN_CM_ADDON_CLOSEBRACKETS,
+        )),
+        "/admin/vendor/addon/matchbrackets.js" => Some((
+            "application/javascript; charset=utf-8",
+            crate::panel::ADMIN_CM_ADDON_MATCHBRACKETS,
+        )),
+        _ => None,
+    };
+    if let Some((ctype, body)) = vendor {
+        send_http_asset(stream, ctype, body.as_bytes()).await?;
+        return Ok(());
+    }
 
     if !crate::admin::is_enabled(ctx) {
         send_http_json(stream, 403, "{\"error\":\"admin panel disabled (no owner password set)\"}").await?;
@@ -621,6 +662,22 @@ async fn handle_admin_route(
             let name = query_param(&req.path, "name").unwrap_or_default();
             let file = query_param(&req.path, "file").unwrap_or_default();
             match crate::admin::script_source_json(ctx, &name, &file) {
+                Ok(json) => send_http_json(stream, 200, &json).await?,
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));
+                    send_http_json(stream, 400, &body).await?;
+                }
+            }
+        }
+        (m, "/admin/scripts/save") if m.eq_ignore_ascii_case("POST") => {
+            let name = json_field(&req.body, "name").unwrap_or_default();
+            let file = json_field(&req.body, "file").unwrap_or_default();
+            let source = json_field(&req.body, "source").unwrap_or_default();
+            let reload = serde_json::from_str::<serde_json::Value>(&req.body)
+                .ok()
+                .and_then(|v| v.get("reload").and_then(|b| b.as_bool()))
+                .unwrap_or(false);
+            match crate::admin::script_save(ctx, &name, &file, &source, reload) {
                 Ok(json) => send_http_json(stream, 200, &json).await?,
                 Err(e) => {
                     let body = format!("{{\"error\":\"{}\"}}", json_escape(&e));

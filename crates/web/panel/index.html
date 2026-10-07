@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Astra · Administración</title>
 <link rel="stylesheet" href="/admin/style.css">
+<link rel="stylesheet" href="/admin/vendor/codemirror.css">
 </head>
 <body>
 
@@ -52,8 +53,35 @@
   </div>
 </div>
 
+<div id="editor" class="modal hidden">
+  <div class="modalbox wide">
+    <div class="modalhead">
+      <b id="edTitle"></b>
+      <span id="edDirty" class="chip warn hidden"></span>
+      <div class="spacer"></div>
+      <button class="iconbtn" id="edClose" aria-label="Close">✕</button>
+    </div>
+    <div class="edbar">
+      <select id="edFile" class="sel sm"></select>
+      <span class="spacer"></span>
+      <span id="edStatus" class="sub" style="margin:0"></span>
+      <button class="btn sm" id="edRevert"></button>
+      <button class="btn sm" id="edSave"></button>
+      <button class="btn sm primary" id="edSaveReload"></button>
+    </div>
+    <div class="edwrap"><textarea id="edArea" spellcheck="false"></textarea></div>
+  </div>
+</div>
+
 <div id="toasts"></div>
 
+<script src="/admin/vendor/codemirror.js"></script>
+<script src="/admin/vendor/mode/javascript.js"></script>
+<script src="/admin/vendor/mode/xml.js"></script>
+<script src="/admin/vendor/mode/css.js"></script>
+<script src="/admin/vendor/mode/markdown.js"></script>
+<script src="/admin/vendor/addon/closebrackets.js"></script>
+<script src="/admin/vendor/addon/matchbrackets.js"></script>
 <script src="/admin/app.js"></script>
 </body>
 </html>

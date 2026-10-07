@@ -176,6 +176,36 @@
   .modalhead b{font-size:15px}
   #modalBody{margin:0;padding:14px;overflow:auto;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg)}
 
+  /* ---- Editor de scripts (CodeMirror) ---- */
+  .modalbox.wide{max-width:980px}
+  .edbar{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .edbar .sel{max-width:340px}
+  .edwrap{flex:1;min-height:0;overflow:hidden}
+  .edwrap .CodeMirror{height:62vh;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  /* Tema oscuro propio alineado a las variables del panel. */
+  .cm-s-astra.CodeMirror{background:var(--bg);color:var(--fg)}
+  .cm-s-astra .CodeMirror-gutters{background:var(--surface2);border-right:1px solid var(--border);border-left:none}
+  .cm-s-astra .CodeMirror-linenumber{color:var(--mut2)}
+  .cm-s-astra .CodeMirror-cursor{border-left:1px solid var(--fg)}
+  .cm-s-astra .CodeMirror-selected,.cm-s-astra.CodeMirror-focused .CodeMirror-selected{background:rgba(255,122,26,.22)}
+  .cm-s-astra .CodeMirror-line::selection,.cm-s-astra .CodeMirror-line>span::selection{background:rgba(255,122,26,.28)}
+  .cm-s-astra .CodeMirror-matchingbracket{color:var(--ok)!important;border-bottom:1px solid var(--ok)}
+  .cm-s-astra .cm-keyword{color:#ff9a3d}
+  .cm-s-astra .cm-atom,.cm-s-astra .cm-number{color:#c792ea}
+  .cm-s-astra .cm-def{color:#82aaff}
+  .cm-s-astra .cm-variable,.cm-s-astra .cm-variable-2{color:var(--fg)}
+  .cm-s-astra .cm-property{color:#7fdbca}
+  .cm-s-astra .cm-operator{color:#89ddff}
+  .cm-s-astra .cm-string,.cm-s-astra .cm-string-2{color:#c3e88d}
+  .cm-s-astra .cm-comment{color:var(--mut2);font-style:italic}
+  .cm-s-astra .cm-tag{color:#ff5257}
+  .cm-s-astra .cm-attribute{color:#ffb454}
+  .cm-s-astra .cm-qualifier,.cm-s-astra .cm-builtin{color:#82aaff}
+  .cm-s-astra .cm-meta{color:var(--mut)}
+  .cm-s-astra .cm-header{color:#ffb454;font-weight:700}
+  .cm-s-astra .cm-link{color:#82aaff}
+  .cm-s-astra .cm-url{color:#7fdbca}
+
   /* ---- Ajustes de ancho para desktop ----
      Van al FINAL de la hoja a propósito: son overrides de reglas definidas
      más arriba (.tiles, .card) y con la misma especificidad gana la última,
